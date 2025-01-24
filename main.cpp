@@ -7,15 +7,24 @@
 
 #pragma once
 #include <d3d11_4.h>
+#include <initguid.h> // Required to define GUIDs
 #include <Windows.Graphics.DirectX.Direct3D11.interop.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <windows.graphics.capture.interop.h>
 #include <unknwn.h>
 
+#include <Windows.h>
+#include <winrt/Windows.UI.WindowManagement.h>
+#include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
+
+DEFINE_GUID(CLSID_GraphicsCaptureItemInterop,
+    0x79c3f95b, 0x31f7, 0x4ec2, 0xa4, 0x56, 0xcd, 0x93, 0x85, 0xa6, 0x4c, 0x57);
 
 // creates the D3D device/context, logs errors, and returns success/failure.
 bool SetupD3D(
@@ -96,6 +105,75 @@ bool SetupDXGI(winrt::com_ptr<ID3D11Device> d3dDevice) {
     }
 }
 
+HWND fetchForegroundWindow() {
+    HWND foregroundWindow = NULL;
+    try {
+        std::wcout << L"[fetchForegroundWindow] Fetching the foreground window..." << std::endl;
+        foregroundWindow = GetForegroundWindow();
+        if (foregroundWindow == NULL) {
+            std::wcerr << L"[fetchForegroundWindow] GetForegroundWindow returned NULL." << std::endl;
+            return NULL;
+        }
+    }catch (winrt::hresult_error& e) {
+        std::wcerr << L"[fetchForegroundWindow] Failed to fetch the foreground window. HRESULT: 0x" << std::hex << e.code() << std::endl;
+    }
+    return foregroundWindow;
+}
+
+uint64_t GetWindowIdFromHWND(HWND hwnd) {
+    if (!hwnd) {
+		std::wcerr << L"[GetWindowIdFromHWND] Invalid HWND." << std::endl;
+		return NULL;
+    }
+	return reinterpret_cast<uint64_t>(hwnd);
+}
+
+winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateCaptureItemForWindow(HWND hwnd) {
+    using namespace winrt::Windows::Graphics::Capture;
+
+    if (!hwnd || !IsWindow(hwnd)) {
+        throw std::invalid_argument("Invalid HWND passed to CreateCaptureItemForWindow.");
+    }
+
+    try {
+        std::wcout << L"[CreateCaptureItemForWindow] Creating a GraphicsCaptureItem for the window..." << std::endl;
+        auto interopFactory = winrt::get_activation_factory<
+            winrt::Windows::Graphics::Capture::GraphicsCaptureItem,
+            IGraphicsCaptureItemInterop>();
+
+        if (!interopFactory) {
+            throw std::runtime_error("Failed to get the IGraphicsCaptureItemInterop factory.");
+        }
+
+        std::wcout << L"[CreateCaptureItemForWindow] Activation factory obtained successfully." << std::endl;
+
+        winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{ nullptr };
+
+        HRESULT hr = interopFactory->CreateForWindow(
+            hwnd,
+            winrt::guid_of<winrt::Windows::Graphics::Capture::GraphicsCaptureItem>(),
+            winrt::put_abi(item)
+        );
+
+        if (FAILED(hr)) {
+            std::wcerr << L"[CreateCaptureItemForWindow] Failed to create GraphicsCaptureItem for the window. HRESULT: 0x" << std::hex << hr << std::endl;
+            return nullptr;
+        }
+
+        std::wcout << L"[CreateCaptureItemForWindow] GraphicsCaptureItem created successfully." << std::endl;
+        return item;
+    }
+    catch (const winrt::hresult_error& e) {
+        std::wcerr << L"[CreateCaptureItemForWindow] Failed to create GraphicsCaptureItem for the window. HRESULT: 0x" << std::hex << e.code() << std::endl;
+    }
+    catch (const std::exception& ex) {
+        std::cerr << "[CreateCaptureItemForWindow] std::exception: " << ex.what() << std::endl;
+    }
+    catch (...) {
+        std::wcerr << L"[CreateCaptureItemForWindow] Unknown exception occurred." << std::endl;
+        throw;
+    }
+}
 
 int main()
 {
@@ -111,10 +189,10 @@ int main()
 
     // Call the function that sets up D3D and DXGI
     std::wcout << L"[main] Setting up D3D device/context..." << std::endl;
-    bool success = SetupD3D(d3dDevice, d3dContext, selectedFeatureLevel);
-    bool success2 = SetupDXGI(d3dDevice);
+    bool successD3D = SetupD3D(d3dDevice, d3dContext, selectedFeatureLevel);
+    bool successDXGI = SetupDXGI(d3dDevice);
     
-    if (success) {
+    if (successD3D) {
         std::wcout << L"[main] SetupD3D succeeded." << std::endl;
     }
     else {
@@ -122,7 +200,7 @@ int main()
         return -1;
     }
 
-    if (success2) {
+    if (successDXGI) {
         std::wcout << L"[main] SetupDXGI succeeded." << std::endl;
     }
     else {
@@ -131,9 +209,12 @@ int main()
     }
 
     std::wcout << L"[main] SetupD3D and DXGIDevice succeeded. You can now use the D3D/DXGIDevice device/context." << std::endl;
-
-    // Everything else in your program can proceed here
-    // Cleanup is automatic with winrt::com_ptr
-
+    HWND hwnd = fetchForegroundWindow();
+    std::wcout << L"[main] Foreground window handle and windowID: " << hwnd << std::endl;
+    uint64_t windowID = GetWindowIdFromHWND(hwnd);
+	std::wcout << L"[main] Window ID: " << windowID << std::endl;
+    auto item = CreateCaptureItemForWindow(hwnd);
+	std::wcout << L"[main] GraphicsCaptureItem created successfully." << std::endl;
+    
     return 0;
 }
