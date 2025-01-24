@@ -1,10 +1,7 @@
 ========================================================================
-    C++/WinRT DisplayCaptureProject Project Overview
+                        P2P Cloud Gaming
 ========================================================================
 
-This project demonstrates how to get started consuming Windows Runtime 
-classes directly from standard C++, using platform projection headers
-generated from Windows SDK metadata files.
 
 Steps to generate and consume SDK platform projection:
 1. Build project initially to generate platform projection headers into
