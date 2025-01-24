@@ -192,6 +192,26 @@ winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool createD3DFramePool
     }
 }
 
+winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool createFreeThreadedFramePool(winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice d3dDevice, winrt::Windows::Graphics::SizeInt32 size) {
+    int numberOfBuffers = 2;
+    winrt::Windows::Graphics::DirectX::DirectXPixelFormat pixelFormat = winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized;
+    std::wcout << L"[createD3DFramePool] Creating FreeThreaded D3D11CaptureFramePool..." << std::endl;
+    try {
+        static winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool framePool = winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool::CreateFreeThreaded(d3dDevice, pixelFormat, numberOfBuffers, size);
+        std::wcout << L"[createD3DFramePool] FreeThreaded D3D11CaptureFramePool created successfully." << std::endl;
+        return framePool;
+    }
+    catch (const winrt::hresult_error& e) {
+        std::wcerr << L"[createD3DFramePool] Failed to create FreeThreaded D3D11CaptureFramePool. HRESULT: 0x" << std::hex << e.code() << std::endl;
+    }
+    catch (const std::exception& ex) {
+        std::cerr << "[createD3DFramePool] std::exception: " << ex.what() << std::endl;
+    }
+    catch (...) {
+        std::wcerr << L"[createD3DFramePool] Unknown exception occurred." << std::endl;
+    }
+}
+
 //static winrt::Windows::UI::WindowId GetWindowIdForHWND(HWND hwnd) {
 //    if (!hwnd) {
 //        throw std::invalid_argument("Invalid HWND passed to GetWindowIdForHWND.");
@@ -227,6 +247,26 @@ winrt::Windows::Graphics::Capture::GraphicsCaptureSession createCaptureSession(w
         std::wcerr << L"[createCaptureSession] Unknown exception occurred." << std::endl;
     }
 }
+
+winrt::event_token FrameArrivedEventRegistration(winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& freeThreadedFramePool) {
+    std::wcout << L"[FrameArrivedEventRegistration] Registering FrameArrived event..." << std::endl;
+    //Create the event handler
+    auto handler = winrt::Windows::Foundation::TypedEventHandler<
+        winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool,
+        winrt::Windows::Foundation::IInspectable>(
+			[](auto&& sender, auto&& args) {
+				std::wcout << L"[FrameArrivedEventRegistration] WE GOT THE FRAME HOORAYYYY." << std::endl;
+				auto frame = sender.TryGetNextFrame();
+                if (frame) {
+					auto time = frame.SystemRelativeTime();
+					std::wcout << L"[FrameArrivedEventRegistration] Frame arrived at time: " << time.count() << std::endl;
+                }
+			});
+
+	return freeThreadedFramePool.FrameArrived(handler);
+}
+
+
 
 int main()
 {
@@ -272,10 +312,25 @@ int main()
 
     //D3D11 Framepool creation
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice IDirectDevice = createIDirect3DDevice(m_dxgiDevice);
-    winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool framePool = createD3DFramePool(IDirectDevice, item.Size());
+    //winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool framePool = createD3DFramePool(IDirectDevice, item.Size());
+    winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool freeThreadedFramePool = createFreeThreadedFramePool(IDirectDevice, item.Size());
 
     //Create graphics capture session
-    winrt::Windows::Graphics::Capture::GraphicsCaptureSession session = createCaptureSession(item, framePool);
+    //winrt::Windows::Graphics::Capture::GraphicsCaptureSession session = createCaptureSession(item, framePool);
+    winrt::Windows::Graphics::Capture::GraphicsCaptureSession session = createCaptureSession(item, freeThreadedFramePool);
+    
+    //Registering FrameArrived Event.
+    winrt::event_token token = FrameArrivedEventRegistration(freeThreadedFramePool);
+	std::wcout << L"[main] FrameArrived event registered successfully." << std::endl;
+
+    //TESTING CAPTURE SESSION
+	session.StartCapture();
+	std::wcout << L"[main] Capture session started." << std::endl;
+
+	for (int i = 0; i < 10; i++) {
+		Sleep(1000);
+		std::wcout << L"[main] Still Capturing..." << std::endl;
+	}
     
     return 0;
 }
