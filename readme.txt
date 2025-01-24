@@ -1,27 +1,24 @@
-========================================================================
-                        P2P Cloud Gaming
-========================================================================
+
+# P2P Cloud Gaming Service
+
+P2P Cloud Gaming Service is a project that enables seamless cloud gaming by capturing, streaming, and mirroring gameplay across devices using a peer-to-peer (P2P) network. It provides an efficient solution for remote gaming with low latency and dynamic matchmaking.
 
 
-Steps to generate and consume SDK platform projection:
-1. Build project initially to generate platform projection headers into
-    your Generated Files folder.
-2. Include a projection namespace header in your pch.h, such as 
-    <winrt/Windows.Foundation.h>.
-3. Consume winrt namespace and any Windows Runtime namespaces, such as 
-    winrt::Windows::Foundation, from source code.
-4. Initialize apartment via init_apartment() and consume winrt classes.
 
-Steps to generate and consume a projection from third party metadata:
-1. Add a WinMD reference by right-clicking the References project node
-    and selecting "Add Reference...".  In the Add References dialog, 
-    browse to the component WinMD you want to consume and add it.
-2. Build the project once to generate projection headers for the 
-    referenced WinMD file under the "Generated Files" subfolder.
-3. As above, include projection headers in pch or source code 
-    to consume projected Windows Runtime classes.
+## Project Modules
+### 1\) Screen Capture:
+Captures gameplay in real-time, supporting fullscreen and dynamic resolutions, optimized for performance using Windows.Graphics.Capture and Direct3D 11.
 
-========================================================================
-Learn more about C++/WinRT here:
-http://aka.ms/cppwinrt/
-========================================================================
+### 2\) Screen Mirroring via P2P Network: 
+ Streams the captured gameplay to another device using a robust P2P networking layer for minimal latency and high-quality video.
+
+### 3\) Matchmaking Server: 
+Facilitates P2P connections between devices by providing a lightweight server for matchmaking and connection negotiation.
+## Features
+High-performance screen capturing for gaming scenarios.
+
+Real-time streaming over P2P with adaptive resolution support.
+
+Dynamic matchmaking for establishing connections between devices.
+
+Modular architecture for scalability and customization.
