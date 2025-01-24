@@ -1,336 +1,89 @@
-﻿//#pragma once
-//#include <winrt/Windows.Foundation.h>
-//#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
-//#include <d3d11.h>
-//#include <dxgi.h>
+﻿#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Capture.h>
 #include <iostream>
 
-#pragma once
-#include <d3d11_4.h>
-#include <initguid.h> // Required to define GUIDs
-#include <Windows.Graphics.DirectX.Direct3D11.interop.h>
-#include <winrt/Windows.Graphics.Capture.h>
-#include <windows.graphics.capture.interop.h>
-#include <unknwn.h>
-
-#include <Windows.h>
-#include <winrt/Windows.UI.WindowManagement.h>
-#include <winrt/Windows.UI.Core.h>
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
-
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
-
-DEFINE_GUID(CLSID_GraphicsCaptureItemInterop,
-    0x79c3f95b, 0x31f7, 0x4ec2, 0xa4, 0x56, 0xcd, 0x93, 0x85, 0xa6, 0x4c, 0x57);
-
-// creates the D3D device/context, logs errors, and returns success/failure.
-bool SetupD3D(
-    winrt::com_ptr<ID3D11Device>& d3dDevice,
-    winrt::com_ptr<ID3D11DeviceContext>& d3dContext,
-    D3D_FEATURE_LEVEL& selectedFeatureLevel)
-{
-    try
-    {
-        // Define the feature levels we want to check for
-        D3D_FEATURE_LEVEL featureLevels[] = {
-            D3D_FEATURE_LEVEL_11_1,
-            D3D_FEATURE_LEVEL_11_0,
-            D3D_FEATURE_LEVEL_10_1,
-            D3D_FEATURE_LEVEL_10_0
-        };
-
-        // Create a Direct3D 11 device and context
-        HRESULT hr = D3D11CreateDevice(
-            nullptr,                        // Adapter (nullptr = use default adapter)
-            D3D_DRIVER_TYPE_HARDWARE,       // Driver type
-            nullptr,                        // Software rasterizer (nullptr = not used)
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT, // Device creation flags
-            featureLevels,                  // Feature levels
-            ARRAYSIZE(featureLevels),       // Number of feature levels
-            D3D11_SDK_VERSION,              // SDK version
-            d3dDevice.put(),                // Pointer to the device
-            &selectedFeatureLevel,          // Selected feature level
-            d3dContext.put()                // Pointer to the context
-        );
-
-        if (FAILED(hr))
-        {
-            std::wcerr << L"[SetupD3D] Failed to create Direct3D device/context. HRESULT: 0x"
-                << std::hex << hr << std::endl;
-            return false;
-        }
-
-        std::wcout << L"[SetupD3D] D3D device/context created successfully." << std::endl;
-        std::wcout << L"[SetupD3D] Selected Feature Level: " << selectedFeatureLevel << std::endl;
-
-        return true; // Success
-    }
-    catch (const std::exception& ex)
-    {
-        std::cerr << "[SetupD3D] std::exception: " << ex.what() << std::endl;
-        return false;
-    }
-    catch (const winrt::hresult_error& ex)
-    {
-        std::wcerr << L"[SetupD3D] hresult_error: " << ex.message().c_str() << std::endl;
-        return false;
-    }
-    catch (...)
-    {
-        std::wcerr << L"[SetupD3D] Unknown exception occurred." << std::endl;
-        return false;
-    }
-}
-
-
-bool SetupDXGI(winrt::com_ptr<ID3D11Device> d3dDevice, winrt::com_ptr<IDXGIDevice>& m_dxgiDevice) {
-	std::wcout << L"[SetupDXGI] Creating DXGIDevice..." << std::endl;
-
-    if (!d3dDevice) {
-		std::wcerr << L"[SetupDXGI] D3D device is null. Cannot create DXGIDevice." << std::endl;
-        return false;
-    }
-    try {
-		m_dxgiDevice = d3dDevice.as<::IDXGIDevice>();
-		std::wcout << L"[SetupDXGI] DXGIDevice created successfully." << std::endl;
-        return true;
-    }
-    catch (const winrt::hresult_error& e) {
-		std::wcerr << L"[SetupDXGI] Failed to create DXGIDevice. HRESULT: 0x" << std::hex << e.code() << std::endl;
-        return false;
-    }
-}
-
-HWND fetchForegroundWindow() {
-    HWND foregroundWindow = NULL;
-    try {
-        std::wcout << L"[fetchForegroundWindow] Fetching the foreground window..." << std::endl;
-        foregroundWindow = GetForegroundWindow();
-        if (foregroundWindow == NULL) {
-            std::wcerr << L"[fetchForegroundWindow] GetForegroundWindow returned NULL." << std::endl;
-            return NULL;
-        }
-    }catch (winrt::hresult_error& e) {
-        std::wcerr << L"[fetchForegroundWindow] Failed to fetch the foreground window. HRESULT: 0x" << std::hex << e.code() << std::endl;
-    }
-    return foregroundWindow;
-}
-
-uint64_t GetWindowIdFromHWND(HWND hwnd) {
-    if (!hwnd) {
-		std::wcerr << L"[GetWindowIdFromHWND] Invalid HWND." << std::endl;
-		return NULL;
-    }
-	return reinterpret_cast<uint64_t>(hwnd);
-}
-
-winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateCaptureItemForWindow(HWND hwnd) {
-    using namespace winrt::Windows::Graphics::Capture;
-
-    if (!hwnd || !IsWindow(hwnd)) {
-        throw std::invalid_argument("Invalid HWND passed to CreateCaptureItemForWindow.");
-    }
-
-    try {
-        std::wcout << L"[CreateCaptureItemForWindow] Creating a GraphicsCaptureItem for the window..." << std::endl;
-        auto interopFactory = winrt::get_activation_factory<
-            winrt::Windows::Graphics::Capture::GraphicsCaptureItem,
-            IGraphicsCaptureItemInterop>();
-
-        if (!interopFactory) {
-            throw std::runtime_error("Failed to get the IGraphicsCaptureItemInterop factory.");
-        }
-
-        std::wcout << L"[CreateCaptureItemForWindow] Activation factory obtained successfully." << std::endl;
-
-        winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{ nullptr };
-
-        HRESULT hr = interopFactory->CreateForWindow(
-            hwnd,
-            winrt::guid_of<winrt::Windows::Graphics::Capture::GraphicsCaptureItem>(),
-            winrt::put_abi(item)
-        );
-
-        if (FAILED(hr)) {
-            std::wcerr << L"[CreateCaptureItemForWindow] Failed to create GraphicsCaptureItem for the window. HRESULT: 0x" << std::hex << hr << std::endl;
-            return nullptr;
-        }
-
-        std::wcout << L"[CreateCaptureItemForWindow] GraphicsCaptureItem created successfully." << std::endl;
-        return item;
-    }
-    catch (const winrt::hresult_error& e) {
-        std::wcerr << L"[CreateCaptureItemForWindow] Failed to create GraphicsCaptureItem for the window. HRESULT: 0x" << std::hex << e.code() << std::endl;
-    }
-    catch (const std::exception& ex) {
-        std::cerr << "[CreateCaptureItemForWindow] std::exception: " << ex.what() << std::endl;
-    }
-    catch (...) {
-        std::wcerr << L"[CreateCaptureItemForWindow] Unknown exception occurred." << std::endl;
-        throw;
-    }
-}
-
-//pass the values to function from the call
-winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool createD3DFramePool(winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice d3dDevice, winrt::Windows::Graphics::SizeInt32 size) {
-	int numberOfBuffers = 2;
-	winrt::Windows::Graphics::DirectX::DirectXPixelFormat pixelFormat = winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized;
-	std::wcout << L"[createD3DFramePool] Creating D3D11CaptureFramePool..." << std::endl;
-    try {
-		static winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool framePool = winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool::Create(d3dDevice, pixelFormat, numberOfBuffers, size);
-		std::wcout << L"[createD3DFramePool] D3D11CaptureFramePool created successfully." << std::endl;
-        return framePool;
-    }catch (const winrt::hresult_error& e) {
-	    std::wcerr << L"[createD3DFramePool] Failed to create D3D11CaptureFramePool. HRESULT: 0x" << std::hex << e.code() << std::endl;
-    }catch (const std::exception& ex) {
-		std::cerr << "[createD3DFramePool] std::exception: " << ex.what() << std::endl;
-	}catch (...) {
-        std::wcerr << L"[createD3DFramePool] Unknown exception occurred." << std::endl;
-    }
-}
-
-winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool createFreeThreadedFramePool(winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice d3dDevice, winrt::Windows::Graphics::SizeInt32 size) {
-    int numberOfBuffers = 2;
-    winrt::Windows::Graphics::DirectX::DirectXPixelFormat pixelFormat = winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized;
-    std::wcout << L"[createD3DFramePool] Creating FreeThreaded D3D11CaptureFramePool..." << std::endl;
-    try {
-        static winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool framePool = winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool::CreateFreeThreaded(d3dDevice, pixelFormat, numberOfBuffers, size);
-        std::wcout << L"[createD3DFramePool] FreeThreaded D3D11CaptureFramePool created successfully." << std::endl;
-        return framePool;
-    }
-    catch (const winrt::hresult_error& e) {
-        std::wcerr << L"[createD3DFramePool] Failed to create FreeThreaded D3D11CaptureFramePool. HRESULT: 0x" << std::hex << e.code() << std::endl;
-    }
-    catch (const std::exception& ex) {
-        std::cerr << "[createD3DFramePool] std::exception: " << ex.what() << std::endl;
-    }
-    catch (...) {
-        std::wcerr << L"[createD3DFramePool] Unknown exception occurred." << std::endl;
-    }
-}
-
-//static winrt::Windows::UI::WindowId GetWindowIdForHWND(HWND hwnd) {
-//    if (!hwnd) {
-//        throw std::invalid_argument("Invalid HWND passed to GetWindowIdForHWND.");
-//    }
-//}
-
-
-winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice createIDirect3DDevice(winrt::com_ptr<IDXGIDevice> m_dxgiDevice) {
-	std::wcout << L"[createIDirect3DDevice] Creating IDirect3DDevice From IDXGIDevice..." << std::endl;
-	winrt::com_ptr<IInspectable> deviceInspectable;
-    try {
-        winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(m_dxgiDevice.get(), deviceInspectable.put()));
-        auto direct3DDevice = deviceInspectable.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>();
-		std::wcout << L"[createIDirect3DDevice] IDirect3DDevice created successfully." << std::endl;
-        return direct3DDevice;
-    }
-    catch (const winrt::hresult_error& e) {
-        std::wcerr << L"[createIDirect3DDevice] Failed to create IDirect3DDevice from IDXGIDevice. HRESULT: 0x" << std::hex << e.code() << std::endl;
-    }
-}
-
-winrt::Windows::Graphics::Capture::GraphicsCaptureSession createCaptureSession(winrt::Windows::Graphics::Capture::GraphicsCaptureItem item, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool framePool) {
-	std::wcout << L"[createCaptureSession] Creating GraphicsCaptureSession..." << std::endl;
-    try {
-		winrt::Windows::Graphics::Capture::GraphicsCaptureSession session = framePool.CreateCaptureSession(item);
-		std::wcout << L"[createCaptureSession] GraphicsCaptureSession created successfully." << std::endl;
-        return session;
-    }catch (const winrt::hresult_error& e) {
-		std::wcerr << L"[createCaptureSession] Failed to create GraphicsCaptureSession. HRESULT: 0x" << std::hex << e.code() << std::endl;
-	}catch (const std::exception& ex) {
-		std::cerr << "[createCaptureSession] std::exception: " << ex.what() << std::endl;
-    }catch (...) {
-        std::wcerr << L"[createCaptureSession] Unknown exception occurred." << std::endl;
-    }
-}
-
-winrt::event_token FrameArrivedEventRegistration(winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& freeThreadedFramePool) {
-    std::wcout << L"[FrameArrivedEventRegistration] Registering FrameArrived event..." << std::endl;
-    //Create the event handler
-    auto handler = winrt::Windows::Foundation::TypedEventHandler<
-        winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool,
-        winrt::Windows::Foundation::IInspectable>(
-			[](auto&& sender, auto&& args) {
-				std::wcout << L"[FrameArrivedEventRegistration] WE GOT THE FRAME HOORAYYYY." << std::endl;
-				auto frame = sender.TryGetNextFrame();
-                if (frame) {
-					auto time = frame.SystemRelativeTime();
-					std::wcout << L"[FrameArrivedEventRegistration] Frame arrived at time: " << time.count() << std::endl;
-                }
-			});
-
-	return freeThreadedFramePool.FrameArrived(handler);
-}
-
-
+#include "D3DHelpers.h"
+#include "WindowHelpers.h"
+#include "CaptureHelpers.h"
 
 int main()
 {
-    // Initialize the COM apartment for the main thread
+    // 1) Initialize C++/WinRT apartment
     winrt::init_apartment(winrt::apartment_type::single_threaded);
-    std::wcout << L"[main] COM apartment initialized successfully." << std::endl;
+    std::wcout << L"[main] Apartment initialized.\n";
 
-    // Prepare our device/context com_ptrs
-    winrt::com_ptr<ID3D11Device> d3dDevice;     //d3dDevice
-	winrt::com_ptr<ID3D11DeviceContext> d3dContext;   //d3dContext
-	winrt::com_ptr<IDXGIDevice> m_dxgiDevice; //dxgiDevice
-    D3D_FEATURE_LEVEL selectedFeatureLevel = D3D_FEATURE_LEVEL_11_1; // A default initialization
+    // 2) Create D3D device + context
+    winrt::com_ptr<ID3D11Device> d3dDevice;
+    winrt::com_ptr<ID3D11DeviceContext> d3dContext;
+    winrt::com_ptr<IDXGIDevice> dxgiDevice;
+    D3D_FEATURE_LEVEL selectedFeatureLevel = D3D_FEATURE_LEVEL_11_1;
 
-    // Call the function that sets up D3D and DXGI
-    std::wcout << L"[main] Setting up D3D device/context..." << std::endl;
-    bool successD3D = SetupD3D(d3dDevice, d3dContext, selectedFeatureLevel);
-    bool successDXGI = SetupDXGI(d3dDevice, m_dxgiDevice);
-    
-    if (successD3D) {
-        std::wcout << L"[main] SetupD3D succeeded." << std::endl;
-    }
-    else {
-        std::wcerr << L"[main] SetupD3D failed." << std::endl;
+    bool okD3D = SetupD3D(d3dDevice, d3dContext, selectedFeatureLevel);
+    bool okDXGI = SetupDXGI(d3dDevice, dxgiDevice);
+    if (!okD3D || !okDXGI)
+    {
+        std::wcerr << L"[main] Failed to init D3D or DXGI.\n";
         return -1;
     }
 
-    if (successDXGI) {
-        std::wcout << L"[main] SetupDXGI succeeded." << std::endl;
-    }
-    else {
-        std::wcerr << L"[main] SetupDXGI failed." << std::endl;
+    // 3) Convert to WinRT IDirect3DDevice
+    auto winrtDevice = createIDirect3DDevice(dxgiDevice);
+    if (!winrtDevice)
+    {
+        std::wcerr << L"[main] Failed to create IDirect3DDevice.\n";
         return -1;
     }
 
-    std::wcout << L"[main] SetupD3D and DXGIDevice succeeded. You can now use the D3D/DXGIDevice device/context." << std::endl;
+    // 4) Get the window handle
     HWND hwnd = fetchForegroundWindow();
-    std::wcout << L"[main] Foreground window handle and windowID: " << hwnd << std::endl;
-    uint64_t windowID = GetWindowIdFromHWND(hwnd);
-	std::wcout << L"[main] Window ID: " << windowID << std::endl;
+    if (!hwnd)
+    {
+        std::wcerr << L"[main] Could not get a valid hwnd.\n";
+        return -1;
+    }
+    std::wcout << L"[main] Got hwnd: " << hwnd << std::endl;
+
+    // 5) Create capture item from that hwnd
     auto item = CreateCaptureItemForWindow(hwnd);
-	std::wcout << L"[main] GraphicsCaptureItem created successfully." << std::endl;
+    if (!item)
+    {
+        std::wcerr << L"[main] Failed to create capture item.\n";
+        return -1;
+    }
 
+    // 6) Create a free-threaded frame pool
+    auto size = item.Size();
+    auto framePool = createFreeThreadedFramePool(winrtDevice, size);
+    if (!framePool)
+    {
+        std::wcerr << L"[main] Could not create free-threaded frame pool.\n";
+        return -1;
+    }
 
-    //D3D11 Framepool creation
-    winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice IDirectDevice = createIDirect3DDevice(m_dxgiDevice);
-    //winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool framePool = createD3DFramePool(IDirectDevice, item.Size());
-    winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool freeThreadedFramePool = createFreeThreadedFramePool(IDirectDevice, item.Size());
+    // 7) Create a session from the frame pool & item
+    auto session = createCaptureSession(item, framePool);
+    if (!session)
+    {
+        std::wcerr << L"[main] Could not create capture session.\n";
+        return -1;
+    }
 
-    //Create graphics capture session
-    //winrt::Windows::Graphics::Capture::GraphicsCaptureSession session = createCaptureSession(item, framePool);
-    winrt::Windows::Graphics::Capture::GraphicsCaptureSession session = createCaptureSession(item, freeThreadedFramePool);
-    
-    //Registering FrameArrived Event.
-    winrt::event_token token = FrameArrivedEventRegistration(freeThreadedFramePool);
-	std::wcout << L"[main] FrameArrived event registered successfully." << std::endl;
+    // 8) Register for FrameArrived
+    auto token = FrameArrivedEventRegistration(framePool);
 
-    //TESTING CAPTURE SESSION
-	session.StartCapture();
-	std::wcout << L"[main] Capture session started." << std::endl;
+    // 9) Start capture
+    session.StartCapture();
+    std::wcout << L"[main] Capture started!\n";
 
-	for (int i = 0; i < 10; i++) {
-		Sleep(1000);
-		std::wcout << L"[main] Still Capturing..." << std::endl;
-	}
-    
+    // Keep the app alive for 10 seconds to see frame events
+    for (int i = 0; i < 10; i++)
+    {
+        Sleep(1000);
+        std::wcout << L"[main] Still capturing...\n";
+    }
+
+    // 10) Optionally unsubscribe from the event
+    // framePool.FrameArrived(token);
+
     return 0;
 }
