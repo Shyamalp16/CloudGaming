@@ -86,8 +86,7 @@ bool SetupD3D(
 }
 
 
-bool SetupDXGI(winrt::com_ptr<ID3D11Device> d3dDevice) {
-    winrt::com_ptr<::IDXGIDevice> m_dxgiDevice;
+bool SetupDXGI(winrt::com_ptr<ID3D11Device> d3dDevice, winrt::com_ptr<IDXGIDevice>& m_dxgiDevice) {
 	std::wcout << L"[SetupDXGI] Creating DXGIDevice..." << std::endl;
 
     if (!d3dDevice) {
@@ -175,6 +174,60 @@ winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateCaptureItemForWindo
     }
 }
 
+//pass the values to function from the call
+winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool createD3DFramePool(winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice d3dDevice, winrt::Windows::Graphics::SizeInt32 size) {
+	int numberOfBuffers = 2;
+	winrt::Windows::Graphics::DirectX::DirectXPixelFormat pixelFormat = winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized;
+	std::wcout << L"[createD3DFramePool] Creating D3D11CaptureFramePool..." << std::endl;
+    try {
+		static winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool framePool = winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool::Create(d3dDevice, pixelFormat, numberOfBuffers, size);
+		std::wcout << L"[createD3DFramePool] D3D11CaptureFramePool created successfully." << std::endl;
+        return framePool;
+    }catch (const winrt::hresult_error& e) {
+	    std::wcerr << L"[createD3DFramePool] Failed to create D3D11CaptureFramePool. HRESULT: 0x" << std::hex << e.code() << std::endl;
+    }catch (const std::exception& ex) {
+		std::cerr << "[createD3DFramePool] std::exception: " << ex.what() << std::endl;
+	}catch (...) {
+        std::wcerr << L"[createD3DFramePool] Unknown exception occurred." << std::endl;
+    }
+}
+
+//static winrt::Windows::UI::WindowId GetWindowIdForHWND(HWND hwnd) {
+//    if (!hwnd) {
+//        throw std::invalid_argument("Invalid HWND passed to GetWindowIdForHWND.");
+//    }
+//}
+
+
+winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice createIDirect3DDevice(winrt::com_ptr<IDXGIDevice> m_dxgiDevice) {
+	std::wcout << L"[createIDirect3DDevice] Creating IDirect3DDevice From IDXGIDevice..." << std::endl;
+	winrt::com_ptr<IInspectable> deviceInspectable;
+    try {
+        winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(m_dxgiDevice.get(), deviceInspectable.put()));
+        auto direct3DDevice = deviceInspectable.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>();
+		std::wcout << L"[createIDirect3DDevice] IDirect3DDevice created successfully." << std::endl;
+        return direct3DDevice;
+    }
+    catch (const winrt::hresult_error& e) {
+        std::wcerr << L"[createIDirect3DDevice] Failed to create IDirect3DDevice from IDXGIDevice. HRESULT: 0x" << std::hex << e.code() << std::endl;
+    }
+}
+
+winrt::Windows::Graphics::Capture::GraphicsCaptureSession createCaptureSession(winrt::Windows::Graphics::Capture::GraphicsCaptureItem item, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool framePool) {
+	std::wcout << L"[createCaptureSession] Creating GraphicsCaptureSession..." << std::endl;
+    try {
+		winrt::Windows::Graphics::Capture::GraphicsCaptureSession session = framePool.CreateCaptureSession(item);
+		std::wcout << L"[createCaptureSession] GraphicsCaptureSession created successfully." << std::endl;
+        return session;
+    }catch (const winrt::hresult_error& e) {
+		std::wcerr << L"[createCaptureSession] Failed to create GraphicsCaptureSession. HRESULT: 0x" << std::hex << e.code() << std::endl;
+	}catch (const std::exception& ex) {
+		std::cerr << "[createCaptureSession] std::exception: " << ex.what() << std::endl;
+    }catch (...) {
+        std::wcerr << L"[createCaptureSession] Unknown exception occurred." << std::endl;
+    }
+}
+
 int main()
 {
     // Initialize the COM apartment for the main thread
@@ -190,7 +243,7 @@ int main()
     // Call the function that sets up D3D and DXGI
     std::wcout << L"[main] Setting up D3D device/context..." << std::endl;
     bool successD3D = SetupD3D(d3dDevice, d3dContext, selectedFeatureLevel);
-    bool successDXGI = SetupDXGI(d3dDevice);
+    bool successDXGI = SetupDXGI(d3dDevice, m_dxgiDevice);
     
     if (successD3D) {
         std::wcout << L"[main] SetupD3D succeeded." << std::endl;
@@ -215,6 +268,14 @@ int main()
 	std::wcout << L"[main] Window ID: " << windowID << std::endl;
     auto item = CreateCaptureItemForWindow(hwnd);
 	std::wcout << L"[main] GraphicsCaptureItem created successfully." << std::endl;
+
+
+    //D3D11 Framepool creation
+    winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice IDirectDevice = createIDirect3DDevice(m_dxgiDevice);
+    winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool framePool = createD3DFramePool(IDirectDevice, item.Size());
+
+    //Create graphics capture session
+    winrt::Windows::Graphics::Capture::GraphicsCaptureSession session = createCaptureSession(item, framePool);
     
     return 0;
 }
