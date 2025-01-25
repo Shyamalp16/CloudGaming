@@ -3,6 +3,12 @@
 #include <windows.h>
 #include <cstdint>
 #include <winrt/Windows.Graphics.Capture.h>
+#include <tchar.h>
+#include <psapi.h>
+#include <string>
+#include <vector>
+
+#pragma comment(lib, "psapi.lib")
 
 HWND fetchForegroundWindow();
 uint64_t GetWindowIdFromHWND(HWND hwnd);
@@ -10,3 +16,17 @@ uint64_t GetWindowIdFromHWND(HWND hwnd);
 // Creates a GraphicsCaptureItem from an HWND
 winrt::Windows::Graphics::Capture::GraphicsCaptureItem
 CreateCaptureItemForWindow(HWND hwnd);
+
+std::wstring GetProcessNameFromHWND(HWND hwnd);
+std::wstring GetWindowTitle(HWND hwnd);
+
+struct WindowInfo {
+	HWND hwnd;
+	std::wstring title;
+	std::wstring processName;
+};
+
+//following function enumerates all windows and returns vector
+std::vector<WindowInfo> EnumerateAllWindows();
+std::vector<WindowInfo> FindWindowsByProcessName(const std::wstring& processName);
+std::vector<WindowInfo> FindWindowByTitle(const std::wstring& title);
