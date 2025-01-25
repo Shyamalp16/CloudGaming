@@ -10,7 +10,7 @@
 
 winrt::com_ptr<ID3D11Device> myD3DDevice;
 
-static winrt::com_ptr<ID3D11Device> GetD3DDevice()
+winrt::com_ptr<ID3D11Device> GetD3DDevice()
 {
 	return myD3DDevice;
 }

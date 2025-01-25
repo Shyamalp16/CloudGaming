@@ -1,13 +1,13 @@
 #pragma once
 
+#include "D3DHelpers.h"
+#include "FrameCaptureThread.h"
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
-#include "FrameCaptureThread.h"
-#include "D3DHelpers.h"
 
 
 
-
+winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface);
 //Create D3DFramePool (NOT USED)
 winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool
 createD3DFramePool(
@@ -37,5 +37,5 @@ winrt::event_token FrameArrivedEventRegistration(
 //std::vector<std::thread> workerThreads;
 void StartCapture();
 
-void StopCapture();
+void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& framePool);
 void ProcessFrames();

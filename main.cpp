@@ -10,7 +10,7 @@
 int main()
 {
     //Initialize C++/WinRT apartment
-    winrt::init_apartment(winrt::apartment_type::single_threaded);
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
     std::wcout << L"[main] Apartment initialized.\n";
 
     //Create D3D device + context
@@ -99,7 +99,7 @@ int main()
         std::wcout << L"[main] Still capturing...\n";
         if (i == 9) {
 			std::wcout << L"[main] Stopping capture...\n";
-			StopCapture();
+			StopCapture(token, framePool);
             session.Close();
 			framePool.Close();
         }

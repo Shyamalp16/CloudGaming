@@ -5,6 +5,8 @@
 #include <dxgi.h>                // for IDXGIDevice
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 
+winrt::com_ptr<ID3D11Device> GetD3DDevice();
+
 bool SetupD3D(
     winrt::com_ptr<ID3D11Device>& d3dDevice,
     winrt::com_ptr<ID3D11DeviceContext>& d3dContext,
@@ -18,5 +20,3 @@ winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice
 createIDirect3DDevice(
     winrt::com_ptr<IDXGIDevice> dxgiDevice
 );
-
-static winrt::com_ptr<ID3D11Device> GetD3DDevice();
