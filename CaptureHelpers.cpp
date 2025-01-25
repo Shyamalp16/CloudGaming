@@ -1,11 +1,16 @@
 #include "CaptureHelpers.h"
 #include "FrameCaptureThread.h"
 #include <iostream>
+#include <wincodec.h>
+#include <string>
+#include <filesystem>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.DirectX.h>
 
+using namespace winrt;
 using namespace winrt::Windows::Graphics::Capture;
 using namespace winrt::Windows::Graphics::DirectX;
+using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
 using namespace winrt::Windows::Foundation;
 
 //Global Variables
@@ -108,9 +113,10 @@ winrt::event_token FrameArrivedEventRegistration(
                 auto frame = sender.TryGetNextFrame();
                 if (frame)
                 {
-                    auto time = frame.SystemRelativeTime();
-                    std::wcout << L"[FrameArrived] Frame time=" << time.count() << std::endl;
+                    auto time = frame.SystemRelativeTime();/*
+                    std::wcout << L"[FrameArrived] Frame time=" << time.count() << std::endl;*/
                     auto surface = frame.Surface(); // Access the Direct3D surface
+                    SaveTextureAsPNG(GetD3DDevice().get(), )
                     frameQueue.push(surface);
                 }
             }
@@ -124,7 +130,6 @@ void ProcessFrames() {
 		auto surface = frameQueue.pop();
         if (surface) {
 			std::wcout << L"[ProcessFrames] Processing the frame!!\n";
-			//Do something with the frame
         }
     }
 }

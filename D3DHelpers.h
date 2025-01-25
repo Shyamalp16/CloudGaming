@@ -18,3 +18,5 @@ winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice
 createIDirect3DDevice(
     winrt::com_ptr<IDXGIDevice> dxgiDevice
 );
+
+static winrt::com_ptr<ID3D11Device> GetD3DDevice();

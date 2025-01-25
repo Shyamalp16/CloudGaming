@@ -3,6 +3,9 @@
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include "FrameCaptureThread.h"
+#include "D3DHelpers.h"
+
+
 
 
 //Create D3DFramePool (NOT USED)
