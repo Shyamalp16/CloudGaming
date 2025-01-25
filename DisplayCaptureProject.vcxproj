@@ -103,12 +103,14 @@
   <ItemGroup>
     <ClInclude Include="CaptureHelpers.h" />
     <ClInclude Include="D3DHelpers.h" />
+    <ClInclude Include="FrameCaptureThread.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="WindowHelpers.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="CaptureHelpers.cpp" />
     <ClCompile Include="D3DHelpers.cpp" />
+    <ClCompile Include="FrameCaptureThread.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>

@@ -5,6 +5,7 @@
 #include "D3DHelpers.h"
 #include "WindowHelpers.h"
 #include "CaptureHelpers.h"
+#include "FrameCaptureThread.h"
 
 int main()
 {
@@ -81,10 +82,14 @@ int main()
     }
 
     //Register for FrameArrived
+	//ThreadSafeQueue<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface> myFrameQueue;
     auto token = FrameArrivedEventRegistration(framePool);
 
-    //Start capture
+    //Start windows graphics capture
     session.StartCapture();
+
+	//Start worker threads to process frames
+    StartCapture();
     std::wcout << L"[main] Capture started!\n";
 
     // Keep the app alive for 10 seconds to see frame events
@@ -92,6 +97,11 @@ int main()
     {
         Sleep(1000);
         std::wcout << L"[main] Still capturing...\n";
+        if (i == 9) {
+			std::wcout << L"[main] Stopping capture...\n";
+			StopCapture();
+            session.Close();
+        }
     }
 
     //Optionally unsubscribe from the event
