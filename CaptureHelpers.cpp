@@ -89,7 +89,7 @@ GraphicsCaptureSession createCaptureSession(
             << std::hex << e.code() << std::endl;
     }
 	session.IsCursorCaptureEnabled(true);
-	//session.IsBorderRequired(true);
+	session.IsBorderRequired(false);
     return session;
 }
 
@@ -153,6 +153,13 @@ void StopCapture() {
         }
     }
 
+	std::wcout << L"[StopCapture] Clearing FrameQueue.\n";
+	while (!frameQueue.empty()) {
+		frameQueue.pop();
+	}
+	std::wcout << L"[StopCapture] FrameQueue Cleared.\n";
+
     workerThreads.clear();
+	std::wcout << L"[StopCapture] Worker threads stopped.\n";
     std::wcout << L"[StopCapture] Capture stopped.\n";
 }

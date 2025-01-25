@@ -35,7 +35,7 @@ int main()
         return -1;
     }
 
-    Sleep(5000); // Give time to see the console output
+    //Sleep(5000); // Give time to see the console output
     //Get the window handle     //HWND hwnd = fetchForegroundWindow();
     //std::wcout << L"[main] Found " << windows.size() << L" windows.\n";
   
@@ -101,6 +101,7 @@ int main()
 			std::wcout << L"[main] Stopping capture...\n";
 			StopCapture();
             session.Close();
+			framePool.Close();
         }
     }
 
