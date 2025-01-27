@@ -24,9 +24,10 @@ ThreadSafeQueue<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface>
 std::atomic<bool> isCapturing{ false };
 std::mutex queueMutex;
 std::condition_variable queueCV;
+int frameCounter = 0;
 
 static auto g_lastFrameTime = steady_clock::now();
-static constexpr auto g_minInterval = 16ms; //~30fps
+static constexpr auto g_minInterval = 16ms; //~60fps
 
 static int g_currentWidth = 0;  // Initialize to 0 or any default value
 static int g_currentHeight = 0; // Initialize to 0 or any default value
@@ -45,7 +46,7 @@ winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(
     return texture;
 }
 
-void SaveTextureAsPNG(winrt::com_ptr<ID3D11Device> device, winrt::com_ptr<ID3D11Texture2D> texture, const std::wstring& filePath) {
+void SaveTextureAsPNG(winrt::com_ptr<ID3D11Device> device, winrt::com_ptr<ID3D11Texture2D> texture, const std::wstring& filePath, int frameCounter) {
     // Create a WIC factory
     winrt::com_ptr<IWICImagingFactory> wicFactory;
     HRESULT hr = CoCreateInstance(
@@ -142,7 +143,8 @@ void SaveTextureAsPNG(winrt::com_ptr<ID3D11Device> device, winrt::com_ptr<ID3D11
         return;
     }
 
-    hr = wicStream->InitializeFromFilename(filePath.c_str(), GENERIC_WRITE);
+    std::wstring newFilePath = filePath + L"_" + std::to_wstring(frameCounter) + L".png";
+    hr = wicStream->InitializeFromFilename(newFilePath.c_str(), GENERIC_WRITE);
     if (FAILED(hr)) {
         std::wcerr << L"[SaveTextureAsPNG] Failed to initialize WIC stream. HRESULT=0x"
             << std::hex << hr << std::endl;
@@ -203,7 +205,7 @@ void SaveTextureAsPNG(winrt::com_ptr<ID3D11Device> device, winrt::com_ptr<ID3D11
         return;
     }
 
-    std::wcout << L"[SaveTextureAsPNG] Saved texture to " << filePath << std::endl;
+    std::wcout << L"[SaveTextureAsPNG] Saved texture to " << newFilePath << std::endl;
 }
 
 
@@ -258,126 +260,6 @@ GraphicsCaptureSession createCaptureSession(
     return session;
 }
 
-// Register FrameArrived
-//winrt::event_token FrameArrivedEventRegistration(
-//    Direct3D11CaptureFramePool const& framePool)
-//    //ThreadSafeQueue<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface>& frameQueue
-//{
-//    std::wcout << L"[FrameArrivedEventRegistration] Registering...\n";
-//    auto handler = TypedEventHandler<
-//        Direct3D11CaptureFramePool,
-//        winrt::Windows::Foundation::IInspectable>(
-//            [](auto&& sender, auto&&)
-//            {
-//                auto now = steady_clock::now();
-//                if (now - g_lastFrameTime < g_minInterval) {
-//                    //Skip if new frame dropped too early
-//                    return;
-//                }
-//                g_lastFrameTime = now;
-//
-//                //Then we go to the next frame
-//                std::wcout << L"[FrameArrived] We got a frame!\n";
-//                auto frame = sender.TryGetNextFrame();
-//                if (!frame) {
-//                    std::wcout << L"[FrameArrived] Failed to get the frame.\n";
-//                    return;
-//                }
-//
-//                if (contentSize.Width < g_currentWidth || contentSize.Height < g_currentHeight) {
-//                    std::wcout << L"[FrameArrived] Skipping Incomplete Frame.\n";
-//                    return;
-//                }
-//
-//                if (frame)
-//                {
-//                    auto time = frame.SystemRelativeTime();/*
-//                    std::wcout << L"[FrameArrived] Frame time=" << time.count() << std::endl;*/
-//                    auto surface = frame.Surface(); // Access the Direct3D surface
-//                    SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(surface), L"frame.png");
-//                    frameQueue.push(surface);
-//                }
-//            }
-//        );
-//    auto token = framePool.FrameArrived(handler);
-//    return token;
-//}
-
-//winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool const& framePool)
-//{
-//    std::wcout << L"[FrameArrivedEventRegistration] Registering...\n";
-//
-//    auto handler = TypedEventHandler<Direct3D11CaptureFramePool, winrt::Windows::Foundation::IInspectable>(
-//        [](auto&& sender, auto&&)
-//        {
-//            auto now = steady_clock::now();
-//            if (now - g_lastFrameTime < g_minInterval) {
-//                // Skip frame if it’s too soon for the desired FPS limit
-//                return;
-//            }
-//            g_lastFrameTime = now;
-//
-//            // Retrieve the next frame
-//            auto frame = sender.TryGetNextFrame();
-//            if (!frame) {
-//                std::wcout << L"[FrameArrived] Failed to get frame.\n";
-//                return;
-//            }
-//
-//            auto contentSize = frame.ContentSize();
-//            std::wcout << L"[FrameArrived] Frame ContentSize: "
-//                << contentSize.Width << L"x" << contentSize.Height << std::endl;
-//
-//            // Check if frame size is incomplete or invalid
-//            if (contentSize.Width < g_currentWidth || contentSize.Height < g_currentHeight) {
-//                std::wcout << L"[FrameArrived] Skipping incomplete frame.\n";
-//                return;
-//            }
-//
-//            // Update current size if changed
-//            g_currentWidth = contentSize.Width;
-//            g_currentHeight = contentSize.Height;
-//
-//            // Retrieve the surface and process it
-//            auto surface = frame.Surface();
-//            if (!surface) {
-//                std::wcout << L"[FrameArrived] Surface is null. Skipping frame.\n";
-//                return;
-//            }
-//
-//            winrt::com_ptr <ID3D11Texture2D> texture = GetTextureFromSurface(surface);
-//            winrt::com_ptr<ID3D11DeviceContext> context;
-//            GetD3DDevice()->GetImmediateContext(context.put());
-//
-//            winrt::com_ptr<ID3D11Query> query;
-//            D3D11_QUERY_DESC queryDesc = {};
-//            queryDesc.Query = D3D11_QUERY_EVENT;
-//            GetD3DDevice()->CreateQuery(&queryDesc, query.put());
-//            context->End(query.get());
-//            
-//            while (S_FALSE == context->GetData(query.get(), nullptr, 0, 0)) {
-//                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-//            }
-//
-//            // Save the frame as PNG
-//            try {
-//                /*SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(surface), L"frame.png");*/
-//                frameQueue.push(surface);
-//                ProcessFrames();
-//                std::wcout << L"[FrameArrived] Frame processed and enqueued.\n";
-//                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-//            }
-//            catch (const std::exception& e) {
-//                std::wcerr << L"[FrameArrived] Exception during frame processing: "
-//                    << e.what() << std::endl;
-//            }
-//        });
-//
-//    // Register the handler and return the token
-//    auto token = framePool.FrameArrived(handler);
-//    return token;
-//}
-
 winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool const& framePool) {
     std::wcout << L"[FrameArrivedEventRegistration] Registering frame arrival handler...\n";
 
@@ -385,14 +267,14 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
     auto handler = TypedEventHandler<Direct3D11CaptureFramePool, winrt::Windows::Foundation::IInspectable>(
         [](Direct3D11CaptureFramePool sender, winrt::Windows::Foundation::IInspectable) {
             try {
-                auto now = std::chrono::steady_clock::now();
+                //auto now = std::chrono::steady_clock::now();
 
-                // Enforce the frame rate limit (e.g., ~60 FPS)
-                if (now - g_lastFrameTime < g_minInterval) {
-                    std::wcout << L"[FrameArrived] Skipping frame due to FPS limit.\n";
-                    return;
-                }
-                g_lastFrameTime = now;
+                //// Enforce the frame rate limit (e.g., ~60 FPS)
+                //if (now - g_lastFrameTime < g_minInterval) {
+                //    std::wcout << L"[FrameArrived] Skipping frame due to FPS limit.\n";
+                //    return;
+                //}
+                //g_lastFrameTime = now;
 
                 // Retrieve the next frame
                 auto frame = sender.TryGetNextFrame();
@@ -452,46 +334,29 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
 }
 
 
-//void ProcessFrames() {
-//    while (true) {
-//        std::unique_lock<std::mutex> lock(queueMutex);
-//        queueCV.wait(lock, [&]() { return !frameQueue.empty() || !isCapturing.load(); });
-//
-//        if (!isCapturing.load() && frameQueue.empty()) {
-//            break;  // Exit if capturing has stopped and the queue is empty
-//        }
-//
-//        auto surface = frameQueue.pop();  // Retrieve surface from the 
-//        lock.unlock();
-//
-//        if (!surface) {
-//            break;  // Sentinel value detected, exit the loop
-//        }
-//
-//        std::wcout << L"[ProcessFrames] Processing the frame!!\n";
-//
-//        // Process the frame (e.g., save it as PNG or perform any operation)
-//        SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(surface), L"frame.png");
-//    }
-//}
-
 void ProcessFrames() {
-    while (isCapturing.load() || !frameQueue.empty()) {
+    while (true) {
         std::unique_lock<std::mutex> lock(queueMutex);
         queueCV.wait(lock, [&]() { return !frameQueue.empty() || !isCapturing.load(); });
 
+        // If capturing is stopped and queue is empty, exit the loop
+        if (!isCapturing.load() && frameQueue.empty()) {
+            break;
+        }
+
+        // Retrieve and process the next surface from the queue
         if (!frameQueue.empty()) {
             auto surface = frameQueue.pop();
             lock.unlock();
 
             if (!surface) {
-                break;  // Sentinel value detected, exit the loop
+                break;  // Sentinel value detected
             }
 
             std::wcout << L"[ProcessFrames] Processing the frame!!\n";
 
-            // Process the frame (e.g., save it as PNG)
-            SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(surface), L"frame.png");
+            // Save the frame
+            SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(surface), L"frame.png", frameCounter++);
         }
         else {
             lock.unlock();
@@ -499,6 +364,32 @@ void ProcessFrames() {
     }
     std::wcout << L"[ProcessFrames] Exiting.\n";
 }
+
+
+//void ProcessFrames() {
+//    while (isCapturing.load() || !frameQueue.empty()) {
+//        std::unique_lock<std::mutex> lock(queueMutex);
+//        queueCV.wait(lock, [&]() { return !frameQueue.empty() || !isCapturing.load(); });
+//
+//        if (!frameQueue.empty()) {
+//            auto surface = frameQueue.pop();
+//            lock.unlock();
+//
+//            if (!surface) {
+//                break;  // Sentinel value detected, exit the loop
+//            }
+//
+//            std::wcout << L"[ProcessFrames] Processing the frame!!\n";
+//
+//            // Process the frame (e.g., save it as PNG)
+//            SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(surface), L"frame.png");
+//        }
+//        else {
+//            lock.unlock();
+//        }
+//    }
+//    std::wcout << L"[ProcessFrames] Exiting.\n";
+//}
 
 
 
@@ -517,6 +408,7 @@ void StartCapture() {
 
     // Create Worker Threads
     int numThreads = std::thread::hardware_concurrency();
+    //int numThreads = 2;
     for (int i = 0; i < numThreads; i++) {
         workerThreads.emplace_back(std::thread(ProcessFrames));
     }
@@ -567,6 +459,18 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
     // Stop capturing new frames
     isCapturing.store(false);
 
+    queueCV.notify_all();
+    while (!frameQueue.empty()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50)); // Allow time for processing
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        for (size_t i = 0; i < workerThreads.size(); i++) {
+            frameQueue.push(nullptr);  // Add sentinel values to the queue
+        }
+    }
+
     // Notify worker threads to stop waiting
     queueCV.notify_all();
 
@@ -590,78 +494,3 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
 
     std::wcout << L"[StopCapture] Capture stopped and resources released.\n";
 }
-
-
-    //std::wcout << L"[StopCapture] Stopping capture...\n";
-    //try {
-    //    framePool.FrameArrived(token);
-    //    framePool.Close();
-    //    std::wcout << L"[StopCapture] Unsubscribed From FrameArrived...\n";
-    //    std::wcout << L"[StopCapture] isCapture set to false...\n";
-
-    //    //Pushing N sentinal so each thread can exit
-    //    for (int i = 0; i < workerThreads.size(); i++) {
-    //        frameQueue.push(nullptr);
-    //    }
-
-    //    for (auto& thread : workerThreads)
-    //    {
-    //        if (thread.joinable())
-    //        {
-    //            thread.join();
-    //            std::wcout << L"[StopCapture] Worker thread joined.\n";
-    //        }
-    //    }
-
-    //    std::wcout << L"[StopCapture] Clearing FrameQueue.\n";
-    //    while (!frameQueue.empty()) {
-    //        frameQueue.pop();
-    //    }
-    //    std::wcout << L"[StopCapture] FrameQueue Cleared.\n";
-    //}catch (const std::exception& e) {
-    //    std::wcerr << L"[StopCapture] Exception during cleanup: " << e.what() << std::endl;
-    //}catch (...) {
-    //    std::wcerr << L"[StopCapture] Unknown Exception during cleanup.\n";
-    //}
-//}
-
-
-// Manually define the interface IDirect3DDxgiInterfaceAccess:
-// (It must match the actual Windows SDK interface GUID and signature)
-//struct __declspec(uuid("A9B3D012-3DF2-4EE3-B7D5-7B2E9EAFB321"))
-//    IDirect3DDxgiInterfaceAccess : public ::IUnknown
-//{
-//    virtual HRESULT __stdcall GetInterface(REFIID id, void** object) = 0;
-//};
-
-//winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(
-//    winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface const& surface)
-//{
-//    // If 'surface' is invalid, just return null
-//    if (!surface)
-//    {
-//        return nullptr;
-//    }
-//
-//    // 1. Convert the WinRT object to IInspectable, then query for our manual interface
-//
-//    auto unknown = surface.as<winrt::Windows::Foundation::IInspectable>();
-//    auto* rawInspectable = reinterpret_cast<::IUnknown*>(winrt::get_abi(unknown));
-//    winrt::com_ptr<IDirect3DDxgiInterfaceAccess> dxgiInterfaceAccess;
-//    winrt::check_hresult(
-//        rawInspectable->QueryInterface(
-//            __uuidof(IDirect3DDxgiInterfaceAccess),
-//            reinterpret_cast<void**>(dxgiInterfaceAccess.put())
-//        )
-//	);
-//
-//
-//    // 2. From the dxgiInterfaceAccess, retrieve ID3D11Texture2D:
-//    winrt::com_ptr<ID3D11Texture2D> texture;
-//    winrt::check_hresult(
-//        dxgiInterfaceAccess->GetInterface(__uuidof(ID3D11Texture2D),
-//            texture.put_void())
-//    );
-//
-//    return texture;
-//}
