@@ -35,13 +35,13 @@ int main()
         return -1;
     }
 
-    //Sleep(5000); // Give time to see the console output
+    Sleep(2000); // Give time to see the console output
     //Get the window handle     //HWND hwnd = fetchForegroundWindow();
     //std::wcout << L"[main] Found " << windows.size() << L" windows.\n";
   
 	//Enumerate All Windows, Then From The Enumerated Windows Find The Windows With The Process Name "cs2.exe"
     auto windows = EnumerateAllWindows();
-    auto msedge = FindWindowsByProcessName(L"cs2.exe");
+    auto msedge = FindWindowsByProcessName(L"vlc.exe");
     std::wcout << L"[main] Found " << msedge.size() << L" CS2 windows.\n";
     for (auto& w : msedge) {
         std::wcout << L"[main] HWND = " << w.hwnd << L"\n Title = " << w.title << L"\n Process = " << w.processName << L"\n";
@@ -97,13 +97,12 @@ int main()
     {
         Sleep(1000);
         std::wcout << L"[main] Still capturing...\n";
-        if (i == 9) {
-			std::wcout << L"[main] Stopping capture...\n";
-			StopCapture(token, framePool);
-            session.Close();
-			framePool.Close();
-        }
     }
+
+    std::wcout << L"[main] Stopping capture...\n";
+    StopCapture(token, framePool);
+    //framePool.Close();
+    session.Close();
 
     //Optionally unsubscribe from the event
      framePool.FrameArrived(token);
