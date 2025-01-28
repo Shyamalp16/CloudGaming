@@ -22,6 +22,22 @@ using namespace winrt::Windows::Foundation;
 std::vector<std::thread> workerThreads;
 ThreadSafeQueue<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface> frameQueue;
 std::atomic<bool> isCapturing{ false };
+
+
+struct FrameData {
+    int sequenceNumber;
+    winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface;
+};
+
+struct FrameComparator {
+    bool operator()(const FrameData& a, FrameData& b) {
+        return a.sequenceNumber < b.sequenceNumber;
+    };
+};
+
+
+std::priority_queue<FrameData, std::vector<FrameData>, FrameComparator> framePriorityQueue;
+std::atomic<int> frameSequenceCounter{ 0 }; 
 std::mutex queueMutex;
 std::condition_variable queueCV;
 int frameCounter = 0;
@@ -260,22 +276,85 @@ GraphicsCaptureSession createCaptureSession(
     return session;
 }
 
+//winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool const& framePool) {
+//    std::wcout << L"[FrameArrivedEventRegistration] Registering frame arrival handler...\n";
+//
+//    // Lambda function to handle frame arrival events
+//    auto handler = TypedEventHandler<Direct3D11CaptureFramePool, winrt::Windows::Foundation::IInspectable>(
+//        [](Direct3D11CaptureFramePool sender, winrt::Windows::Foundation::IInspectable) {
+//            try {
+//                //auto now = std::chrono::steady_clock::now();
+//
+//                //// Enforce the frame rate limit (e.g., ~60 FPS)
+//                //if (now - g_lastFrameTime < g_minInterval) {
+//                //    std::wcout << L"[FrameArrived] Skipping frame due to FPS limit.\n";
+//                //    return;
+//                //}
+//                //g_lastFrameTime = now;
+//
+//                // Retrieve the next frame
+//                auto frame = sender.TryGetNextFrame();
+//                if (!frame) {
+//                    std::wcout << L"[FrameArrived] Failed to retrieve frame.\n";
+//                    return;
+//                }
+//
+//                // Get the frame's content size
+//                auto contentSize = frame.ContentSize();
+//                std::wcout << L"[FrameArrived] Frame ContentSize: "
+//                    << contentSize.Width << L"x" << contentSize.Height << std::endl;
+//
+//                // Check if the frame's size is valid
+//                if (contentSize.Width < g_currentWidth || contentSize.Height < g_currentHeight) {
+//                    std::wcout << L"[FrameArrived] Incomplete frame received, skipping.\n";
+//                    return;
+//                }
+//
+//                // Update the current frame size if it changes
+//                g_currentWidth = contentSize.Width;
+//                g_currentHeight = contentSize.Height;
+//
+//                // Extract the frame's surface
+//                auto surface = frame.Surface();
+//                if (!surface) {
+//                    std::wcout << L"[FrameArrived] Frame surface is null, skipping.\n";
+//                    return;
+//                }
+//
+//                // Push the frame surface into the processing queue
+//                {
+//                    std::lock_guard<std::mutex> lock(queueMutex);
+//                    frameQueue.push(surface);
+//                }
+//                queueCV.notify_one(); // Notify worker threads to process the frame
+//
+//                std::wcout << L"[FrameArrived] Frame enqueued successfully.\n";
+//
+//            }
+//            catch (const winrt::hresult_error& e) {
+//                std::wcerr << L"[FrameArrived] HRESULT error: " << e.message().c_str() << L" (0x"
+//                    << std::hex << e.code() << L")\n";
+//            }
+//            catch (const std::exception& e) {
+//                std::wcerr << L"[FrameArrived] Standard exception: " << e.what() << L"\n";
+//            }
+//            catch (...) {
+//                std::wcerr << L"[FrameArrived] Unknown exception occurred during frame processing.\n";
+//            }
+//        });
+//
+//    // Register the handler and return the event token
+//    auto token = framePool.FrameArrived(handler);
+//    std::wcout << L"[FrameArrivedEventRegistration] Handler registered successfully.\n";
+//    return token;
+//}
+
 winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool const& framePool) {
     std::wcout << L"[FrameArrivedEventRegistration] Registering frame arrival handler...\n";
 
-    // Lambda function to handle frame arrival events
     auto handler = TypedEventHandler<Direct3D11CaptureFramePool, winrt::Windows::Foundation::IInspectable>(
         [](Direct3D11CaptureFramePool sender, winrt::Windows::Foundation::IInspectable) {
             try {
-                //auto now = std::chrono::steady_clock::now();
-
-                //// Enforce the frame rate limit (e.g., ~60 FPS)
-                //if (now - g_lastFrameTime < g_minInterval) {
-                //    std::wcout << L"[FrameArrived] Skipping frame due to FPS limit.\n";
-                //    return;
-                //}
-                //g_lastFrameTime = now;
-
                 // Retrieve the next frame
                 auto frame = sender.TryGetNextFrame();
                 if (!frame) {
@@ -283,87 +362,97 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                     return;
                 }
 
-                // Get the frame's content size
-                auto contentSize = frame.ContentSize();
-                std::wcout << L"[FrameArrived] Frame ContentSize: "
-                    << contentSize.Width << L"x" << contentSize.Height << std::endl;
-
-                // Check if the frame's size is valid
-                if (contentSize.Width < g_currentWidth || contentSize.Height < g_currentHeight) {
-                    std::wcout << L"[FrameArrived] Incomplete frame received, skipping.\n";
-                    return;
-                }
-
-                // Update the current frame size if it changes
-                g_currentWidth = contentSize.Width;
-                g_currentHeight = contentSize.Height;
-
-                // Extract the frame's surface
                 auto surface = frame.Surface();
                 if (!surface) {
                     std::wcout << L"[FrameArrived] Frame surface is null, skipping.\n";
                     return;
                 }
 
-                // Push the frame surface into the processing queue
+                // Assign a sequence number and enqueue the frame
+                int sequenceNumber = frameSequenceCounter++;
                 {
                     std::lock_guard<std::mutex> lock(queueMutex);
-                    frameQueue.push(surface);
+                    framePriorityQueue.push({ sequenceNumber, surface });
                 }
-                queueCV.notify_one(); // Notify worker threads to process the frame
+                queueCV.notify_one(); // Notify worker threads
 
-                std::wcout << L"[FrameArrived] Frame enqueued successfully.\n";
-
-            }
-            catch (const winrt::hresult_error& e) {
-                std::wcerr << L"[FrameArrived] HRESULT error: " << e.message().c_str() << L" (0x"
-                    << std::hex << e.code() << L")\n";
+                std::wcout << L"[FrameArrived] Frame enqueued with sequence number: " << sequenceNumber << std::endl;
             }
             catch (const std::exception& e) {
-                std::wcerr << L"[FrameArrived] Standard exception: " << e.what() << L"\n";
-            }
-            catch (...) {
-                std::wcerr << L"[FrameArrived] Unknown exception occurred during frame processing.\n";
+                std::wcerr << L"[FrameArrived] Exception: " << e.what() << L"\n";
             }
         });
 
-    // Register the handler and return the event token
-    auto token = framePool.FrameArrived(handler);
-    std::wcout << L"[FrameArrivedEventRegistration] Handler registered successfully.\n";
-    return token;
+    return framePool.FrameArrived(handler);
 }
 
 
+//void ProcessFrames() {
+//    while (true) {
+//        std::unique_lock<std::mutex> lock(queueMutex);
+//        queueCV.wait(lock, [&]() { return !frameQueue.empty() || !isCapturing.load(); });
+//
+//        // If capturing is stopped and queue is empty, exit the loop
+//        if (!isCapturing.load() && frameQueue.empty()) {
+//            break;
+//        }
+//
+//        // Retrieve and process the next surface from the queue
+//        if (!frameQueue.empty()) {
+//            auto surface = frameQueue.pop();
+//            lock.unlock();
+//
+//            if (!surface) {
+//                break;  // Sentinel value detected
+//            }
+//
+//            std::wcout << L"[ProcessFrames] Processing the frame!!\n";
+//
+//            // Save the frame
+//            SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(surface), L"frame.png", frameCounter++);
+//        }
+//        else {
+//            lock.unlock();
+//        }
+//    }
+//    std::wcout << L"[ProcessFrames] Exiting.\n";
+//}
+
 void ProcessFrames() {
     while (true) {
-        std::unique_lock<std::mutex> lock(queueMutex);
-        queueCV.wait(lock, [&]() { return !frameQueue.empty() || !isCapturing.load(); });
+        FrameData frameData;
 
-        // If capturing is stopped and queue is empty, exit the loop
-        if (!isCapturing.load() && frameQueue.empty()) {
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            queueCV.wait(lock, [&]() { return !framePriorityQueue.empty() || !isCapturing.load(); });
+
+            // If capturing is stopped and queue is empty, exit the loop
+            if (!isCapturing.load() && framePriorityQueue.empty()) {
+                break;
+            }
+
+            // Get the next frame to process
+            if (!framePriorityQueue.empty()) {
+                frameData = framePriorityQueue.top();
+                framePriorityQueue.pop();
+            }
+        }
+
+        // Check for sentinel value to exit thread
+        if (frameData.sequenceNumber == -1) {
+            std::wcout << L"[ProcessFrames] Sentinel received, exiting thread.\n";
             break;
         }
 
-        // Retrieve and process the next surface from the queue
-        if (!frameQueue.empty()) {
-            auto surface = frameQueue.pop();
-            lock.unlock();
-
-            if (!surface) {
-                break;  // Sentinel value detected
-            }
-
-            std::wcout << L"[ProcessFrames] Processing the frame!!\n";
-
-            // Save the frame
-            SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(surface), L"frame.png", frameCounter++);
-        }
-        else {
-            lock.unlock();
+        if (frameData.surface) {
+            // Process the frame (e.g., save it)
+            SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(frameData.surface), L"frame", frameData.sequenceNumber);
+            std::wcout << L"[ProcessFrames] Processed frame with sequence number: " << frameData.sequenceNumber << std::endl;
         }
     }
     std::wcout << L"[ProcessFrames] Exiting.\n";
 }
+
 
 
 //void ProcessFrames() {
@@ -391,8 +480,26 @@ void ProcessFrames() {
 //    std::wcout << L"[ProcessFrames] Exiting.\n";
 //}
 
-
-
+//void StartCapture() {
+//    // Clear existing threads if any
+//    for (auto& thread : workerThreads) {
+//        if (thread.joinable()) {
+//            thread.join();
+//        }
+//    }
+//    workerThreads.clear();
+//
+//    isCapturing.store(true);
+//    std::wcout << L"[StartCapture] Starting capture...\n";
+//
+//    // Create Worker Threads
+//    int numThreads = std::thread::hardware_concurrency();
+//    //int numThreads = 2;
+//    for (int i = 0; i < numThreads; i++) {
+//        workerThreads.emplace_back(std::thread(ProcessFrames));
+//    }
+//    std::wcout << L"[StartCapture] Capture started with " << numThreads << L" threads.\n";
+//}
 
 void StartCapture() {
     // Clear existing threads if any
@@ -404,13 +511,12 @@ void StartCapture() {
     workerThreads.clear();
 
     isCapturing.store(true);
+    frameSequenceCounter.store(0); // Reset sequence counter
     std::wcout << L"[StartCapture] Starting capture...\n";
 
-    // Create Worker Threads
     int numThreads = std::thread::hardware_concurrency();
-    //int numThreads = 2;
     for (int i = 0; i < numThreads; i++) {
-        workerThreads.emplace_back(std::thread(ProcessFrames));
+        workerThreads.emplace_back(ProcessFrames);
     }
     std::wcout << L"[StartCapture] Capture started with " << numThreads << L" threads.\n";
 }
@@ -467,7 +573,7 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
     {
         std::lock_guard<std::mutex> lock(queueMutex);
         for (size_t i = 0; i < workerThreads.size(); i++) {
-            frameQueue.push(nullptr);  // Add sentinel values to the queue
+            framePriorityQueue.push({-1, nullptr});  // Add sentinel values to the queue
         }
     }
 
@@ -484,8 +590,9 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
     workerThreads.clear();
 
     // Clear the frame queue
-    while (!frameQueue.empty()) {
-        frameQueue.pop();
+    std::lock_guard<std::mutex> lock(queueMutex);
+    while (!framePriorityQueue.empty()) {
+        framePriorityQueue.pop();
     }
 
     // Release the frame pool and session resources
@@ -494,3 +601,42 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
 
     std::wcout << L"[StopCapture] Capture stopped and resources released.\n";
 }
+
+//void StopCapture(winrt::event_token& token, Direct3D11CaptureFramePool const& framePool) {
+//    std::wcout << L"[StopCapture] Stopping capture...\n";
+//
+//    // Stop capturing new frames
+//    isCapturing.store(false);
+//
+//    // Notify all worker threads to stop
+//    {
+//        std::lock_guard<std::mutex> lock(queueMutex);
+//        for (size_t i = 0; i < workerThreads.size(); i++) {
+//            framePriorityQueue.push({ -1, nullptr }); // Push sentinel value for each thread
+//        }
+//    }
+//    queueCV.notify_all();
+//
+//    // Join all worker threads
+//    for (auto& thread : workerThreads) {
+//        if (thread.joinable()) {
+//            thread.join();
+//            std::wcout << L"[StopCapture] Worker thread joined.\n";
+//        }
+//    }
+//    workerThreads.clear();
+//
+//    // Clear the frame queue (though it should be empty due to sentinels)
+//    {
+//        std::lock_guard<std::mutex> lock(queueMutex);
+//        while (!framePriorityQueue.empty()) {
+//            framePriorityQueue.pop();
+//        }
+//    }
+//
+//    // Release resources
+//    framePool.FrameArrived(token);
+//    framePool.Close();
+//
+//    std::wcout << L"[StopCapture] Capture stopped and resources released.\n";
+//}
