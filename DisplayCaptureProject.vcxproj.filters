@@ -30,6 +30,9 @@
     <ClInclude Include="FrameCaptureThread.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="Encoder.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -48,6 +51,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="FrameCaptureThread.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Encoder.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

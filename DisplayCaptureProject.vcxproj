@@ -75,10 +75,16 @@
     <ClCompile>
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\ffmpeg\include</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateWindowsMetadata>false</GenerateWindowsMetadata>
+      <AdditionalLibraryDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\ffmpeg\lib</AdditionalLibraryDirectories>
+      <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
+;avformat.lib
+;avutil.lib
+;swscale.lib </AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
@@ -103,6 +109,7 @@
   <ItemGroup>
     <ClInclude Include="CaptureHelpers.h" />
     <ClInclude Include="D3DHelpers.h" />
+    <ClInclude Include="Encoder.h" />
     <ClInclude Include="FrameCaptureThread.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="WindowHelpers.h" />
@@ -110,6 +117,7 @@
   <ItemGroup>
     <ClCompile Include="CaptureHelpers.cpp" />
     <ClCompile Include="D3DHelpers.cpp" />
+    <ClCompile Include="Encoder.cpp" />
     <ClCompile Include="FrameCaptureThread.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="pch.cpp">
