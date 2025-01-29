@@ -86,7 +86,6 @@ namespace Encoder
         // 6) TODO: Use the NV12 data...
         //     - e.g., feed it into your hardware/software encoder
         //     - or store it somewhere, etc.
-        // For demonstration:
         std::cout << "[Encoder] Converted frame to NV12 ("
             << width << "x" << height << ")\n";
     }
