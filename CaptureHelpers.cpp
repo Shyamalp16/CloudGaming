@@ -31,7 +31,7 @@ struct FrameData {
 
 struct FrameComparator {
     bool operator()(const FrameData& a, FrameData& b) {
-        return a.sequenceNumber < b.sequenceNumber;
+        return a.sequenceNumber > b.sequenceNumber;
     };
 };
 
