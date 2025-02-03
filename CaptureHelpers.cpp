@@ -410,6 +410,7 @@ void ProcessFrames() {
         }
     }
     std::wcout << L"[ProcessFrames] Exiting.\n";
+    //TEST
 }
 
 //void ProcessFrames() {
