@@ -184,6 +184,8 @@ namespace Encoder{
                 return;
             }
 
+            hwFrame->pts = nv12Frame->pts;  // ✅ Ensure GPU frame has correct PTS
+
             std::wcout << L"[DEBUG] Sending frame to encoder\n";
             if (avcodec_send_frame(codecCtx, hwFrame) < 0) {
                 std::cerr << "[Encoder] Failed to send frame to encoder.\n";
@@ -192,7 +194,14 @@ namespace Encoder{
 
             while (avcodec_receive_packet(codecCtx, packet) == 0) {
                 packet->stream_index = videoStream->index;
-                av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);  // ✅ Rescale timestamps
+
+                // ✅ Properly rescale PTS and DTS
+                av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);
+
+                // ✅ Ensure DTS is never decreasing
+                if (packet->dts < packet->pts) {
+                    packet->dts = packet->pts;
+                }
 
                 if (av_interleaved_write_frame(formatCtx, packet) < 0) {
                     std::cerr << "[Encoder] Failed to write frame.\n";
@@ -211,6 +220,7 @@ namespace Encoder{
             std::cerr << "[EXCEPTION] EncodeFrame() - Unknown exception caught!\n";
         }
     }
+
 
 
     void ConvertFrame(const uint8_t* bgraData, int bgraPitch, int width, int height) {
@@ -305,6 +315,14 @@ namespace Encoder{
         // ✅ Flush any remaining frames
         avcodec_send_frame(codecCtx, nullptr);
         while (avcodec_receive_packet(codecCtx, packet) == 0) {
+            packet->stream_index = videoStream->index;
+            av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);
+
+            // ✅ Ensure DTS does not decrease
+            if (packet->dts < packet->pts) {
+                packet->dts = packet->pts;
+            }
+
             av_interleaved_write_frame(formatCtx, packet);
             av_packet_unref(packet);
         }
@@ -319,6 +337,7 @@ namespace Encoder{
 
         std::wcout << L"[Encoder] Encoder finalized.\n";
     }
+
 
 
 }
