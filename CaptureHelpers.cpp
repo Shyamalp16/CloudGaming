@@ -410,7 +410,7 @@ void ProcessFrames() {
         }
     }
     std::wcout << L"[ProcessFrames] Exiting.\n";
-    //TEST
+    
 }
 
 //void ProcessFrames() {
@@ -476,6 +476,7 @@ void StartCapture() {
     for (int i = 0; i < numThreads; i++) {
         workerThreads.emplace_back(ProcessFrames);
     }
+	Encoder::InitializeEncoder("output.mp4", 1920, 1080, 60);
     std::wcout << L"[StartCapture] Capture started with " << numThreads << L" threads.\n";
 }
 
@@ -555,6 +556,7 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
     // Release the frame pool and session resources
     framePool.FrameArrived(token);
     framePool.Close();
+    Encoder::FinalizeEncoder();
     std::wcout << L"[StopCapture] Capture stopped and resources released.\n";
 }
 

@@ -16,6 +16,8 @@ namespace Encoder {
 		int	width,
 		int height
 	);
-
+	void InitializeEncoder(const std::string& fileName, int width, int height, int fps);
+	void EncodeFrame(AVFrame* nv12Frame);
+	void FinalizeEncoder();
 
 }
