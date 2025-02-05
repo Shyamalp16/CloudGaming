@@ -16,6 +16,7 @@ static AVPacket* packet = nullptr;
 static AVFrame* hwFrame = nullptr;
 static AVBufferRef* hwDeviceCtx = nullptr;
 static int frameCounter = 0;
+static int64_t last_dts = 0;
 
 #define ENCODER "h264_nvenc"
 
@@ -62,6 +63,7 @@ namespace Encoder{
         codecCtx->height = height;
         codecCtx->time_base = AVRational({ 1, fps });
 		videoStream->time_base = codecCtx->time_base;
+        videoStream->avg_frame_rate = codecCtx->framerate;
         codecCtx->framerate = { fps, 1 };
         codecCtx->gop_size = 10;
         codecCtx->max_b_frames = 0;
@@ -199,9 +201,14 @@ namespace Encoder{
                 av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);
 
                 // ✅ Ensure DTS is never decreasing
-                if (packet->dts < packet->pts) {
+                /*if (packet->dts < packet->pts) {
                     packet->dts = packet->pts;
-                }
+                }*/
+
+				if (packet->dts < last_dts) {
+					packet->dts = last_dts + 1;
+				}
+				last_dts = packet->dts;
 
                 if (av_interleaved_write_frame(formatCtx, packet) < 0) {
                     std::cerr << "[Encoder] Failed to write frame.\n";
