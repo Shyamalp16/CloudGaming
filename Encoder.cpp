@@ -1,7 +1,6 @@
 ﻿#pragma once
 #include "Encoder.h"
 
-
 static SwsContext* swsCtx = nullptr;
 static AVFrame* nv12Frame = nullptr;
 static int currentWidth = 0;
@@ -19,8 +18,6 @@ static int frameCounter = 0;
 static int64_t last_dts = 0;
 
 #define ENCODER "h264_nvenc"
-
-
 
 namespace Encoder{
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps) {
@@ -59,8 +56,8 @@ namespace Encoder{
 
         std::wcout << L"[DEBUG] Allocated codec context\n";
 
-        codecCtx->width = width;
-        codecCtx->height = height;
+        codecCtx->width = 1920;
+        codecCtx->height = 1080;
         codecCtx->time_base = AVRational({ 1, fps });
 		videoStream->time_base = codecCtx->time_base;
         videoStream->avg_frame_rate = codecCtx->framerate;
@@ -157,7 +154,7 @@ namespace Encoder{
                 return;
             }
 
-            // ✅ Ensure PTS increases correctly based on frame rate
+            // Ensure PTS increases correctly based on frame rate
             nv12Frame->pts = frameCounter * codecCtx->time_base.den / codecCtx->time_base.num / codecCtx->framerate.num;
 
             std::wcout << L"[DEBUG] Allocating GPU frame\n";
@@ -170,7 +167,7 @@ namespace Encoder{
             hwFrame->format = AV_PIX_FMT_CUDA;
             hwFrame->width = codecCtx->width;
             hwFrame->height = codecCtx->height;
-            hwFrame->pts = nv12Frame->pts;  // ✅ Ensure correct PTS assignment
+            hwFrame->pts = nv12Frame->pts;  //  Ensure correct PTS assignment
 
             std::wcout << L"[DEBUG] Allocating hardware buffer\n";
             int ret = av_hwframe_get_buffer(codecCtx->hw_frames_ctx, hwFrame, 0);
@@ -186,7 +183,7 @@ namespace Encoder{
                 return;
             }
 
-            hwFrame->pts = nv12Frame->pts;  // ✅ Ensure GPU frame has correct PTS
+            hwFrame->pts = nv12Frame->pts;  //  Ensure GPU frame has correct PTS
 
             std::wcout << L"[DEBUG] Sending frame to encoder\n";
             if (avcodec_send_frame(codecCtx, hwFrame) < 0) {
@@ -197,10 +194,10 @@ namespace Encoder{
             while (avcodec_receive_packet(codecCtx, packet) == 0) {
                 packet->stream_index = videoStream->index;
 
-                // ✅ Properly rescale PTS and DTS
+                //  Properly rescale PTS and DTS
                 av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);
 
-                // ✅ Ensure DTS is never decreasing
+                //  Ensure DTS is never decreasing
                 /*if (packet->dts < packet->pts) {
                     packet->dts = packet->pts;
                 }*/
@@ -217,7 +214,7 @@ namespace Encoder{
                 av_packet_unref(packet);
             }
             av_frame_free(&hwFrame);
-            frameCounter++;  // ✅ Increment frame count properly
+            frameCounter++;  //  Increment frame count properly
             std::wcout << L"[DEBUG] Frame encoded successfully.\n";
         }
         catch (const std::exception& e) {
@@ -228,12 +225,9 @@ namespace Encoder{
         }
     }
 
-
-
     void ConvertFrame(const uint8_t* bgraData, int bgraPitch, int width, int height) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
         std::wcout << L"[CONV_DEBUG] ConvertFrame() - Start\n";
-
 
         // 1) Re-create SWS context if resolution changed or not yet set
         if (!swsCtx || width != currentWidth || height != currentHeight)
@@ -252,8 +246,9 @@ namespace Encoder{
             // Create new context
             swsCtx = sws_getContext(
                 width, height, AV_PIX_FMT_BGRA,  // Input is BGRA
-                width, height, AV_PIX_FMT_NV12,  // Output is NV12
-                SWS_BILINEAR, nullptr, nullptr, nullptr
+                1920, 1080, AV_PIX_FMT_NV12,  // Output is NV12
+                //SWS_BICUBIC, nullptr, nullptr, nullptr
+                SWS_LANCZOS, nullptr, nullptr, nullptr
             );
             if (!swsCtx) {
                 std::cerr << "[Encoder] Failed to create swsCtx.\n";
@@ -263,8 +258,8 @@ namespace Encoder{
             // 2) Create NV12 frame
             nv12Frame = av_frame_alloc();
             nv12Frame->format = AV_PIX_FMT_NV12;
-            nv12Frame->width = width;
-            nv12Frame->height = height;
+            nv12Frame->width = 1920;
+            nv12Frame->height = 1080;
 
             int ret = av_frame_get_buffer(nv12Frame, 32); // 32 alignment
             if (ret < 0) {
@@ -275,7 +270,6 @@ namespace Encoder{
             currentWidth = width;
             currentHeight = height;
             std::wcout << L"[CONV_DEBUG] ConvertFrame() - Performing sws_scale\n";
-
         }
 
         // 3) Prepare input arrays for sws_scale
@@ -304,13 +298,6 @@ namespace Encoder{
 
         EncodeFrame();
         std::wcout << L"[CONV_DEBUG] ConvertFrame() - End\n";
-
-
-        // Now nv12Frame->data[0] = Y plane, data[1] = interleaved UV
-
-        // 6) TODO: Use the NV12 data...
-        //     - e.g., feed it into your hardware/software encoder
-        //     - or store it somewhere, etc.
         std::cout << "[Encoder] Converted frame to NV12 ("
             << width << "x" << height << ")\n";
     }
@@ -319,13 +306,13 @@ namespace Encoder{
         std::lock_guard<std::mutex> lock(g_encoderMutex);
         std::wcout << L"[DEBUG] Finalizing encoder...\n";
 
-        // ✅ Flush any remaining frames
+        // Flush any remaining frames
         avcodec_send_frame(codecCtx, nullptr);
         while (avcodec_receive_packet(codecCtx, packet) == 0) {
             packet->stream_index = videoStream->index;
             av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);
 
-            // ✅ Ensure DTS does not decrease
+            //  Ensure DTS does not decrease
             if (packet->dts < packet->pts) {
                 packet->dts = packet->pts;
             }
@@ -334,7 +321,7 @@ namespace Encoder{
             av_packet_unref(packet);
         }
 
-        av_write_trailer(formatCtx);  // ✅ Ensure MP4 file is finalized
+        av_write_trailer(formatCtx);  //  Ensure MP4 file is finalized
 
         avio_closep(&formatCtx->pb);
         avcodec_free_context(&codecCtx);
@@ -344,7 +331,4 @@ namespace Encoder{
 
         std::wcout << L"[Encoder] Encoder finalized.\n";
     }
-
-
-
 }

@@ -309,37 +309,6 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
     return framePool.FrameArrived(handler);
 }
 
-//void ProcessFrames() {
-//    while (true) {
-//        std::unique_lock<std::mutex> lock(queueMutex);
-//        queueCV.wait(lock, [&]() { return !frameQueue.empty() || !isCapturing.load(); });
-//
-//        // If capturing is stopped and queue is empty, exit the loop
-//        if (!isCapturing.load() && frameQueue.empty()) {
-//            break;
-//        }
-//
-//        // Retrieve and process the next surface from the queue
-//        if (!frameQueue.empty()) {
-//            auto surface = frameQueue.pop();
-//            lock.unlock();
-//
-//            if (!surface) {
-//                break;  // Sentinel value detected
-//            }
-//
-//            std::wcout << L"[ProcessFrames] Processing the frame!!\n";
-//
-//            // Save the frame
-//            SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(surface), L"frame.png", frameCounter++);
-//        }
-//        else {
-//            lock.unlock();
-//        }
-//    }
-//    std::wcout << L"[ProcessFrames] Exiting.\n";
-//}
-
 void PreProcessFrameConversion(winrt::com_ptr<ID3D11Device> device, winrt::com_ptr<ID3D11Texture2D> texture, int sequenceNumber) {
     winrt::com_ptr<ID3D11DeviceContext> context;
     device->GetImmediateContext(context.put());
@@ -401,63 +370,17 @@ void ProcessFrames() {
 
         if (frameData.surface) {
             // Process the frame (e.g., save it)
-            SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(frameData.surface), L"frame", frameData.sequenceNumber);
+            //SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(frameData.surface), L"frame", frameData.sequenceNumber);
             std::wcout << L"[ProcessFrames] Processed frame with sequence number: " << frameData.sequenceNumber << std::endl;
 
-			auto device = GetD3DDevice();
-			auto texture = GetTextureFromSurface(frameData.surface);
+            auto device = GetD3DDevice();
+            auto texture = GetTextureFromSurface(frameData.surface);
             PreProcessFrameConversion(device, texture, frameData.sequenceNumber);
         }
     }
     std::wcout << L"[ProcessFrames] Exiting.\n";
-    
+
 }
-
-//void ProcessFrames() {
-//    while (isCapturing.load() || !frameQueue.empty()) {
-//        std::unique_lock<std::mutex> lock(queueMutex);
-//        queueCV.wait(lock, [&]() { return !frameQueue.empty() || !isCapturing.load(); });
-//
-//        if (!frameQueue.empty()) {
-//            auto surface = frameQueue.pop();
-//            lock.unlock();
-//
-//            if (!surface) {
-//                break;  // Sentinel value detected, exit the loop
-//            }
-//
-//            std::wcout << L"[ProcessFrames] Processing the frame!!\n";
-//
-//            // Process the frame (e.g., save it as PNG)
-//            SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(surface), L"frame.png");
-//        }
-//        else {
-//            lock.unlock();
-//        }
-//    }
-//    std::wcout << L"[ProcessFrames] Exiting.\n";
-//}
-
-//void StartCapture() {
-//    // Clear existing threads if any
-//    for (auto& thread : workerThreads) {
-//        if (thread.joinable()) {
-//            thread.join();
-//        }
-//    }
-//    workerThreads.clear();
-//
-//    isCapturing.store(true);
-//    std::wcout << L"[StartCapture] Starting capture...\n";
-//
-//    // Create Worker Threads
-//    int numThreads = std::thread::hardware_concurrency();
-//    //int numThreads = 2;
-//    for (int i = 0; i < numThreads; i++) {
-//        workerThreads.emplace_back(std::thread(ProcessFrames));
-//    }
-//    std::wcout << L"[StartCapture] Capture started with " << numThreads << L" threads.\n";
-//}
 
 void StartCapture() {
     // Clear existing threads if any
@@ -479,43 +402,6 @@ void StartCapture() {
 	Encoder::InitializeEncoder("output.mp4", 1920, 1080, 60);
     std::wcout << L"[StartCapture] Capture started with " << numThreads << L" threads.\n";
 }
-
-//void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& framePool) {
-//	//Unsubscribe from FrameArrived
-//    auto startTime = steady_clock::now();
-//    while (!frameQueue.empty()) {
-//        std::wcout << L"[StopCapture] Waiting for the frame queue to empty.\n";
-//        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-//    }
-//
-//    if (!frameQueue.empty()) {
-//        std::wcerr << L"[StopCapture] Timeout reached while waiting for frame queue to empty.\n";
-//    }
-//
-//    isCapturing.store(false);
-//
-//    // Notify threads to exit
-//    {
-//        std::lock_guard<std::mutex> lock(queueMutex);
-//        for (size_t i = 0; i < workerThreads.size(); i++) {
-//            frameQueue.push(nullptr);  // Sentinel value for each thread
-//        }
-//    }
-//    queueCV.notify_all();  // Wake up all waiting threads
-//
-//
-//    for (auto& thread : workerThreads) {
-//        if (thread.joinable()) {
-//            thread.join();
-//        }
-//    }
-//    std::wcout << L"[StopCapture] Worker thread joined.\n";
-//    workerThreads.clear();
-//
-//    framePool.FrameArrived(token);
-//    framePool.Close();
-//    std::wcout << L"[StopCapture] Capture stopped and resources released.\n";
-//}
 
 void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& framePool) {
     std::wcout << L"[StopCapture] Stopping capture...\n";
@@ -559,42 +445,3 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
     Encoder::FinalizeEncoder();
     std::wcout << L"[StopCapture] Capture stopped and resources released.\n";
 }
-
-//void StopCapture(winrt::event_token& token, Direct3D11CaptureFramePool const& framePool) {
-//    std::wcout << L"[StopCapture] Stopping capture...\n";
-//
-//    // Stop capturing new frames
-//    isCapturing.store(false);
-//
-//    // Notify all worker threads to stop
-//    {
-//        std::lock_guard<std::mutex> lock(queueMutex);
-//        for (size_t i = 0; i < workerThreads.size(); i++) {
-//            framePriorityQueue.push({ -1, nullptr }); // Push sentinel value for each thread
-//        }
-//    }
-//    queueCV.notify_all();
-//
-//    // Join all worker threads
-//    for (auto& thread : workerThreads) {
-//        if (thread.joinable()) {
-//            thread.join();
-//            std::wcout << L"[StopCapture] Worker thread joined.\n";
-//        }
-//    }
-//    workerThreads.clear();
-//
-//    // Clear the frame queue (though it should be empty due to sentinels)
-//    {
-//        std::lock_guard<std::mutex> lock(queueMutex);
-//        while (!framePriorityQueue.empty()) {
-//            framePriorityQueue.pop();
-//        }
-//    }
-//
-//    // Release resources
-//    framePool.FrameArrived(token);
-//    framePool.Close();
-//
-//    std::wcout << L"[StopCapture] Capture stopped and resources released.\n";
-//}
