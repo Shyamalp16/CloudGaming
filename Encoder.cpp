@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "Encoder.h"
+#include "GlobalTime.h"
 
 static SwsContext* swsCtx = nullptr;
 static AVFrame* nv12Frame = nullptr;
@@ -155,7 +156,10 @@ namespace Encoder{
             }
 
             // Ensure PTS increases correctly based on frame rate
-            nv12Frame->pts = frameCounter * codecCtx->time_base.den / codecCtx->time_base.num / codecCtx->framerate.num;
+			auto now = std::chrono::steady_clock::now();
+			auto elapsedUS = std::chrono::duration_cast<std::chrono::microseconds>(now - startTime).count();
+            //nv12Frame->pts = frameCounter * codecCtx->time_base.den / codecCtx->time_base.num / codecCtx->framerate.num;
+			nv12Frame->pts = av_rescale_q(elapsedUS, AVRational{ 1, 1000000 }, codecCtx->time_base);
 
             std::wcout << L"[DEBUG] Allocating GPU frame\n";
             AVFrame* hwFrame = av_frame_alloc();

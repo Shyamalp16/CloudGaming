@@ -111,6 +111,7 @@
     <ClInclude Include="D3DHelpers.h" />
     <ClInclude Include="Encoder.h" />
     <ClInclude Include="FrameCaptureThread.h" />
+    <ClInclude Include="GlobalTime.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="WindowHelpers.h" />
   </ItemGroup>

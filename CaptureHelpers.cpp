@@ -1,4 +1,5 @@
 #include "CaptureHelpers.h"
+#include "GlobalTime.h"
 #include "Encoder.h"
 #include <chrono>
 #include <iostream>
@@ -47,6 +48,8 @@ static constexpr auto g_minInterval = 16ms; //~60fps
 
 static int g_currentWidth = 0;  // Initialize to 0 or any default value
 static int g_currentHeight = 0; // Initialize to 0 or any default value
+
+std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
 
 winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface)
