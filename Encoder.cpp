@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "Encoder.h"
 #include "GlobalTime.h"
+#include <functional>
 
 static SwsContext* swsCtx = nullptr;
 static AVFrame* nv12Frame = nullptr;
@@ -19,6 +20,17 @@ static int frameCounter = 0;
 static int64_t last_dts = 0;
 
 #define ENCODER "h264_nvenc"
+
+typedef std::function<void(AVPacket* packet)> EncodedFrameCallback;
+static EncodedFrameCallback g_onEncodedFrameCallback = nullptr;
+void setEncodedFrameCallback(EncodedFrameCallback callback) {
+    g_onEncodedFrameCallback = callback;
+}
+
+//TODO: pushing packet to WebRTC logic goes here
+void pushPacketToWebRTC(AVPacket* packet) {
+    std::wcout << L"[WebRTC] Pushing encoded packets (PTS: " << packet->pts << L") to WebRTC module.\n";
+}
 
 namespace Encoder{
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps) {
@@ -111,7 +123,8 @@ namespace Encoder{
 
         avcodec_parameters_from_context(videoStream->codecpar, codecCtx);
 
-        if (!(formatCtx->oformat->flags & AVFMT_NOFILE)) {
+        //Commented out the following cause i dont want it to make an output file
+        /*if (!(formatCtx->oformat->flags & AVFMT_NOFILE)) {
             if (avio_open(&formatCtx->pb, fileName.c_str(), AVIO_FLAG_WRITE) < 0) {
                 std::cerr << "[Encoder] Failed to open output file.\n";
                 return;
@@ -125,7 +138,7 @@ namespace Encoder{
             return;
         }
 
-        std::wcout << L"[DEBUG] Format header written\n";
+        std::wcout << L"[DEBUG] Format header written\n";*/
 
         packet = av_packet_alloc();
         if (!packet) {
@@ -208,10 +221,19 @@ namespace Encoder{
 				}
 				last_dts = packet->dts;
 
-                if (av_interleaved_write_frame(formatCtx, packet) < 0) {
+                //Commenting out the save output as video
+                /*if (av_interleaved_write_frame(formatCtx, packet) < 0) {
                     std::cerr << "[Encoder] Failed to write frame.\n";
                     return;
+                }*/
+
+                if (g_onEncodedFrameCallback) {
+                    g_onEncodedFrameCallback(packet);
                 }
+                else {
+                    pushPacketToWebRTC(packet);
+                }
+
                 av_packet_unref(packet);
             }
             av_frame_free(&hwFrame);
@@ -248,8 +270,8 @@ namespace Encoder{
             swsCtx = sws_getContext(
                 width, height, AV_PIX_FMT_BGRA,  // Input is BGRA
                 1920, 1080, AV_PIX_FMT_NV12,  // Output is NV12
-                //SWS_BICUBIC, nullptr, nullptr, nullptr
-                SWS_LANCZOS, nullptr, nullptr, nullptr
+                SWS_BICUBIC, nullptr, nullptr, nullptr
+                //SWS_LANCZOS, nullptr, nullptr, nullptr
             );
             if (!swsCtx) {
                 std::cerr << "[Encoder] Failed to create swsCtx.\n";
@@ -322,9 +344,10 @@ namespace Encoder{
             av_packet_unref(packet);
         }
 
-        av_write_trailer(formatCtx);  //  Ensure MP4 file is finalized
+        //Commenting out because i dont want creation of output.mp4
+        //av_write_trailer(formatCtx);  //  Ensure MP4 file is finalized
+        //avio_closep(&formatCtx->pb);
 
-        avio_closep(&formatCtx->pb);
         avcodec_free_context(&codecCtx);
         avformat_free_context(formatCtx);
         av_packet_free(&packet);
