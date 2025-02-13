@@ -83,7 +83,6 @@ int main()
     }
 
     //Register for FrameArrived
-	//ThreadSafeQueue<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface> myFrameQueue;
     auto token = FrameArrivedEventRegistration(framePool);
 
     //Start windows graphics capture

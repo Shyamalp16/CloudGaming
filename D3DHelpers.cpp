@@ -2,7 +2,7 @@
 #include <iostream>  // for wcout, wcerr
 #include <winrt/Windows.Foundation.h>
 #include <d3d11.h>
-#include <dxgi1_2.h> // or dxgi.h
+#include <dxgi1_2.h> 
 #include <Windows.Graphics.DirectX.Direct3D11.interop.h> // CreateDirect3D11DeviceFromDXGIDevice
 
 #pragma comment(lib, "d3d11.lib")

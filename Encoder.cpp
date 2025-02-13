@@ -202,9 +202,6 @@ namespace Encoder{
                 av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);
 
                 //  Ensure DTS is never decreasing
-                /*if (packet->dts < packet->pts) {
-                    packet->dts = packet->pts;
-                }*/
 
 				if (packet->dts < last_dts) {
 					packet->dts = last_dts + 1;

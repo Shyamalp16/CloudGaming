@@ -22,7 +22,6 @@ using namespace winrt::Windows::Foundation;
 
 //Global Variables
 std::vector<std::thread> workerThreads;
-//ThreadSafeQueue<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface> frameQueue;
 std::atomic<bool> isCapturing{ false };
 
 struct FrameData {
