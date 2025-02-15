@@ -36,6 +36,9 @@
     <ClInclude Include="GlobalTime.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="Websocket.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -57,6 +60,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Encoder.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Websocket.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

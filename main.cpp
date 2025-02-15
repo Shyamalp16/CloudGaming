@@ -1,4 +1,5 @@
-﻿#include <winrt/Windows.Foundation.h>
+﻿
+#include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Capture.h>
 #include <iostream>
 
@@ -6,6 +7,7 @@
 #include "WindowHelpers.h"
 #include "CaptureHelpers.h"
 #include "FrameCaptureThread.h"
+#include "Websocket.h"
 
 int main()
 {
@@ -90,6 +92,7 @@ int main()
 
 	//Start worker threads to process frames
     StartCapture();
+    initWebsocket();
     std::wcout << L"[main] Capture started!\n";
 
     // Keep the app alive for 10 seconds to see frame events

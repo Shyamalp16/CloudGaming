@@ -1,9 +1,9 @@
 #include "D3DHelpers.h"
-#include <iostream>  // for wcout, wcerr
+#include <iostream>
 #include <winrt/Windows.Foundation.h>
 #include <d3d11.h>
 #include <dxgi1_2.h> 
-#include <Windows.Graphics.DirectX.Direct3D11.interop.h> // CreateDirect3D11DeviceFromDXGIDevice
+#include <Windows.Graphics.DirectX.Direct3D11.interop.h>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")

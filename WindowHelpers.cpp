@@ -2,7 +2,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <winrt/Windows.Foundation.h>
-#include <windows.graphics.capture.interop.h> // IGraphicsCaptureItemInterop
+#include <windows.graphics.capture.interop.h>
 
 HWND fetchForegroundWindow()
 {
