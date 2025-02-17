@@ -365,3 +365,6 @@ FodyWeavers.xsd
 
 
 /Server/node_modules
+/Server/SignalingServer.js
+
+/Client/node_modules

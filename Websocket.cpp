@@ -19,7 +19,7 @@ void on_open(client* c, websocketpp::connection_hdl hdl) {
 	json offerMsg;
 	offerMsg["type"] = "offer";
 	offerMsg["data"] = "fake sdp from C++";
-	send_message(offerMsg);
+	//send_message(offerMsg);
 }
 
 //callback for when we get a message from server
