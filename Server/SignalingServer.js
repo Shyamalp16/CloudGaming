@@ -1,4 +1,5 @@
 const WebSocket = require('ws')
+const { RTCPeerConnection } = require('wrtc')
 const server = new WebSocket.Server({port : 3000})
 
 //array of max 2 peers
@@ -24,15 +25,51 @@ server.on('connection', (ws) => {
   connections.push(ws)
   console.log('New Client Connected, Total Connections:', connections.length)
 
-  try{
-    ws.send(JSON.stringify({type : 'offer', data : 'NodeJS Hello Signal'}), (error) => {
-      if(error){
-        console.error('Error Sending Hello Message From NodeJS:', error)
+  //make a RTCPeerConnection object as a client (game player)
+  const peerConnection = new RTCPeerConnection({
+    iceServers: [{urls: 'stun:stun.l.google.com:19302'}]
+  })
+  ws.peerConnection = peerConnection
+
+  //when ice are collected, send it thrugh websocket signaling channel
+  peerConnection.onicecandidate = (event) => {
+    if(event.candidate){
+      console.log('Local ICE Candidate: ', event.candidate)
+      const candidateMessage = {
+        type: 'ice-candidate',
+        candidate: event.candidate
       }
-    })
-  }catch(error){
-    console.error('Exception Sending Hello Message From NodeJS:', error)
+      ws.send(JSON.stringify(candidateMessage))
+    }
   }
+
+  // client is the first offerer, so when the CLIENT joins ws, create offer and save as local desc
+  if(connections.length === 1) {
+    peerConnection.createOffer().then(offer => {
+      console.log('Created Offer:', offer)
+      return peerConnection.setLocalDescription(offer)
+    }).then(() => {
+      //send offer (SDP) over to the host (game host)
+      const offerMsg = {
+        type: 'offer',
+        sdp: peerConnection.localDescription.sdp
+      }
+      console.log('Sending Offer: ', offerMsg)
+      ws.send(JSON.stringify(offerMsg))
+    }).catch(error => {
+      console.error('Error During Offer Creation:', error)
+    })
+  }
+
+  // try{
+  //   ws.send(JSON.stringify({type : 'offer', data : 'NodeJS Hello Signal'}), (error) => {
+  //     if(error){
+  //       console.error('Error Sending Hello Message From NodeJS:', error)
+  //     }
+  //   })
+  // }catch(error){
+  //   console.error('Exception Sending Hello Message From NodeJS:', error)
+  // }
 
   ws.on('message', (message) => {
     console.log('Received Message:', message);
@@ -59,6 +96,9 @@ server.on('connection', (ws) => {
       case 'ice-candidate':
         console.log('Received ICE-Candidate:', message);
         forwardToOther(ws, parsed);
+        if(ws.peerConnection && parsed.candidate){
+          ws.peerConnection.addIceCandidate(parsed.candidate).catch(error => console.error('Error Adding ICE Candidate:', error))
+        }
         break;
 
       default:
