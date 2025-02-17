@@ -1,4 +1,3 @@
-// Import RTCPeerConnection from the wrtc package
 const { RTCPeerConnection } = require('wrtc');
 const WebSocket = require('ws');
 
@@ -6,7 +5,6 @@ const serverUrl = 'ws://localhost:3000';
 let ws;
 let peerConnection;
 
-// ICE config: specify STUN servers
 const config = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
 };
@@ -30,15 +28,15 @@ function connectToSignalingServer() {
         await handleRemoteIceCandidate(msg.candidate);
         break;
       case 'offer':
-        console.warn('Unexpected offer received: this client is the offerer.');
+        console.warn('Unexpected Offer Received, This Client Will Always Be The Offerer.');
         break;
       default:
-        console.warn('Unknown message type:', msg.type);
+        console.warn('Unknown Message Type:', msg.type);
     }
   };
 
   ws.onerror = (err) => {
-    console.error('WebSocket error:', err);
+    console.error('WebSocket Error:', err);
   };
 }
 
@@ -47,7 +45,7 @@ function createPeerConnection() {
 
   peerConnection.onicecandidate = (event) => {
     if (event.candidate) {
-      console.log('Local ICE candidate:', event.candidate);
+      console.log('Local ICE Candidate:', event.candidate);
       ws.send(JSON.stringify({
         type: 'ice-candidate',
         candidate: event.candidate
@@ -57,10 +55,8 @@ function createPeerConnection() {
 
   peerConnection.ondatachannel = (event) => {
     const receiveChannel = event.channel;
-    console.log('Data channel received:', receiveChannel.label);
+    console.log('Data Channel Received:', receiveChannel.label);
   };
-
-  // Optional: for media streams, use peerConnection.ontrack
 }
 
 async function handleAnswer(answerMsg) {
@@ -81,14 +77,13 @@ async function handleRemoteIceCandidate(candidate) {
 async function startConnection() {
   if (!peerConnection) createPeerConnection();
 
-  // Create a data channel (optional)
-  const dataChannel = peerConnection.createDataChannel('chat');
+  const dataChannel = peerConnection.createDataChannel('tst');
   dataChannel.onopen = () => {
-    console.log('Data channel opened');
-    dataChannel.send('Hello from the offerer!');
+    console.log('Data Channel Opened');
+    dataChannel.send('Hello From The Offerer!');
   };
   dataChannel.onmessage = (event) => {
-    console.log('Received message on data channel:', event.data);
+    console.log('Received Message On Data Channel:', event.data);
   };
 
   const offer = await peerConnection.createOffer();
@@ -98,12 +93,11 @@ async function startConnection() {
     type: 'offer',
     sdp: offer.sdp
   }));
-  console.log('Offer sent:', offer.sdp);
+  console.log('Offer Sent:', offer.sdp);
 }
 
 connectToSignalingServer();
 
-// For example, start connection automatically after a delay or on some trigger
 setTimeout(() => {
   startConnection();
 }, 3000);
