@@ -1,39 +1,102 @@
-const express = require('express')
-const http = require('http')
-const socketIO = require('socket.io')
+const WebSocket = require('ws')
+const server = new WebSocket.Server({port : 3000})
 
-const app = express()
-const server = http.createServer(app)
-const io = socketIO(server)
+//array of max 2 peers
+let connections = []
 
-app.use(express.static('public'))
+server.on('connection', (ws) => {
 
-io.on('connection', socket => {
-    console.log('New client connected: ', socket.id);
-  
-    // When a peer sends an offer
-    socket.on('offer', offer => {
-      console.log('Received offer:', offer);
-      socket.broadcast.emit('offer', offer);
-    });
-  
-    // When a peer sends an answer.
-    socket.on('answer', answer => {
-      console.log('Received answer:', answer);
-      socket.broadcast.emit('answer', answer);
-    });
-  
-    // When a peer sends an ICE candidate.
-    socket.on('ice-candidate', candidate => {
-      console.log('Received ICE candidate:', candidate);
-      socket.broadcast.emit('ice-candidate', candidate);
-    });
-  
-    socket.on('disconnect', () => {
-      console.log('Client disconnected: ', socket.id);
-    });
-});
+  ws.on('error', (error) => {
+    console.error('Websocket Error: ', error)
+  })
 
-server.listen(3000, () => {
-    console.log("Signaling server is listening on port 3000")
+
+  if(connections.length >=2){
+    console.log('2 Peers Conneceted, Refusing Any New Connections')
+    try{
+      ws.close(1000, 'Maximum Connections Reached')
+    }catch(error){
+      console.error('Error Closing Extra Connection', error)
+    }
+    return
+  }
+
+  connections.push(ws)
+  console.log('New Client Connected, Total Connections:', connections.length)
+
+  try{
+    ws.send(JSON.stringify({type : 'offer', data : 'NodeJS Hello Signal'}), (error) => {
+      if(error){
+        console.error('Error Sending Hello Message From NodeJS:', error)
+      }
+    })
+  }catch(error){
+    console.error('Exception Sending Hello Message From NodeJS:', error)
+  }
+
+  ws.on('message', (message) => {
+    console.log('Received Message:', message);
+    let parsed;
+
+    try{
+      parsed = JSON.parse(message)
+    }catch(error){
+      console.error('Failed To Parse Message:', error)
+      return;
+    }
+
+    switch(parsed.type){
+      case 'offer':
+        console.log('Received Offer:', message);
+        forwardToOther(ws, parsed);
+        break;
+
+      case 'answer':
+        console.log('Received Answer:', message);
+        forwardToOther(ws, parsed);
+        break;
+
+      case 'ice-candidate':
+        console.log('Received ICE-Candidate:', message);
+        forwardToOther(ws, parsed);
+        break;
+
+      default:
+        console.log('Unknown Message Type:', parsed.type);
+        break;
+    }
+  })
+
+  ws.on('close', () => {
+    console.log('Client Disconnected')
+    connections = connections.filter((client) => client != ws)
+  })
 })
+
+
+//server level error handling
+server.on('error', (error) => {
+  console.error('Server Error:', error)
+})
+
+
+console.log('SignalingServer Listening on Port 3000')
+
+function forwardToOther(sender, message){
+  const data = JSON.stringify(message)
+  const otherPeer = connections.find((client) => client != sender)
+
+  if(otherPeer && otherPeer.readyState == WebSocket.OPEN){
+    try{
+      otherPeer.send(data, (error) => {
+        if(error){
+          console.error('Error Forwarding Message To Other Peer:', error)
+        }
+      })
+    }catch(error){
+      console.error('Exception While Forwarding Message:', error)
+    }
+  }else{
+    console.warn('No Available Peer To Send The Message To')
+  }
+}
