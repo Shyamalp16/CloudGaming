@@ -89,6 +89,7 @@ void initWebsocket() {
 	//run in separate thread
 	std::thread t([&](){
 		try {
+			//std::this_thread::sleep_for(std::chrono::seconds(5));
 			wsClient.run();
 		}
 		catch (const std::exception& ex) {
