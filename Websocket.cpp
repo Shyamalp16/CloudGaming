@@ -7,19 +7,35 @@ client wsClient;
 websocketpp::connection_hdl g_connectionHandle;
 std::string uri = "ws://localhost:3000";
 
+static std::string remoteOfferSDP;
+static std::vector<std::string> remoteIceCandidates;
+static bool answerSent = false;
+
+static webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> peerConnectionFactory;
+static webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peerConnection;
+
 void on_open(client* c, websocketpp::connection_hdl hdl);
 void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg);
 void send_message(const json& message);
 
+void sendAnswer() {
+	if (answerSent) {
+		std::cout << "[WebSocket] Answer already sent\n";
+		return;
+	}
+
+	json answerMsg;
+	answerMsg["type"] = "answer";
+	answerMsg["sdp"] = "fake sdp from C++";
+
+	send_message(answerMsg);
+	answerSent = true;
+	std::cout << "[WebSocket] Answer sent\n";
+}
+
 void on_open(client* c, websocketpp::connection_hdl hdl) {
 	std::cout << "[WebSocket] Connected opened to " << uri << std::endl;
 	g_connectionHandle = hdl;
-
-
-	json offerMsg;
-	offerMsg["type"] = "offer";
-	offerMsg["data"] = "fake sdp from C++";
-	//send_message(offerMsg);
 }
 
 //callback for when we get a message from server
@@ -29,8 +45,10 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
 		std::string type = message["type"];
 
 		if (type == "offer") {
-			std::cout << L"[WebSocket] Received offer from server: \n" << message.dump() << std::endl;
-			//handle offer
+			std::cout << "[WebSocket] Received offer from server: \n" << message.dump() << std::endl;
+			remoteOfferSDP = message.value("sdp", "No SDP Found");
+			//i could parse or do smth with remoteOfferSDP and either send it rn or later, for now sedngin it immediately
+			sendAnswer();
 		}
 		else if (type == "answer") {
 			std::cout << "[WebSocket] Received answer from server" << message.dump() << std::endl;
@@ -38,7 +56,9 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
 		}
 		else if (type == "ice-candidate") {
 			std::cout << "[WebSocket] Received ice candidate from server" << message.dump() << std::endl;
-			//add candidate to peer connection
+			std::string candidateStr = message["candidate"].dump();
+			remoteIceCandidates.push_back(candidateStr);
+			//can process these candidates lateron here
 		}else {
 			std::cout << "[WebSocket] Received Message: " << message.dump() << std::endl;
 		}
