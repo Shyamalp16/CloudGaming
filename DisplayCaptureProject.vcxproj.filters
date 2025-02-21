@@ -39,6 +39,12 @@
     <ClInclude Include="Websocket.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="MySetRemoteObserver.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MyCreateSdpObserver.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -63,6 +69,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Websocket.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MySetRemoteObserver.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MyCreateSdpObserver.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

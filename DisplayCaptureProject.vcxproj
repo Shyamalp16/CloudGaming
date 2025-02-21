@@ -113,6 +113,8 @@
     <ClInclude Include="Encoder.h" />
     <ClInclude Include="FrameCaptureThread.h" />
     <ClInclude Include="GlobalTime.h" />
+    <ClInclude Include="MyCreateSdpObserver.h" />
+    <ClInclude Include="MySetRemoteObserver.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="Websocket.h" />
     <ClInclude Include="WindowHelpers.h" />
@@ -123,6 +125,8 @@
     <ClCompile Include="Encoder.cpp" />
     <ClCompile Include="FrameCaptureThread.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="MyCreateSdpObserver.cpp" />
+    <ClCompile Include="MySetRemoteObserver.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
