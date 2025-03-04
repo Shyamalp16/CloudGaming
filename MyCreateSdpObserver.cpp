@@ -1,6 +1,6 @@
 #include "MyCreateSdpObserver.h"
 
-extern webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peerConnection;
+extern rtc::scoped_refptr<webrtc::PeerConnectionInterface> peerConnection;
 
 void MyCreateSdpObserver::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
 	if (!desc) {

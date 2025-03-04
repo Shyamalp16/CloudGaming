@@ -8,7 +8,7 @@
 //#include <api/peer_connection_interface.h>
 
 
-extern webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peerConnection;
+extern rtc::scoped_refptr<webrtc::PeerConnectionInterface> peerConnection;
 
 class MyCreateSdpObserver : public webrtc::CreateSessionDescriptionObserver {
 public:

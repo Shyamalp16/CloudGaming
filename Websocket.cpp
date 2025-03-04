@@ -13,8 +13,8 @@ std::string uri = "ws://localhost:3000";
 //static std::vector<std::string> remoteIceCandidates;
 //static bool answerSent = false;
 
-static webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> peerConnectionFactory;
-static webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peerConnection;
+ rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> peerConnectionFactory;
+ rtc::scoped_refptr<webrtc::PeerConnectionInterface> peerConnection;
 static bool answerCreated = false;
 
 void on_open(client* c, websocketpp::connection_hdl hdl);
@@ -45,7 +45,7 @@ public:
 		std::cout << "[C++ Host] OnIceConnectionChange To: " << new_state << std::endl;
 	}
 
-	void OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override {
+	void OnDataChannel(rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override {
 		std::cout << "[C++ Host] OnDataChannel: \n" << data_channel->label() << std::endl;
 	}
 
@@ -101,9 +101,15 @@ bool createPeerConnection() {
 	observer = std::make_unique<CustomPeerConnectionObserver>();
 	webrtc::PeerConnectionDependencies deps(observer.get());
 
-	auto resultOrError = peerConnectionFactory->CreatePeerConnectionOrError(config, std::move(deps));
+	/*auto resultOrError = peerConnectionFactory->CreatePeerConnectionOrError(config, std::move(deps));
 	if (!resultOrError.ok()) {
 		std::cerr << "[C++ Host] Error creating peer connection: " << resultOrError.error().message() << std::endl;
+		return false;
+	}*/
+
+	peerConnection = peerConnectionFactory->CreatePeerConnection(config, nullptr, nullptr, observer.get());
+	if (!peerConnection) {
+		std::cerr << "[C++ Host] Error creating peer connection" << std::endl;
 		return false;
 	}
 
@@ -128,7 +134,7 @@ void handleOffer(const std::string& offer) {
 	//set remote description
 	peerConnection->SetRemoteDescription(
 		std::move(sessionDescription),
-		webrtc::scoped_refptr<webrtc::SetRemoteDescriptionObserverInterface>(
+		rtc::scoped_refptr<webrtc::SetRemoteDescriptionObserverInterface>(
 			new rtc::RefCountedObject<MySetRemoteObserver>())
 	);
 
@@ -152,7 +158,8 @@ void handleRemoteIceCandidate(const json& candidateJson) {
 	int sdpMLineIndex = candidateJson.value("sdpMLineIndex", 0);
 
 	webrtc::SdpParseError error;
-	webrtc::scoped_refptr<webrtc::IceCandidateInterface> iceCandidate(webrtc::CreateIceCandidate(sdpMid, sdpMLineIndex, candidateStr, &error));
+	//webrtc::scoped_refptr<webrtc::IceCandidateInterface> iceCandidate(webrtc::CreateIceCandidate(sdpMid, sdpMLineIndex, candidateStr, &error));
+	std::unique_ptr<webrtc::IceCandidateInterface> iceCandidate(webrtc::CreateIceCandidate(sdpMid, sdpMLineIndex, candidateStr, &error));
 
 	if (!iceCandidate) {
 		std::cerr << "[C++ Host] Error parsing ICE candidate: " << error.description << std::endl;

@@ -74,18 +74,19 @@
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
-      <PreprocessorDefinitions>_DEBUG;WEBRTC_WIN;WEBRTC_ARCH_64_BITS;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions);</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\ffmpeg\include\;C:\ffmpeg\include\boost;D:\webrtc\src; D:\webrtc\src\api;D:\webrtc\src\third_party\abseil-cpp</AdditionalIncludeDirectories>
-      <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">stdcpp17</LanguageStandard>
+      <PreprocessorDefinitions>_DEBUG;WEBRTC_WIN;WEBRTC_ARCH_64_BITS;WIN32_LEAN_AND_MEAN;NOMINMAX;WEBRTC_WIN;RTC_ENABLE_WIN_WGC;_ITERATOR_DEBUG_LEVEL=2;_HAS_STD_RESULT_OF=1;%(PreprocessorDefinitions);</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\ffmpeg\include\;C:\ffmpeg\include\boost\x64-windows-static\include\boost;D:\webrtc\include\webrtc;D:\webrtc\third_party;D:\webrtc\include\webrtc\api;D:\webrtc\include\webrtc\absl;D:\webrtc\include\third_party;</AdditionalIncludeDirectories>
+      <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">stdcpp20</LanguageStandard>
+      <RuntimeLibrary Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">MultiThreadedDebugDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateWindowsMetadata>false</GenerateWindowsMetadata>
-      <AdditionalLibraryDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\ffmpeg\lib;C:\ffmpeg\include\boost\stage\lib;D:\webrtc\src\out\Release</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\ffmpeg\lib;C:\ffmpeg\include\boost\x64-windows\debug\lib;D:\webrtc\lib\windows_debug_x64;D:\webrtc\lib\windows_debug_x64\;</AdditionalLibraryDirectories>
       <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
 ;avformat.lib
 ;avutil.lib
-;swscale.lib;libboost_regex-vc-mt-gd-x64-1_66.lib;libboost_date_time-vc-mt-gd-x64-1_66.lib;libboost_system-vc-mt-gd-x64-1_66.lib</AdditionalDependencies>
+;swscale.lib;boost_regex-vc143-mt-gd-x64-1_86.lib;boost_date_time-vc143-mt-gd-x64-1_86.lib;boost_system-vc143-mt-gd-x64-1_86.lib;webrtc_d.lib;</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
@@ -98,7 +99,8 @@
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions);_ITERATOR_DEBUG_LEVEL=2</PreprocessorDefinitions>
+      <DebugInformationFormat Condition="'$(Configuration)|$(Platform)'=='Release|x64'">EditAndContinue</DebugInformationFormat>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
