@@ -368,3 +368,14 @@ FodyWeavers.xsd
 /Server/SignalingServer.js
 
 /Client/node_modules
+
+/gortc_main/build.bat
+/gortc_main/create_def.py
+/gortc_main/exports.txt
+/gortc_main/go.mod
+/gortc_main/go.sum
+/gortc_main/webrtc.def
+/gortc_main/webrtc.dll
+/gortc_main/webrtc.exp
+/gortc_main/webrtc.h
+/gortc_main/webrtc.lib
