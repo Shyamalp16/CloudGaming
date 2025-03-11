@@ -18,63 +18,75 @@
     <ClInclude Include="pch.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="D3DHelpers.h">
+    <ClInclude Include="pion_webrtc.h">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="WindowHelpers.h">
-      <Filter>Source Files</Filter>
+    <ClInclude Include="Host\CaptureHelpers.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="CaptureHelpers.h">
-      <Filter>Source Files</Filter>
+    <ClInclude Include="Host\D3DHelpers.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="FrameCaptureThread.h">
-      <Filter>Source Files</Filter>
+    <ClInclude Include="Host\Encoder.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Encoder.h">
-      <Filter>Source Files</Filter>
+    <ClInclude Include="Host\FrameCaptureThread.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="GlobalTime.h">
-      <Filter>Source Files</Filter>
+    <ClInclude Include="Host\GlobalTime.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Websocket.h">
-      <Filter>Source Files</Filter>
+    <ClInclude Include="Host\MyCreateSdpObserver.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="MySetRemoteObserver.h">
-      <Filter>Source Files</Filter>
+    <ClInclude Include="Host\MySetRemoteObserver.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="MyCreateSdpObserver.h">
-      <Filter>Source Files</Filter>
+    <ClInclude Include="Host\pch.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Host\pion_webrtc.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Host\Websocket.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Host\WindowHelpers.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="main.cpp">
+    <ClCompile Include="Host\CaptureHelpers.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="D3DHelpers.cpp">
+    <ClCompile Include="Host\D3DHelpers.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="WindowHelpers.cpp">
+    <ClCompile Include="Host\Encoder.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="CaptureHelpers.cpp">
+    <ClCompile Include="Host\FrameCaptureThread.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="FrameCaptureThread.cpp">
+    <ClCompile Include="Host\main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Encoder.cpp">
+    <ClCompile Include="Host\MyCreateSdpObserver.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Websocket.cpp">
+    <ClCompile Include="Host\MySetRemoteObserver.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="MySetRemoteObserver.cpp">
+    <ClCompile Include="Host\pch.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="MyCreateSdpObserver.cpp">
+    <ClCompile Include="Host\Websocket.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\WindowHelpers.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

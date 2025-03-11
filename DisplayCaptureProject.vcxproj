@@ -68,25 +68,25 @@
       <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
       <PreprocessorDefinitions>_CONSOLE;WIN32_LEAN_AND_MEAN;WINRT_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>Level4</WarningLevel>
-      <AdditionalOptions>%(AdditionalOptions) /permissive- /bigobj</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /permissive- /bigobj /clang:-fms-compatibility /clang:-stdlib=msvcrt /clang:-fms-extensions</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>_DEBUG;WEBRTC_WIN;WEBRTC_ARCH_64_BITS;WIN32_LEAN_AND_MEAN;NOMINMAX;WEBRTC_WIN;RTC_ENABLE_WIN_WGC;_ITERATOR_DEBUG_LEVEL=2;_HAS_STD_RESULT_OF=1;%(PreprocessorDefinitions);</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\ffmpeg\include\;C:\ffmpeg\include\boost\x64-windows-static\include\boost;D:\webrtc\include\webrtc;D:\webrtc\third_party;D:\webrtc\include\webrtc\api;D:\webrtc\include\webrtc\absl;D:\webrtc\include\third_party;</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\ffmpeg\include\;C:\ffmpeg\include\boost\x64-windows-static\include\boost</AdditionalIncludeDirectories>
       <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">stdcpp20</LanguageStandard>
       <RuntimeLibrary Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">MultiThreadedDebugDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateWindowsMetadata>false</GenerateWindowsMetadata>
-      <AdditionalLibraryDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\ffmpeg\lib;C:\ffmpeg\include\boost\x64-windows\debug\lib;D:\webrtc\lib\windows_debug_x64;D:\webrtc\lib\windows_debug_x64\;</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\ffmpeg\lib;C:\ffmpeg\include\boost\x64-windows\debug\lib;C:\Windows\System32;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64;C:\webrtc\webrtc_dll</AdditionalLibraryDirectories>
       <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
 ;avformat.lib
 ;avutil.lib
-;swscale.lib;boost_regex-vc143-mt-gd-x64-1_86.lib;boost_date_time-vc143-mt-gd-x64-1_86.lib;boost_system-vc143-mt-gd-x64-1_86.lib;webrtc_d.lib;</AdditionalDependencies>
+;swscale.lib;boost_regex-vc143-mt-gd-x64-1_86.lib;boost_date_time-vc143-mt-gd-x64-1_86.lib;boost_system-vc143-mt-gd-x64-1_86.lib;webrtc.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
@@ -110,30 +110,34 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="CaptureHelpers.h" />
-    <ClInclude Include="D3DHelpers.h" />
-    <ClInclude Include="Encoder.h" />
-    <ClInclude Include="FrameCaptureThread.h" />
-    <ClInclude Include="GlobalTime.h" />
-    <ClInclude Include="MyCreateSdpObserver.h" />
-    <ClInclude Include="MySetRemoteObserver.h" />
+    <ClInclude Include="Host\CaptureHelpers.h" />
+    <ClInclude Include="Host\D3DHelpers.h" />
+    <ClInclude Include="Host\Encoder.h" />
+    <ClInclude Include="Host\FrameCaptureThread.h" />
+    <ClInclude Include="Host\GlobalTime.h" />
+    <ClInclude Include="Host\MyCreateSdpObserver.h" />
+    <ClInclude Include="Host\MySetRemoteObserver.h" />
+    <ClInclude Include="Host\pch.h" />
+    <ClInclude Include="Host\pion_webrtc.h" />
+    <ClInclude Include="Host\Websocket.h" />
+    <ClInclude Include="Host\WindowHelpers.h" />
     <ClInclude Include="pch.h" />
-    <ClInclude Include="Websocket.h" />
-    <ClInclude Include="WindowHelpers.h" />
+    <ClInclude Include="pion_webrtc.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="CaptureHelpers.cpp" />
-    <ClCompile Include="D3DHelpers.cpp" />
-    <ClCompile Include="Encoder.cpp" />
-    <ClCompile Include="FrameCaptureThread.cpp" />
-    <ClCompile Include="main.cpp" />
-    <ClCompile Include="MyCreateSdpObserver.cpp" />
-    <ClCompile Include="MySetRemoteObserver.cpp" />
+    <ClCompile Include="Host\CaptureHelpers.cpp" />
+    <ClCompile Include="Host\D3DHelpers.cpp" />
+    <ClCompile Include="Host\Encoder.cpp" />
+    <ClCompile Include="Host\FrameCaptureThread.cpp" />
+    <ClCompile Include="Host\main.cpp" />
+    <ClCompile Include="Host\MyCreateSdpObserver.cpp" />
+    <ClCompile Include="Host\MySetRemoteObserver.cpp" />
+    <ClCompile Include="Host\pch.cpp" />
+    <ClCompile Include="Host\Websocket.cpp" />
+    <ClCompile Include="Host\WindowHelpers.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="Websocket.cpp" />
-    <ClCompile Include="WindowHelpers.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
