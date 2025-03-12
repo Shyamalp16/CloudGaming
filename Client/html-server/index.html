@@ -26,7 +26,7 @@
 </head>
 <body>
   <h1>WebRTC Video Receiver</h1>
-  <video id="remoteVideo" autoplay playsinline controls></video>
+  <video id="remoteVideo" autoplay controls></video>
   <div id="log"></div>
 
   <script>
@@ -95,6 +95,11 @@
         if (event.track.kind === 'video') {
           videoElement.srcObject = event.streams[0];
           log('Video track attached to video element');
+          event.track.ondataavailable = (e) => {
+            const reader = new FileReader();
+            reader.onload = () => log('Raw data length: ' + reader.result.byteLength + ', first byte: ' + new Uint8Array(reader.result)[0]);
+            reader.readAsArrayBuffer(e.data);
+          }
         }
       };
 

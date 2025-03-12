@@ -17,10 +17,12 @@ import (
 
 // Global variables
 var (
-	peerConnection *webrtc.PeerConnection
-	pcMutex        sync.Mutex
-	videoTrack     *webrtc.TrackLocalStaticRTP // For sending H.264 RTP packets
-	lastAnswerSDP  string                      // Store answer SDP for C++ retrieval
+	peerConnection        *webrtc.PeerConnection
+	pcMutex               sync.Mutex
+	videoTrack            *webrtc.TrackLocalStaticRTP // For sending H.264 RTP packets
+	lastAnswerSDP         string                      // Store answer SDP for C++ retrieval
+	currentSequenceNumber uint16
+	currentTimestamp      uint32
 )
 
 //export createPeerConnectionGo
@@ -187,13 +189,16 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		return -1
 	}
 
+	// Convert C data to Go byte slice
 	buf := C.GoBytes(data, size)
-	timestamp := uint32(pts * 90000 / 1000000)
 
-	// Manually packetize the H.264 data into RTP packets
-	// Since we can't rely on a specific H264Payloader, we'll use a simple packetization
-	// This is a basic approach; for production, you might want to use pion/webrtc's internal payloader
-	const maxPacketSize = 1200 // MTU size
+	// Convert PTS from microseconds to 90kHz timestamp
+	// pts is in microseconds from C++, scale to 90kHz ticks
+	if pts != 0 { // Only update timestamp on new frame
+		currentTimestamp = uint32(pts / 1000 * 90) // Convert microseconds to 90kHz ticks
+	}
+
+	const maxPacketSize = 1200 // MTU size minus RTP overhead
 	offset := 0
 	for offset < len(buf) {
 		chunkSize := len(buf) - offset
@@ -201,28 +206,35 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 			chunkSize = maxPacketSize
 		}
 
-		// Create an RTP packet
+		chunk := buf[offset : offset+chunkSize]
+		isNewNALU := offset == 0 || (len(buf) > offset+3 && (buf[offset-3] == 0x00 && buf[offset-2] == 0x00 && buf[offset-1] == 0x01) ||
+			(len(buf) > offset+4 && buf[offset-4] == 0x00 && buf[offset-3] == 0x00 && buf[offset-2] == 0x00 && buf[offset-1] == 0x01))
+
 		rtpPacket := &rtp.Packet{
 			Header: rtp.Header{
 				Version:        2,
-				PayloadType:    96,                             // Matches the payload type in RegisterCodec
-				SequenceNumber: uint16(offset / maxPacketSize), // Increment per packet
-				Timestamp:      timestamp,
-				SSRC:           12345, // Arbitrary SSRC
+				PayloadType:    109, // Matches the negotiated H.264 payload type from SDP
+				SequenceNumber: currentSequenceNumber,
+				Timestamp:      currentTimestamp,
+				SSRC:           3925656573, // Matches the SSRC from the answer SDP
+				Marker:         isNewNALU,  // Set Marker bit for the start of a new NAL unit
 			},
-			Payload: buf[offset : offset+chunkSize],
+			Payload: chunk,
 		}
 
-		// Write the RTP packet to the track
+		currentSequenceNumber++
 		if err := videoTrack.WriteRTP(rtpPacket); err != nil {
-			log.Printf("[Go/Pion] Error sending RTP packet: %v\n", err)
+			log.Printf("[Go/Pion] Error sending RTP packet: %v, offset: %d, chunkSize: %d\n", err, offset, chunkSize)
 			return -1
 		}
+
+		log.Printf("[Go/Pion] Sent H.264 RTP packet (size: %d, offset: %d, PTS: %d, Seq: %d, Marker: %v)\n",
+			chunkSize, offset, currentTimestamp, currentSequenceNumber-1, isNewNALU)
 
 		offset += chunkSize
 	}
 
-	log.Printf("[Go/Pion] Sent H.264 packet (size: %d, PTS: %d)\n", size, pts)
+	log.Printf("[Go/Pion] Sent H.264 frame (total size: %d, PTS: %d)\n", size, currentTimestamp)
 	return 0
 }
 

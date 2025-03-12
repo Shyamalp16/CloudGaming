@@ -190,9 +190,9 @@ namespace Encoder {
                 return;
             }
 
-            auto now = std::chrono::steady_clock::now();
-            auto elapsedUS = std::chrono::duration_cast<std::chrono::microseconds>(now - startTime).count();
-            nv12Frame->pts = av_rescale_q(elapsedUS, AVRational{ 1, 1000000 }, codecCtx->time_base);
+            // Use a consistent PTS increment for 30 FPS (33333 microseconds per frame)
+            int64_t frameDurationUS = 33333; // 1/30th of a second in microseconds
+            nv12Frame->pts = frameCounter * frameDurationUS;
 
             std::wcout << L"[DEBUG] Allocating GPU frame\n";
             AVFrame* hwFrame = av_frame_alloc();
@@ -248,7 +248,7 @@ namespace Encoder {
             }
             av_frame_free(&hwFrame);
             frameCounter++;
-            std::wcout << L"[DEBUG] Frame encoded successfully.\n";
+            std::wcout << L"[DEBUG] Frame encoded successfully. Frame Counter: " << frameCounter << L", PTS: " << nv12Frame->pts << L"\n";
         }
         catch (const std::exception& e) {
             std::cerr << "[EXCEPTION] EncodeFrame() - Exception caught: " << e.what() << "\n";
