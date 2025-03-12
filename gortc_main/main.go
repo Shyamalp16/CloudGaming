@@ -7,22 +7,20 @@ package main
 */
 import "C"
 import (
-	"fmt"
 	"log"
 	"sync"
-	"time"
 	"unsafe"
 
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v3"
-	"github.com/pion/webrtc/v3/pkg/media"
 )
 
-// Global variables to mimic C++ state
+// Global variables
 var (
 	peerConnection *webrtc.PeerConnection
 	pcMutex        sync.Mutex
-	videoTrack     *webrtc.TrackLocalStaticSample // For sending frames
-	lastAnswerSDP  string
+	videoTrack     *webrtc.TrackLocalStaticRTP // For sending H.264 RTP packets
+	lastAnswerSDP  string                      // Store answer SDP for C++ retrieval
 )
 
 //export createPeerConnectionGo
@@ -34,22 +32,28 @@ func createPeerConnectionGo() C.int {
 	if peerConnection != nil {
 		_ = peerConnection.Close()
 		peerConnection = nil
+		videoTrack = nil
 	}
 
-	// Configure the API with a MediaEngine (replaces PeerConnectionFactory)
+	// Configure MediaEngine with H.264 codec
 	mediaEngine := &webrtc.MediaEngine{}
-	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
-		log.Printf("[Go/Pion] Error registering codecs: %v\n", err)
+	codec := webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:    "video/h264",
+			ClockRate:   90000,
+			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+		},
+		PayloadType: 96, // Default payload type for H.264
+	}
+	if err := mediaEngine.RegisterCodec(codec, webrtc.RTPCodecTypeVideo); err != nil {
+		log.Printf("[Go/Pion] Error registering H.264 codec: %v\n", err)
 		return 0
 	}
 
-	// Create a SettingEngine (optional, for advanced configuration)
-	settingEngine := webrtc.SettingEngine{}
+	// Create API
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine))
 
-	// Create the API
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithSettingEngine(settingEngine))
-
-	// Configure STUN server and SDP semantics (matches C++ config)
+	// Configure STUN server
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
@@ -64,18 +68,36 @@ func createPeerConnectionGo() C.int {
 		return 0
 	}
 
-	// Register callbacks to mimic CustomPeerConnectionObserver
+	// Create H.264 video track
+	videoTrack, err = webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{
+			MimeType:    "video/h264",
+			ClockRate:   90000,
+			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+		},
+		"video",
+		"game-stream",
+	)
+	if err != nil {
+		log.Printf("[Go/Pion] Error creating video track: %v\n", err)
+		return 0
+	}
+	if _, err := peerConnection.AddTrack(videoTrack); err != nil {
+		log.Printf("[Go/Pion] Error adding video track: %v\n", err)
+		return 0
+	}
+
+	// Set up callbacks
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
 			log.Printf("[Go/Pion] OnICECandidate: %s\n", candidate.ToJSON().Candidate)
-			// In C++, this was sent via WebSocket; you’ll need to pass it back to C++ (e.g., via a callback function)
 		}
 	})
 	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("[Go/Pion] ICE Connection State changed to: %s\n", state.String())
+		log.Printf("[Go/Pion] ICE Connection State: %s\n", state.String())
 	})
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("[Go/Pion] PeerConnection State changed to: %s\n", state.String())
+		log.Printf("[Go/Pion] PeerConnection State: %s\n", state.String())
 	})
 
 	log.Println("[Go/Pion] PeerConnection created.")
@@ -106,28 +128,32 @@ func handleOffer(offerSDP *C.char) {
 		return
 	}
 
-	log.Println("[Go/Pion] Remote Offer Set, creating Answer...")
 	answer, err := peerConnection.CreateAnswer(nil)
 	if err != nil {
-		log.Printf("[Go/Pion] CreateAnswer error: %v\n", err)
+		log.Printf("[Go/Pion] Error creating answer: %v\n", err)
 		return
 	}
-
-	// Wait for ICE gathering to complete
 	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
 	if err := peerConnection.SetLocalDescription(answer); err != nil {
-		log.Printf("[Go/Pion] SetLocalDescription error: %v\n", err)
+		log.Printf("[Go/Pion] Error setting local description: %v\n", err)
 		return
 	}
 	<-gatherComplete
 
-	localDesc := peerConnection.LocalDescription()
-	if localDesc == nil {
-		log.Printf("[Go/Pion] localDesc is nil after gathering.")
-		return
+	lastAnswerSDP = peerConnection.LocalDescription().SDP
+	log.Printf("[Go/Pion] Answer created: %s\n", lastAnswerSDP)
+}
+
+//export getAnswerSDP
+func getAnswerSDP() *C.char {
+	pcMutex.Lock()
+	defer pcMutex.Unlock()
+
+	if lastAnswerSDP == "" {
+		log.Println("[Go/Pion] getAnswerSDP: no SDP available!")
+		return nil
 	}
-	log.Printf("[Go/Pion] Answer created: %s\n", localDesc.SDP)
-	// In C++, this was sent via sendAnswer; you’ll need to pass it back to C++ (e.g., via GetLocalDescription)
+	return C.CString(lastAnswerSDP)
 }
 
 //export handleRemoteIceCandidate
@@ -136,7 +162,7 @@ func handleRemoteIceCandidate(candidateStr *C.char) {
 	defer pcMutex.Unlock()
 
 	if peerConnection == nil {
-		log.Println("[Go/Pion] handleRemoteIceCandidate: no PeerConnection yet!")
+		log.Println("[Go/Pion] handleRemoteIceCandidate: no PeerConnection!")
 		return
 	}
 
@@ -151,82 +177,53 @@ func handleRemoteIceCandidate(candidateStr *C.char) {
 	}
 }
 
-//export sendAnswerGo
-func sendAnswerGo() {
+//export sendVideoPacket
+func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	pcMutex.Lock()
 	defer pcMutex.Unlock()
 
-	if peerConnection == nil {
-		log.Println("[Go/Pion] sendAnswer: no PeerConnection yet!")
-		return
+	if peerConnection == nil || videoTrack == nil {
+		log.Println("[Go/Pion] sendVideoPacket: PeerConnection or videoTrack not initialized!")
+		return -1
 	}
 
-	localDesc := peerConnection.LocalDescription()
-	if localDesc == nil {
-		log.Println("[Go/Pion] sendAnswer: no local description yet!")
-		return
-	}
+	buf := C.GoBytes(data, size)
+	timestamp := uint32(pts * 90000 / 1000000)
 
-	// // Convert to C string for C++ to use (mimics C++ send_message)
-	// cStr := C.CString(localDesc.SDP)
-	// // In C++, this would be sent via WebSocket; you’ll need to pass cStr to C++ for sending
-	// // For now, log it (C++ will handle the actual sending)
-	// log.Printf("[Go/Pion] sendAnswer: %s\n", localDesc.SDP)
-	// C.free(unsafe.Pointer(cStr)) // Free the C string to avoid memory leaks
-
-	lastAnswerSDP = localDesc.SDP
-	log.Printf("[Go/Pion] sendAnswer: %s\n", lastAnswerSDP)
-}
-
-//export getAnswerSDP
-func getAnswerSDP() *C.char {
-	pcMutex.Lock()
-	defer pcMutex.Unlock()
-
-	if lastAnswerSDP == "" {
-		log.Println("[Go/Pion] getAnswerSDP: no SDP available!")
-		return nil
-	}
-
-	// Convert to C string and return
-	return C.CString(lastAnswerSDP)
-}
-
-//export sendFrame
-func sendFrame(frameData *C.char, frameLen C.int) {
-	pcMutex.Lock()
-	defer pcMutex.Unlock()
-
-	if peerConnection == nil {
-		log.Println("[Go/Pion] sendFrame: no PeerConnection yet!")
-		return
-	}
-
-	// Convert C frame data to Go bytes
-	data := C.GoBytes(unsafe.Pointer(frameData), frameLen)
-	log.Printf("[Go/Pion] sendFrame: received frame of length %d\n", len(data))
-
-	// Initialize video track if not already done
-	if videoTrack == nil {
-		var err error
-		videoTrack, err = webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8}, "video", "pion")
-		if err != nil {
-			log.Printf("[Go/Pion] Error creating video track: %v\n", err)
-			return
+	// Manually packetize the H.264 data into RTP packets
+	// Since we can't rely on a specific H264Payloader, we'll use a simple packetization
+	// This is a basic approach; for production, you might want to use pion/webrtc's internal payloader
+	const maxPacketSize = 1200 // MTU size
+	offset := 0
+	for offset < len(buf) {
+		chunkSize := len(buf) - offset
+		if chunkSize > maxPacketSize {
+			chunkSize = maxPacketSize
 		}
-		if _, err := peerConnection.AddTrack(videoTrack); err != nil {
-			log.Printf("[Go/Pion] Error adding video track: %v\n", err)
-			return
+
+		// Create an RTP packet
+		rtpPacket := &rtp.Packet{
+			Header: rtp.Header{
+				Version:        2,
+				PayloadType:    96,                             // Matches the payload type in RegisterCodec
+				SequenceNumber: uint16(offset / maxPacketSize), // Increment per packet
+				Timestamp:      timestamp,
+				SSRC:           12345, // Arbitrary SSRC
+			},
+			Payload: buf[offset : offset+chunkSize],
 		}
+
+		// Write the RTP packet to the track
+		if err := videoTrack.WriteRTP(rtpPacket); err != nil {
+			log.Printf("[Go/Pion] Error sending RTP packet: %v\n", err)
+			return -1
+		}
+
+		offset += chunkSize
 	}
 
-	// Send the frame
-	sample := media.Sample{Data: data, Duration: 33 * time.Millisecond}
-	if err := videoTrack.WriteSample(sample); err != nil {
-		log.Printf("[Go/Pion] Error sending frame: %v\n", err)
-	} else {
-		log.Println("[Go/Pion] Frame sent successfully")
-	}
+	log.Printf("[Go/Pion] Sent H.264 packet (size: %d, PTS: %d)\n", size, pts)
+	return 0
 }
 
 //export getIceConnectionState
@@ -240,7 +237,20 @@ func getIceConnectionState() C.int {
 	return C.int(peerConnection.ICEConnectionState())
 }
 
-// main is required for -buildmode=c-shared
+//export closePeerConnection
+func closePeerConnection() {
+	pcMutex.Lock()
+	defer pcMutex.Unlock()
+
+	if peerConnection != nil {
+		_ = peerConnection.Close()
+		peerConnection = nil
+		videoTrack = nil
+		lastAnswerSDP = ""
+		log.Println("[Go/Pion] PeerConnection closed.")
+	}
+}
+
 func main() {
-	fmt.Println("[Go/Pion] main() in DLL. Doing nothing.")
+	log.Println("[Go/Pion] main() in DLL. Doing nothing.")
 }

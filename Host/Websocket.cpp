@@ -1,7 +1,5 @@
 #include "Websocket.h"
-#include "pion_webrtc.h"
-//#include "MySetRemoteObserver.h"
-//#include "MyCreateSdpObserver.h"
+#include "Encoder.h"
 
 typedef websocketpp::client<websocketpp::config::asio_client> client;
 using json = nlohmann::json;
@@ -10,17 +8,34 @@ client wsClient;
 websocketpp::connection_hdl g_connectionHandle;
 std::string uri = "ws://localhost:3000";
 
-static bool answerCreated = false;
-
 void on_open(client* c, websocketpp::connection_hdl hdl);
 void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg);
 void send_message(const json& message);
 
 void sendFrames() {
     while (true) {
-        // Fetch frames in real-time (replace with your frame fetching logic)
-        std::vector<char> frameData(1024); // Placeholder
-        sendFrame(frameData.data(), frameData.size());
+        std::vector<uint8_t> frameData;
+        int64_t pts = 0;
+
+        if (Encoder::getEncodedFrame(frameData, pts)) {
+            // Check if PeerConnection is initialized (assuming getIceConnectionState is defined)
+            if (getIceConnectionState() >= 0) {
+                if (!frameData.empty() && frameData.data() != nullptr) {
+                    int result = sendVideoPacket(frameData.data(), static_cast<int>(frameData.size()), pts);
+                    if (result != 0) {
+                        std::cerr << "[WebSocket] Failed to send video packet: " << result << std::endl;
+                    }else {
+                        std::cout << "[WebSocket] Sent video packet successfully (PTS: " << pts << ")" << std::endl;
+                    }
+                }else {
+                    std::cerr << "[WebSocket] Invalid frame data buffer" << std::endl;
+                }
+            }else {
+                std::cout << "[WebSocket] Waiting for PeerConnection to initialize..." << std::endl;
+            }
+        }else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(33)); // Wait if no frame
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(33)); // ~30 FPS
     }
 }
@@ -35,20 +50,17 @@ bool createPeerConnection() {
 }
 
 void sendAnswer() {
-    sendAnswerGo();
-
     char* sdp = getAnswerSDP();
     if (!sdp) {
         std::cerr << "[WebSocket] Error getting answer SDP\n";
         return;
     }
-    // No need for answerCreated check; handled in Go
     json answerMsg;
     answerMsg["type"] = "answer";
     answerMsg["sdp"] = std::string(sdp);
-    // Fetch SDP from Go
-    send_message(answerMsg); // C++ handles WebSocket sending
-    std::cout << "[WebSocket] Answer sent with SDP:" << answerMsg.dump() << "\n";
+    send_message(answerMsg);
+    std::cout << "[WebSocket] Answer sent with SDP: " << answerMsg.dump() << "\n";
+    //free(sdp); // Free C string allocated by Go
 }
 
 void handleOffer(const std::string& offer) {
@@ -61,7 +73,6 @@ void handleRemoteIceCandidate(const json& candidateJson) {
     std::string candidateStr = candidateJson.value("candidate", "");
     handleRemoteIceCandidate(candidateStr.c_str());
 }
-
 
 void on_open(client* c, websocketpp::connection_hdl hdl) {
     std::cout << "[WebSocket] Connected opened to " << uri << std::endl;
@@ -79,7 +90,7 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
             handleOffer(sdp);
         }
         else if (type == "ice-candidate") {
-            std::cout << "[WebSocket] Received ice candidate from server" << message.dump() << std::endl;
+            std::cout << "[WebSocket] Received ice candidate from server: " << message.dump() << std::endl;
             json candidateJson = message["candidate"];
             handleRemoteIceCandidate(candidateJson);
         }
@@ -108,7 +119,6 @@ void send_message(const json& message) {
 }
 
 void initWebsocket() {
-    //std::this_thread::sleep_for(std::chrono::hours(24)); // Placeholder
     wsClient.init_asio();
     wsClient.set_open_handler(std::bind(&on_open, &wsClient, std::placeholders::_1));
     wsClient.set_message_handler(&on_message);
@@ -133,14 +143,6 @@ void initWebsocket() {
     t.detach();
     std::wcout << L"[WebSocket] Websocket started in a separate thread\n";
 
-    // Start frame sending in a separate thread
     std::thread frameThread(&sendFrames);
     frameThread.detach();
 }
-
-//int main() {
-//    initWebsocket();
-//    // Keep main running (e.g., wait for WebSocket events)
-//    std::this_thread::sleep_for(std::chrono::hours(24)); // Placeholder
-//    return 0;
-//}

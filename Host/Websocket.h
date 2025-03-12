@@ -7,6 +7,8 @@
 #include <winsock2.h>
 #include <objbase.h>
 #include "pion_webrtc.h"
+#include "Encoder.h"
+
 
 #include <boost/asio.hpp>
 #include <websocketpp/config/asio_client.hpp>
