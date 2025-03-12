@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebRTC Video Receiver</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+    video {
+      width: 640px;
+      height: 480px;
+      border: 1px solid #ccc;
+    }
+    #log {
+      margin-top: 20px;
+      padding: 10px;
+      border: 1px solid #ccc;
+      height: 200px;
+      overflow-y: scroll;
+      background-color: #f9f9f9;
+    }
+  </style>
+</head>
+<body>
+  <h1>WebRTC Video Receiver</h1>
+  <video id="remoteVideo" autoplay playsinline controls></video>
+  <div id="log"></div>
+
+  <script>
+    const serverUrl = 'ws://localhost:3000';
+    let ws;
+    let peerConnection;
+    const videoElement = document.getElementById('remoteVideo');
+    const logElement = document.getElementById('log');
+
+    // Simple logging function to display logs in the UI
+    function log(message) {
+      console.log(message);
+      const p = document.createElement('p');
+      p.textContent = message;
+      logElement.appendChild(p);
+      logElement.scrollTop = logElement.scrollHeight;
+    }
+
+    function connectToSignalingServer() {
+      ws = new WebSocket(serverUrl);
+
+      ws.onopen = () => {
+        log('Connected to signaling server');
+      };
+
+      ws.onmessage = async (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          log('Received from server: ' + JSON.stringify(msg, null, 2));
+
+          switch (msg.type) {
+            case 'answer':
+              await handleAnswer(msg);
+              break;
+            case 'ice-candidate':
+              await handleRemoteIceCandidate(msg.candidate);
+              break;
+            case 'offer':
+              log('Unexpected Offer Received, This Client Will Always Be The Offerer.');
+              break;
+            default:
+              log('Unknown Message Type: ' + msg.type);
+          }
+        } catch (err) {
+          log('Error processing WebSocket message: ' + err.message);
+        }
+      };
+
+      ws.onerror = (err) => {
+        log('WebSocket Error: ' + err.message);
+      };
+
+      ws.onclose = () => {
+        log('WebSocket connection closed');
+      };
+    }
+
+    function createPeerConnection() {
+      const config = {
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      };
+      peerConnection = new RTCPeerConnection(config);
+
+      peerConnection.ontrack = (event) => {
+        log('Received remote track: ' + event.track.kind + ' ' + event.track.id);
+        if (event.track.kind === 'video') {
+          videoElement.srcObject = event.streams[0];
+          log('Video track attached to video element');
+        }
+      };
+
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          log('Local ICE Candidate: ' + JSON.stringify(event.candidate, null, 2));
+          ws.send(JSON.stringify({
+            type: 'ice-candidate',
+            candidate: event.candidate
+          }));
+        } else {
+          log('ICE candidate gathering complete');
+        }
+      };
+
+      peerConnection.oniceconnectionstatechange = () => {
+        log('ICE connection state changed to: ' + peerConnection.iceConnectionState);
+      };
+
+      peerConnection.onicegatheringstatechange = () => {
+        log('ICE gathering state changed to: ' + peerConnection.iceGatheringState);
+      };
+
+      peerConnection.onconnectionstatechange = () => {
+        log('PeerConnection state changed to: ' + peerConnection.connectionState);
+      };
+
+      peerConnection.onsignalingstatechange = () => {
+        log('Signaling state changed to: ' + peerConnection.signalingState);
+      };
+
+      peerConnection.ondatachannel = (event) => {
+        const receiveChannel = event.channel;
+        log('Data Channel Received: ' + receiveChannel.label);
+
+        receiveChannel.onopen = () => {
+          log('Data Channel Opened: ' + receiveChannel.label);
+          receiveChannel.send('Hello From The Receiver!');
+        };
+        receiveChannel.onmessage = (event) => {
+          log('Received Message on Data Channel: ' + event.data);
+        };
+        receiveChannel.onclose = () => {
+          log('Data Channel Closed: ' + receiveChannel.label);
+        };
+        receiveChannel.onerror = (err) => {
+          log('Data Channel Error: ' + err.message);
+        };
+      };
+    }
+
+    async function handleAnswer(answerMsg) {
+      log('Received SDP in answer: ' + JSON.stringify(answerMsg, null, 2));
+      if (!answerMsg.sdp || typeof answerMsg.sdp !== 'string' || !answerMsg.sdp.startsWith('v=')) {
+        log('Invalid or missing SDP in answer: ' + JSON.stringify(answerMsg));
+        return;
+      }
+      try {
+        const remoteDesc = new RTCSessionDescription({ type: 'answer', sdp: answerMsg.sdp });
+        await peerConnection.setRemoteDescription(remoteDesc);
+        log('Remote description set with answer');
+      } catch (err) {
+        log('Error setting remote description: ' + err.message);
+      }
+    }
+
+    async function handleRemoteIceCandidate(candidate) {
+      try {
+        await peerConnection.addIceCandidate(candidate);
+        log('Added remote ICE candidate: ' + JSON.stringify(candidate, null, 2));
+      } catch (err) {
+        log('Error adding received ICE candidate: ' + err.message);
+      }
+    }
+
+    async function startConnection() {
+      if (!peerConnection) createPeerConnection();
+
+      peerConnection.addTransceiver('video', {
+        direction: 'recvonly',
+      });
+
+      const dataChannel = peerConnection.createDataChannel('tst');
+      dataChannel.onopen = () => {
+        log('Data Channel Opened');
+        dataChannel.send('Hello From The Offerer!');
+      };
+      dataChannel.onmessage = (event) => {
+        log('Received Message On Data Channel: ' + event.data);
+      };
+      dataChannel.onclose = () => {
+        log('Data Channel Closed');
+      };
+      dataChannel.onerror = (err) => {
+        log('Data Channel Error: ' + err.message);
+      };
+
+      try {
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        ws.send(JSON.stringify({
+          type: 'offer',
+          sdp: offer.sdp
+        }));
+        log('Offer Sent: ' + offer.sdp);
+      } catch (err) {
+        log('Error creating or setting offer: ' + err.message);
+      }
+    }
+
+    connectToSignalingServer();
+
+    setTimeout(() => {
+      startConnection();
+    }, 3000);
+  </script>
+</body>
+</html>
