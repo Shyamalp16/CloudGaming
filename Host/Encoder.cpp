@@ -24,8 +24,9 @@ AVBufferRef* Encoder::hwDeviceCtx = nullptr;
 int Encoder::frameCounter = 0;
 int64_t Encoder::last_dts = 0;
 
-#define ENCODER "h264_nvenc"
+//#define ENCODER "h264_nvenc"
 #define ENCODER "libx264"
+//#define ENCODER "openh264"
 
 // Define callback variable in Encoder namespace
 Encoder::EncodedFrameCallback Encoder::g_onEncodedFrameCallback = nullptr;
@@ -294,7 +295,7 @@ void InitializeEncoder(const std::string& fileName, int width, int height, int f
     codecCtx->bit_rate = 4000000;
 
     // Set H.264 profile and level for better compatibility
-    codecCtx->profile = FF_PROFILE_H264_MAIN; // Main profile
+    codecCtx->profile = FF_PROFILE_H264_BASELINE; // Main profile
     codecCtx->level = 40; // Level 4.0 to support 1920x1080
 
     // Set libx264-specific options
