@@ -296,13 +296,13 @@ void InitializeEncoder(const std::string& fileName, int width, int height, int f
 
     // Set H.264 profile and level for better compatibility
     codecCtx->profile = FF_PROFILE_H264_BASELINE; // Main profile
-    codecCtx->level = 40; // Level 4.0 to support 1920x1080
+    codecCtx->level = 42; // Level 4.0 to support 1920x1080
 
     // Set libx264-specific options
     AVDictionary* opts = nullptr;
     av_dict_set(&opts, "preset", "ultrafast", 0); // Fast encoding for testing
     av_dict_set(&opts, "tune", "zerolatency", 0); // Zero latency for real-time streaming
-    av_dict_set(&opts, "level", "4.0", 0); // Enforce Level 4.0
+    av_dict_set(&opts, "level", "4.2", 0); // Enforce Level 4.0
 
     if (avcodec_open2(codecCtx, codec, &opts) < 0) {
         std::cerr << "[Encoder] Failed to open codec.\n";
