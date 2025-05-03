@@ -23,7 +23,7 @@ void sendFrames() {
             // Note: getIceConnectionState() might not be the best check,
             // maybe check peerConnection.ConnectionState() == webrtc.PeerConnectionStateConnected in Go?
             // For now, assuming getIceConnectionState >= 0 means ready enough.
-            if (getIceConnectionState() >= 0) { // Assuming this maps to Go's states reasonably
+            if (getIceConnectionState() >= 0) { 
                 if (!frameData.empty() && frameData.data() != nullptr) {
                     // Pass data pointer and size directly
                     int result = sendVideoPacket(frameData.data(), static_cast<int>(frameData.size()), pts);
@@ -75,7 +75,7 @@ void sendAnswer() {
     answerMsg["sdp"] = std::string(sdp);
     send_message(answerMsg);
     std::cout << "[WebSocket] Answer sent with SDP: " << answerMsg.dump() << "\n";
-    //free(sdp); // Free C string allocated by Go
+    //free(sdp); // Free C string allocated by Go // UNCOMMENTING THIS WILL CRASH AT EVERY RUN 
 }
 
 void handleOffer(const std::string& offer) {

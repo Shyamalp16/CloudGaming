@@ -271,6 +271,8 @@ GraphicsCaptureSession createCaptureSession(
             << std::hex << e.code() << std::endl;
     }
 	session.IsCursorCaptureEnabled(true);
+	//session.IsAudioCaptureEnabled(false);
+    //yellow border
 	//session.IsBorderRequired(true);
     return session;
 }
@@ -375,7 +377,7 @@ void ProcessFrames() {
         }
 
         if (frameData.surface) {
-            // Process the frame (e.g., save it)
+            // for debugging
             //SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(frameData.surface), L"frame", frameData.sequenceNumber);
             std::wcout << L"[ProcessFrames] Processed frame with sequence number: " << frameData.sequenceNumber << std::endl;
 
@@ -445,7 +447,6 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
         framePriorityQueue.pop();
     }
 
-    // Release the frame pool and session resources
     framePool.FrameArrived(token);
     framePool.Close();
     Encoder::FinalizeEncoder();

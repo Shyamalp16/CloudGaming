@@ -47,7 +47,7 @@ namespace Encoder {
     extern int currentWidth;
     extern int currentHeight;
 
-    extern std::mutex g_encoderMutex; // Mutex for encoder operations
+    extern std::mutex g_encoderMutex; 
 
     extern AVFormatContext* formatCtx;
     extern AVCodecContext* codecCtx;
@@ -59,10 +59,8 @@ namespace Encoder {
     extern int frameCounter;
     extern int64_t last_dts;
 
-    // Callback for encoded frames (declare here)
     extern EncodedFrameCallback g_onEncodedFrameCallback;
 
-    // New synchronization primitives and storage for latest frame
     extern std::mutex g_frameMutex;
     extern std::condition_variable g_frameAvailable;
     extern std::vector<uint8_t> g_latestFrameData;

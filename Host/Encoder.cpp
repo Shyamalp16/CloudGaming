@@ -7,7 +7,6 @@
 #include <fstream>
 #include <chrono>
 
-// Define variables in the Encoder namespace
 SwsContext* Encoder::swsCtx = nullptr;
 AVFrame* Encoder::nv12Frame = nullptr;
 int Encoder::currentWidth = 0;
@@ -179,8 +178,8 @@ namespace Encoder {
         codecCtx->bit_rate = 30000000;
 
 
-        //codecCtx->profile = FF_PROFILE_H264_BASELINE;
 		codecCtx->profile = FF_PROFILE_H264_MAIN;
+        //codecCtx->profile = FF_PROFILE_H264_BASELINE;
 		//codecCtx->profile = FF_PROFILE_H264_HIGH;
         codecCtx->level = 52;
 
@@ -227,7 +226,7 @@ namespace Encoder {
             return;
         }
 
-        // NVENC-specific options
+        // NVENC options
         AVDictionary* opts = nullptr;
         av_dict_set(&opts, "preset", "p7", 0);
         av_dict_set(&opts, "rc", "vbr", 0);
