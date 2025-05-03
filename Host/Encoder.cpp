@@ -163,16 +163,16 @@ namespace Encoder {
         codecCtx->time_base = AVRational{ 1, fps };
         videoStream->time_base = codecCtx->time_base;
         codecCtx->framerate = { fps, 1 };
-        codecCtx->gop_size = 30;
+        codecCtx->gop_size = 15;
         codecCtx->max_b_frames = 0;
         codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
-        codecCtx->bit_rate = 10000000; // Increased to 8 Mbps for better quality
+        codecCtx->bit_rate = 25000000; // Increased to 8 Mbps for better quality
 
         codecCtx->profile = FF_PROFILE_H264_BASELINE;
         codecCtx->level = 42;
 
         AVDictionary* opts = nullptr;
-        av_dict_set(&opts, "preset", "veryfast", 0);
+        av_dict_set(&opts, "preset", "ultrafast", 0);
         av_dict_set(&opts, "tune", "zerolatency", 0);
         av_dict_set(&opts, "level", "4.2", 0);
 
@@ -243,10 +243,12 @@ namespace Encoder {
 
             auto currentTime = std::chrono::steady_clock::now();
             auto elapsedTimeUS = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - encoderStartTime).count();
-            int64_t pts = (elapsedTimeUS * 30) / 1000000;
+            int64_t frameDurationUS = 1000000 / codecCtx->framerate.num; // e.g., 16666 for 60 FPS
+            int64_t pts = (elapsedTimeUS / frameDurationUS) * frameDurationUS;
+            //int64_t pts = (elapsedTimeUS * 30) / 1000000;
             nv12Frame->pts = pts;
 
-            if (frameCounter == 0 || frameCounter % 30 == 0) {
+            if (frameCounter == 0 || frameCounter % 15 == 0) {
                 nv12Frame->pict_type = AV_PICTURE_TYPE_I;
                 std::wcout << L"[DEBUG] Forcing KeyFrame at frame " << frameCounter << L"\n";
             }

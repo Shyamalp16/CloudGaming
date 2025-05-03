@@ -208,7 +208,7 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	// Convert PTS from microseconds to 90kHz timestamp
 	// currentTimestamp = uint32(pts * 90 / 1000)
 	// currentTimestamp = uint32((pts * 90000) / 1000000)
-	const frameRate = 30.0
+	const frameRate = 60.0
 	const frameDuration90kHz = 90000.0 / frameRate
 	ptsFloat := float64(pts) / 1000000.0
 	baseTimeStamp := uint32(ptsFloat * 90000.0)
@@ -224,7 +224,7 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		}
 	}
 
-	const maxPacketSize = 1200
+	const maxPacketSize = 1000
 
 	// Parse NAL units from the buffer
 	nalUnits := splitNALUnits(buf)
