@@ -17,26 +17,41 @@ void sendFrames() {
         std::vector<uint8_t> frameData;
         int64_t pts = 0;
 
+        // getEncodedFrame will block until a frame is ready due to condition variable
         if (Encoder::getEncodedFrame(frameData, pts)) {
-            // Check if PeerConnection is initialized (assuming getIceConnectionState is defined)
-            if (getIceConnectionState() >= 0) {
+            // Check if PeerConnection is initialized
+            // Note: getIceConnectionState() might not be the best check,
+            // maybe check peerConnection.ConnectionState() == webrtc.PeerConnectionStateConnected in Go?
+            // For now, assuming getIceConnectionState >= 0 means ready enough.
+            if (getIceConnectionState() >= 0) { // Assuming this maps to Go's states reasonably
                 if (!frameData.empty() && frameData.data() != nullptr) {
+                    // Pass data pointer and size directly
                     int result = sendVideoPacket(frameData.data(), static_cast<int>(frameData.size()), pts);
                     if (result != 0) {
                         std::cerr << "[WebSocket] Failed to send video packet: " << result << std::endl;
-                    }else {
-                        std::cout << "[WebSocket] Sent video packet successfully (PTS: " << pts << ")" << std::endl;
                     }
-                }else {
-                    std::cerr << "[WebSocket] Invalid frame data buffer" << std::endl;
+                    else {
+                        // Reduce log spam maybe? Only log errors or periodically?
+                        // std::cout << "[WebSocket] Sent video packet successfully (PTS: " << pts << ")" << std::endl;
+                    }
                 }
-            }else {
-                std::cout << "[WebSocket] Waiting for PeerConnection to initialize..." << std::endl;
+                else {
+                    std::cerr << "[WebSocket] Invalid frame data buffer retrieved" << std::endl;
+                }
             }
-        }else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(33)); // Wait if no frame
+            else {
+                // std::cout << "[WebSocket] Waiting for PeerConnection to initialize..." << std::endl;
+                // Avoid busy-waiting if PC is not ready, sleep a bit longer
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(33)); // ~30 FPS
+        // else { // No need for this else block, getEncodedFrame handles waiting
+        //    std::this_thread::sleep_for(std::chrono::milliseconds(33)); // Wait if no frame - REMOVE
+        // }
+
+        // Optional small sleep to prevent this loop from hogging CPU if frames arrive extremely fast
+        // Adjust as needed, or remove if relying purely on getEncodedFrame blocking.
+        // std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 

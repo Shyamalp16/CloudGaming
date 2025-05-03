@@ -5,6 +5,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <fstream> // For debug file output
+#include <chrono>
 
 // Define variables in the Encoder namespace
 SwsContext* Encoder::swsCtx = nullptr;
@@ -40,6 +41,9 @@ bool Encoder::g_frameReady = false;
 
 // File for debugging raw H.264 bitstream
 std::ofstream debugH264File;
+
+static std::chrono::steady_clock::time_point encoderStartTime;
+static bool isFirstFrame = true;
 
 
 namespace Encoder {
@@ -300,7 +304,7 @@ void InitializeEncoder(const std::string& fileName, int width, int height, int f
 
     // Set libx264-specific options
     AVDictionary* opts = nullptr;
-    av_dict_set(&opts, "preset", "ultrafast", 0); // Fast encoding for testing
+    av_dict_set(&opts, "preset", "veryfast", 0); // Fast encoding for testing
     av_dict_set(&opts, "tune", "zerolatency", 0); // Zero latency for real-time streaming
     av_dict_set(&opts, "level", "4.2", 0); // Enforce Level 4.0
 
@@ -419,7 +423,7 @@ void InitializeEncoder(const std::string& fileName, int width, int height, int f
 
 void EncodeFrame() {
     try {
-        std::wcout << L"[DEBUG] EncodeFrame() - Start\n";
+        std::wcout << L"[DEBUG] EncodeFrame() - Start (Updated Version)\n";
 
         if (!nv12Frame) {
             std::cerr << "[Encoder] Invalid frame (nv12Frame is NULL).\n";
@@ -431,12 +435,22 @@ void EncodeFrame() {
             return;
         }
 
+        // Log frame dimensions and format before any changes
+        std::wcout << L"[DEBUG] EncodeFrame() - Initial frame: width=" << nv12Frame->width
+            << L", height=" << nv12Frame->height << L", format=" << nv12Frame->format << L"\n";
+
+        // Ensure the frame format is set to YUV420P
+        if (nv12Frame->format != AV_PIX_FMT_YUV420P) {
+            std::wcout << L"[DEBUG] Fixing frame format: setting to AV_PIX_FMT_YUV420P\n";
+            nv12Frame->format = AV_PIX_FMT_YUV420P;
+        }
+
         // Verify frame dimensions and strides
         std::wcout << L"[DEBUG] EncodeFrame() - Frame dimensions: width=" << nv12Frame->width
             << L", height=" << nv12Frame->height << L"\n";
         std::wcout << L"[DEBUG] EncodeFrame() - Frame format: " << nv12Frame->format << L"\n";
         std::wcout << L"[DEBUG] EncodeFrame() - Strides: linesize[0]=" << nv12Frame->linesize[0]
-            << L", linesize[1]=" << nv12Frame->linesize[1] << L"\n";
+            << L", linesize[1]=" << nv12Frame->linesize[1] << L", linesize[2]=" << nv12Frame->linesize[2] << L"\n";
 
         // Ensure the frame is writable
         if (av_frame_make_writable(nv12Frame) < 0) {
@@ -445,13 +459,28 @@ void EncodeFrame() {
         }
 
         // Set the strides correctly for YUV420P
-        nv12Frame->linesize[0] = 1920; // Luma stride
-        nv12Frame->linesize[1] = 960;  // U plane stride (1920/2 for YUV420P)
-        nv12Frame->linesize[2] = 960;  // V plane stride (1920/2 for YUV420P)
+        //nv12Frame->linesize[0] = 1920; // Luma (Y) stride
+        //nv12Frame->linesize[1] = 960;  // U plane stride (1920/2 for YUV420P)
+        //nv12Frame->linesize[2] = 960;  // V plane stride (1920/2 for YUV420P)
+
+        if (isFirstFrame) {
+            encoderStartTime = std::chrono::steady_clock::now();
+            isFirstFrame = false;
+        }
+
+        auto currentTime = std::chrono::steady_clock::now();
+        auto elapsedTime = std::chrono::duration_cast<std::chrono::microseconds> (currentTime - encoderStartTime).count();
+
+        // Convert elapsed time to the codec's time base (1/30 seconds)
+        // codecCtx->time_base = {1, 30}, so 1 second = 30 time base units
+        // 1 microsecond = 1/1,000,000 seconds, so elapsedTimeUS / 1,000,000 seconds
+        // PTS in time base units = (elapsedTimeUS / 1,000,000) * 30
+		int64_t pts = (elapsedTime * 30) / 1000000;
+        nv12Frame->pts = pts;
 
         // Use a consistent PTS increment for 30 FPS (33333 microseconds per frame)
-        int64_t frameDurationUS = 33333; // 1/30th of a second in microseconds
-        nv12Frame->pts = frameCounter * frameDurationUS;
+        //int64_t frameDurationUS = 33333; // 1/30th of a second in microseconds
+        //nv12Frame->pts = frameCounter * frameDurationUS;
 
         // Force a keyframe every 30 frames
         if (frameCounter == 0 || frameCounter % 30 == 0) {
@@ -459,7 +488,7 @@ void EncodeFrame() {
             std::wcout << L"[DEBUG] Forcing KeyFrame at frame " << frameCounter << L"\n";
         }
 
-        std::wcout << L"[DEBUG] Sending frame to encoder\n";
+        std::wcout << L"[DEBUG] Sending frame to encoder, PTS=" << nv12Frame->pts << L"\n";
         int ret = avcodec_send_frame(codecCtx, nv12Frame);
         if (ret < 0) {
             char errBuf[128];
@@ -473,10 +502,71 @@ void EncodeFrame() {
             av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);
 
             if (packet->dts < last_dts) {
+                std::wcout << L"[DEBUG] Adjusting DTS: " << packet->dts << L" to " << (last_dts + 1) << L"\n";
                 packet->dts = last_dts + 1;
             }
             last_dts = packet->dts;
 
+            // Log packet details
+            std::wcout << L"[DEBUG] Encoded packet: size=" << packet->size << L", PTS=" << packet->pts
+                << L", DTS=" << packet->dts << L", flags=" << packet->flags << L"\n";
+
+            // Parse NAL units in the packet by skipping start codes
+            if (packet->size > 0) {
+                int offset = 0;
+                while (offset < packet->size) {
+                    // Look for start code (00 00 01 or 00 00 00 01)
+                    if (offset + 2 < packet->size && packet->data[offset] == 0 && packet->data[offset + 1] == 0) {
+                        if (offset + 3 < packet->size && packet->data[offset + 2] == 0 && packet->data[offset + 3] == 1) {
+                            offset += 4; // Skip 00 00 00 01
+                        }
+                        else if (packet->data[offset + 2] == 1) {
+                            offset += 3; // Skip 00 00 01
+                        }
+                        else {
+                            offset++;
+                            continue;
+                        }
+
+                        if (offset < packet->size) {
+                            uint8_t nal_unit_type = packet->data[offset] & 0x1F;
+                            // Calculate NAL unit size by finding the next start code
+                            int nal_size = 0;
+                            int next_start = offset + 1;
+                            while (next_start + 2 < packet->size) {
+                                if (packet->data[next_start] == 0 && packet->data[next_start + 1] == 0 &&
+                                    (packet->data[next_start + 2] == 1 || (next_start + 3 < packet->size && packet->data[next_start + 2] == 0 && packet->data[next_start + 3] == 1))) {
+                                    break;
+                                }
+                                next_start++;
+                            }
+                            nal_size = next_start - offset;
+                            if (next_start == packet->size) {
+                                nal_size = packet->size - offset;
+                            }
+
+                            std::wcout << L"[DEBUG] Found NAL unit type: " << static_cast<int>(nal_unit_type)
+                                << L", size: " << nal_size << L" bytes\n";
+                            offset += nal_size;
+                        }
+                    }
+                    else {
+                        offset++;
+                    }
+                }
+            }
+
+            // Save the encoded packet to a file
+            static std::ofstream h264File("debug_stream.h264", std::ios::binary | std::ios::app);
+            if (h264File.is_open()) {
+                h264File.write((char*)packet->data, packet->size);
+                h264File.flush(); // Ensure the data is written to disk
+            }
+            else {
+                fprintf(stderr, "Error: Could not open debug_stream.h264 for writing\n");
+            }
+
+            // Original WebRTC packet pushing logic
             if (g_onEncodedFrameCallback) {
                 g_onEncodedFrameCallback(packet);
             }
@@ -496,6 +586,88 @@ void EncodeFrame() {
     catch (...) {
         std::cerr << "[EXCEPTION] EncodeFrame() - Unknown exception caught!\n";
     }
+}
+
+// Keep the FlushEncoder function for completeness
+void FlushEncoder() {
+    std::wcout << L"[DEBUG] Flushing encoder\n";
+    int ret = avcodec_send_frame(codecCtx, nullptr); // Send NULL to flush
+    if (ret < 0) {
+        char errBuf[128];
+        av_make_error_string(errBuf, 128, ret);
+        std::cerr << "[Encoder] Failed to flush encoder: " << errBuf << "\n";
+        return;
+    }
+
+    while (avcodec_receive_packet(codecCtx, packet) == 0) {
+        packet->stream_index = videoStream->index;
+        av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);
+
+        if (packet->dts < last_dts) {
+            packet->dts = last_dts + 1;
+        }
+        last_dts = packet->dts;
+
+        // Log packet details during flush
+        std::wcout << L"[DEBUG] Flushing packet: size=" << packet->size << L", PTS=" << packet->pts
+            << L", DTS=" << packet->dts << L", flags=" << packet->flags << L"\n";
+
+        // Parse NAL units during flush
+        if (packet->size > 0) {
+            int offset = 0;
+            while (offset < packet->size) {
+                if (offset + 2 < packet->size && packet->data[offset] == 0 && packet->data[offset + 1] == 0) {
+                    if (offset + 3 < packet->size && packet->data[offset + 2] == 0 && packet->data[offset + 3] == 1) {
+                        offset += 4;
+                    }
+                    else if (packet->data[offset + 2] == 1) {
+                        offset += 3;
+                    }
+                    else {
+                        offset++;
+                        continue;
+                    }
+
+                    if (offset < packet->size) {
+                        uint8_t nal_unit_type = packet->data[offset] & 0x1F;
+                        int nal_size = 0;
+                        int next_start = offset + 1;
+                        while (next_start + 2 < packet->size) {
+                            if (packet->data[next_start] == 0 && packet->data[next_start + 1] == 0 &&
+                                (packet->data[next_start + 2] == 1 || (next_start + 3 < packet->size && packet->data[next_start + 2] == 0 && packet->data[next_start + 3] == 1))) {
+                                break;
+                            }
+                            next_start++;
+                        }
+                        nal_size = next_start - offset;
+                        if (next_start == packet->size) {
+                            nal_size = packet->size - offset;
+                        }
+
+                        std::wcout << L"[DEBUG] Flushing NAL unit type: " << static_cast<int>(nal_unit_type)
+                            << L", size: " << nal_size << L" bytes\n";
+                        offset += nal_size;
+                    }
+                }
+                else {
+                    offset++;
+                }
+            }
+        }
+
+        // Write flushed packets to file
+        static std::ofstream h264File("debug_stream.h264", std::ios::binary | std::ios::app);
+        if (h264File.is_open()) {
+            h264File.write((char*)packet->data, packet->size);
+            h264File.flush();
+        }
+        else {
+            fprintf(stderr, "Error: Could not open debug_stream.h264 for writing during flush\n");
+        }
+
+        av_packet_unref(packet);
+    }
+    std::wcout << L"[DEBUG] Encoder flush complete\n";
 }
 
     //void ConvertFrame(const uint8_t* bgraData, int bgraPitch, int width, int height) {
@@ -585,40 +757,129 @@ void EncodeFrame() {
     //        << width << "x" << height << ")\n";
     //}
 
+//void ConvertFrame(const uint8_t* bgraData, int bgraPitch, int width, int height) {
+//    std::lock_guard<std::mutex> lock(g_encoderMutex);
+//    std::wcout << L"[CONV_DEBUG] ConvertFrame() - Start\n";
+//
+//    // Verify input data
+//    if (!bgraData) {
+//        std::wcerr << L"[CONV_DEBUG] ConvertFrame() - Error: bgraData is NULL\n";
+//        return;
+//    }
+//    std::wcout << L"[CONV_DEBUG] ConvertFrame() - Input: width=" << width << L", height=" << height << L", pitch=" << bgraPitch << L"\n";
+//    std::wcout << L"[CONV_DEBUG] ConvertFrame() - First 16 bytes of bgraData: ";
+//    for (int i = 0; i < 16 && i < bgraPitch * height; i++) {
+//        std::wcout << std::hex << (int)bgraData[i] << L" ";
+//    }
+//    std::wcout << std::dec << L"\n";
+//
+//    if (!swsCtx || width != currentWidth || height != currentHeight) {
+//        std::wcout << L"[CONV_DEBUG] ConvertFrame() - Recreating SWS context\n";
+//
+//        if (swsCtx) {
+//            sws_freeContext(swsCtx);
+//            swsCtx = nullptr;
+//        }
+//        if (nv12Frame) {
+//            av_frame_free(&nv12Frame);
+//        }
+//
+//        swsCtx = sws_getContext(
+//            width, height, AV_PIX_FMT_BGRA,
+//            1920, 1080, AV_PIX_FMT_YUV420P,
+//            SWS_BICUBIC, nullptr, nullptr, nullptr
+//        );
+//        if (!swsCtx) {
+//            std::cerr << "[Encoder] Failed to create swsCtx.\n";
+//            return;
+//        }
+//
+//        nv12Frame = av_frame_alloc();
+//        nv12Frame->format = AV_PIX_FMT_YUV420P;
+//        nv12Frame->width = 1920;
+//        nv12Frame->height = 1080;
+//
+//        // Allocate the frame buffer with correct strides
+//        int ret = av_frame_get_buffer(nv12Frame, 32); // 32-byte alignment
+//        if (ret < 0) {
+//            std::cerr << "[Encoder] Failed to allocate nv12Frame buffer.\n";
+//            return;
+//        }
+//
+//        // Ensure strides are correct for YUV420P
+//        nv12Frame->linesize[0] = 1920; // Luma stride
+//        nv12Frame->linesize[1] = 960;  // U plane stride
+//        nv12Frame->linesize[2] = 960;  // V plane stride
+//
+//        currentWidth = width;
+//        currentHeight = height;
+//        std::wcout << L"[CONV_DEBUG] ConvertFrame() - Performing sws_scale\n";
+//    }
+//
+//    uint8_t* inData[4] = { const_cast<uint8_t*>(bgraData), nullptr, nullptr, nullptr };
+//    int inLineSize[4] = { bgraPitch, 0, 0, 0 };
+//
+//    if (av_frame_make_writable(nv12Frame) < 0) {
+//        std::cerr << "[Encoder] Failed to make nv12Frame writable.\n";
+//        return;
+//    }
+//
+//    std::ofstream bgraOut("debug_bgra.raw", std::ios::binary | std::ios::app);
+//    bgraOut.write(reinterpret_cast<const char*>(bgraData), bgraPitch * height);
+//    bgraOut.close();
+//    std::wcout << L"[DEBUG] Saved BGRA input to debug_bgra.raw\n";
+//
+//    sws_scale(
+//        swsCtx,
+//        inData,
+//        inLineSize,
+//        0,
+//        height,
+//        nv12Frame->data,
+//        nv12Frame->linesize
+//    );
+//
+//    // Verify the strides after sws_scale
+//    nv12Frame->linesize[0] = 1920; // Luma stride
+//    nv12Frame->linesize[1] = 960;  // U plane stride
+//    nv12Frame->linesize[2] = 960;  // V plane stride
+//
+//    // Log the converted YUV420P frame data
+//    std::wcout << L"[CONV_DEBUG] ConvertFrame() - YUV420P frame: linesize[0]=" << nv12Frame->linesize[0]
+//        << L", linesize[1]=" << nv12Frame->linesize[1]
+//        << L", linesize[2]=" << nv12Frame->linesize[2] << L"\n";
+//    std::wcout << L"[CONV_DEBUG] ConvertFrame() - First 16 bytes of YUV420P luma: ";
+//    for (int i = 0; i < 16 && i < nv12Frame->linesize[0]; i++) {
+//        std::wcout << std::hex << (int)nv12Frame->data[0][i] << L" ";
+//    }
+//    std::wcout << std::dec << L"\n";
+//
+//    std::wcout << L"[CONV_DEBUG] ConvertFrame() - Frame converted successfully\n";
+//
+//    EncodeFrame();
+//    std::wcout << L"[CONV_DEBUG] ConvertFrame() - End\n";
+//    std::cout << "[Encoder] Converted frame to YUV420P ("
+//        << width << "x" << height << ")\n";
+//}
+
 void ConvertFrame(const uint8_t* bgraData, int bgraPitch, int width, int height) {
     std::lock_guard<std::mutex> lock(g_encoderMutex);
-    std::wcout << L"[CONV_DEBUG] ConvertFrame() - Start\n";
+    std::wcout << L"[CONV_DEBUG] width=" << width << L", height=" << height
+        << L", bgraPitch=" << bgraPitch << L", expected stride=" << (width * 4) << L"\n";
 
-    // Verify input data
     if (!bgraData) {
-        std::wcerr << L"[CONV_DEBUG] ConvertFrame() - Error: bgraData is NULL\n";
+        std::wcerr << L"[CONV_DEBUG] bgraData is NULL\n";
         return;
     }
-    std::wcout << L"[CONV_DEBUG] ConvertFrame() - Input: width=" << width << L", height=" << height << L", pitch=" << bgraPitch << L"\n";
-    std::wcout << L"[CONV_DEBUG] ConvertFrame() - First 16 bytes of bgraData: ";
-    for (int i = 0; i < 16 && i < bgraPitch * height; i++) {
-        std::wcout << std::hex << (int)bgraData[i] << L" ";
-    }
-    std::wcout << std::dec << L"\n";
 
     if (!swsCtx || width != currentWidth || height != currentHeight) {
-        std::wcout << L"[CONV_DEBUG] ConvertFrame() - Recreating SWS context\n";
+        if (swsCtx) sws_freeContext(swsCtx);
+        if (nv12Frame) av_frame_free(&nv12Frame);
 
-        if (swsCtx) {
-            sws_freeContext(swsCtx);
-            swsCtx = nullptr;
-        }
-        if (nv12Frame) {
-            av_frame_free(&nv12Frame);
-        }
-
-        swsCtx = sws_getContext(
-            width, height, AV_PIX_FMT_BGRA,
-            1920, 1080, AV_PIX_FMT_YUV420P,
-            SWS_BICUBIC, nullptr, nullptr, nullptr
-        );
+        swsCtx = sws_getContext(width, height, AV_PIX_FMT_BGRA, 1920, 1080, AV_PIX_FMT_YUV420P,
+            SWS_BICUBIC, nullptr, nullptr, nullptr);
         if (!swsCtx) {
-            std::cerr << "[Encoder] Failed to create swsCtx.\n";
+            std::cerr << "[Encoder] Failed to create swsCtx\n";
             return;
         }
 
@@ -626,63 +887,38 @@ void ConvertFrame(const uint8_t* bgraData, int bgraPitch, int width, int height)
         nv12Frame->format = AV_PIX_FMT_YUV420P;
         nv12Frame->width = 1920;
         nv12Frame->height = 1080;
-
-        // Allocate the frame buffer with correct strides
-        int ret = av_frame_get_buffer(nv12Frame, 32); // 32-byte alignment
-        if (ret < 0) {
-            std::cerr << "[Encoder] Failed to allocate nv12Frame buffer.\n";
+        if (av_frame_get_buffer(nv12Frame, 32) < 0) {
+            std::cerr << "[Encoder] Failed to allocate nv12Frame buffer\n";
             return;
         }
 
-        // Ensure strides are correct for YUV420P
-        nv12Frame->linesize[0] = 1920; // Luma stride
-        nv12Frame->linesize[1] = 960;  // U plane stride
-        nv12Frame->linesize[2] = 960;  // V plane stride
-
         currentWidth = width;
         currentHeight = height;
-        std::wcout << L"[CONV_DEBUG] ConvertFrame() - Performing sws_scale\n";
     }
 
+    // Use width * 4 as stride if pitch includes padding
+    //int effectiveStride = (bgraPitch > width * 4) ? width * 4 : bgraPitch;
     uint8_t* inData[4] = { const_cast<uint8_t*>(bgraData), nullptr, nullptr, nullptr };
     int inLineSize[4] = { bgraPitch, 0, 0, 0 };
-
     if (av_frame_make_writable(nv12Frame) < 0) {
-        std::cerr << "[Encoder] Failed to make nv12Frame writable.\n";
+        std::cerr << "[Encoder] Failed to make nv12Frame writable\n";
         return;
     }
 
-    sws_scale(
-        swsCtx,
-        inData,
-        inLineSize,
-        0,
-        height,
-        nv12Frame->data,
-        nv12Frame->linesize
-    );
+    sws_scale(swsCtx, inData, inLineSize, 0, height, nv12Frame->data, nv12Frame->linesize);
 
-    // Verify the strides after sws_scale
-    nv12Frame->linesize[0] = 1920; // Luma stride
-    nv12Frame->linesize[1] = 960;  // U plane stride
-    nv12Frame->linesize[2] = 960;  // V plane stride
+    // Debug YUV output
+    std::ofstream yuvOut("debug_yuv420p.raw", std::ios::binary);
+    for (int i = 0; i < 1080; i++) yuvOut.write(reinterpret_cast<char*>(nv12Frame->data[0] + i * nv12Frame->linesize[0]), 1920);
+    for (int i = 0; i < 540; i++) yuvOut.write(reinterpret_cast<char*>(nv12Frame->data[1] + i * nv12Frame->linesize[1]), 960);
+    for (int i = 0; i < 540; i++) yuvOut.write(reinterpret_cast<char*>(nv12Frame->data[2] + i * nv12Frame->linesize[2]), 960);
+    yuvOut.close();
 
-    // Log the converted YUV420P frame data
-    std::wcout << L"[CONV_DEBUG] ConvertFrame() - YUV420P frame: linesize[0]=" << nv12Frame->linesize[0]
-        << L", linesize[1]=" << nv12Frame->linesize[1]
-        << L", linesize[2]=" << nv12Frame->linesize[2] << L"\n";
-    std::wcout << L"[CONV_DEBUG] ConvertFrame() - First 16 bytes of YUV420P luma: ";
-    for (int i = 0; i < 16 && i < nv12Frame->linesize[0]; i++) {
-        std::wcout << std::hex << (int)nv12Frame->data[0][i] << L" ";
-    }
-    std::wcout << std::dec << L"\n";
-
-    std::wcout << L"[CONV_DEBUG] ConvertFrame() - Frame converted successfully\n";
+    std::ofstream bgraFile("debug_bgra.raw", std::ios::binary);
+    bgraFile.write((char*)bgraData, 1920 * 1080 * 4); // 8,294,400 bytes
+    bgraFile.close();
 
     EncodeFrame();
-    std::wcout << L"[CONV_DEBUG] ConvertFrame() - End\n";
-    std::cout << "[Encoder] Converted frame to YUV420P ("
-        << width << "x" << height << ")\n";
 }
 
     void FinalizeEncoder() {

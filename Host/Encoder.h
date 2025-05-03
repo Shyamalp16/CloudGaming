@@ -36,6 +36,8 @@ namespace Encoder {
     // Push packet to WebRTC (declare here since it's used in Encoder.cpp)
     void pushPacketToWebRTC(AVPacket* packet);
 
+    void FlushEncoder();
+
     // External declaration for WebRTC interaction
     extern "C" int sendVideoPacket(uint8_t* data, int size, int64_t pts);
 

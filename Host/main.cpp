@@ -118,6 +118,7 @@ int main()
     StopCapture(token, framePool);
     //framePool.Close();
     session.Close();
+    Encoder::FlushEncoder();
 
     //Optionally unsubscribe from the event
      framePool.FrameArrived(token);

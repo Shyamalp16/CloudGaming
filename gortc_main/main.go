@@ -206,7 +206,23 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	log.Printf("[Go/Pion] Raw H.264 buffer (first 20 bytes): %x\n", buf[:min(20, len(buf))])
 
 	// Convert PTS from microseconds to 90kHz timestamp
-	currentTimestamp = uint32(pts * 90 / 1000)
+	// currentTimestamp = uint32(pts * 90 / 1000)
+	// currentTimestamp = uint32((pts * 90000) / 1000000)
+	const frameRate = 30.0
+	const frameDuration90kHz = 90000.0 / frameRate
+	ptsFloat := float64(pts) / 1000000.0
+	baseTimeStamp := uint32(ptsFloat * 90000.0)
+
+	if currentTimestamp == 0 {
+		currentTimestamp = baseTimeStamp
+	} else {
+		expectedIncrement := uint32(frameDuration90kHz)
+		if baseTimeStamp > currentTimestamp {
+			currentTimestamp = baseTimeStamp
+		} else {
+			currentTimestamp += expectedIncrement
+		}
+	}
 
 	const maxPacketSize = 1200
 
@@ -308,62 +324,80 @@ func splitNALUnits(buf []byte) [][]byte {
 }
 
 // sendFragmentedNALUnit sends a large NAL unit as FU-A packets
+// In main.go :: sendFragmentedNALUnit()
+
 func sendFragmentedNALUnit(nal []byte, maxPacketSize int, isLastNAL bool) error {
-	// FU-A header: [FU indicator (1 byte)] [FU header (1 byte)] [NAL fragment]
-	// FU indicator: (NAL type = 28 for FU-A)
-	// FU header: [S(1 bit)][E(1 bit)][R(1 bit)][Type(5 bits)]
-	// S = 1 for start, E = 1 for end, R = 0 (reserved), Type = NAL unit type
+	if len(nal) < 2 {
+		log.Printf("[Go/Pion] NAL unit too small to fragment (size: %d)\n", len(nal))
+		// Optionally send as single packet if possible, or log error
+		// For now, let's just return, though this might drop small NALs
+		// that somehow triggered fragmentation logic.
+		return nil // Or handle appropriately
+	}
 
 	nalType := nal[0] & 0x1F            // Extract the NAL unit type (5 bits)
-	fuIndicator := (nal[0] & 0xE0) | 28 // FU-A type (28)
+	fuIndicator := (nal[0] & 0xE0) | 28 // FU-A type (28), NRI bits from original NAL
 	maxPayloadSize := maxPacketSize - 2 // Account for FU indicator and FU header
 
+	// --- CHANGE: Fragment the NAL payload (nal[1:]) ---
+	nalPayload := nal[1:]
 	offset := 0
 	firstFragment := true
+	// --- END CHANGE ---
 
-	for offset < len(nal) {
-		chunkSize := len(nal) - offset
+	// --- CHANGE: Loop condition uses nalPayload ---
+	for offset < len(nalPayload) {
+		// --- CHANGE: chunkSize calculation uses nalPayload ---
+		chunkSize := len(nalPayload) - offset
 		if chunkSize > maxPayloadSize {
 			chunkSize = maxPayloadSize
 		}
 
-		//FU Header
+		// FU Header
 		fuHeader := byte(0)
 		if firstFragment {
-			fuHeader |= 0x80 //set start bit
+			fuHeader |= 0x80 // Set start bit
 		}
-
-		if offset+chunkSize >= len(nal) {
-			fuHeader |= 0x40 //set end bit
+		// --- CHANGE: End bit check uses nalPayload ---
+		if offset+chunkSize >= len(nalPayload) {
+			fuHeader |= 0x40 // Set end bit
 		}
-		fuHeader |= nalType //set nal type
+		fuHeader |= nalType // Set original NAL type
 
-		//create the FU-A payload
+		// Create the FU-A payload
 		payload := make([]byte, 2+chunkSize)
 		payload[0] = fuIndicator
 		payload[1] = fuHeader
-		copy(payload[2:], nal[offset:offset+chunkSize])
-		log.Printf("[Go/Pion] NAL Unit Type: %d\n", nalType)
-		//SendRTP packet
+		// --- CHANGE: Copy chunk from nalPayload ---
+		copy(payload[2:], nalPayload[offset:offset+chunkSize])
+		// --- END CHANGE ---
+
+		// Log NAL type being fragmented
+		log.Printf("[Go/Pion] Fragmenting NAL Unit Type: %d\n", nalType)
+
+		// Send RTP packet
 		rtpPacket := &rtp.Packet{
 			Header: rtp.Header{
 				Version:        2,
-				PayloadType:    96,
+				PayloadType:    96, // Make sure this matches SDP
 				SequenceNumber: currentSequenceNumber,
 				Timestamp:      currentTimestamp,
 				SSRC:           trackSSRC,
-				Marker:         (offset+chunkSize >= len(nal)) && isLastNAL, // Marker on last packet of last NAL
+				// --- CHANGE: Marker bit check uses nalPayload ---
+				Marker: (offset+chunkSize >= len(nalPayload)) && isLastNAL, // Marker on last packet of last NAL
+				// --- END CHANGE ---
 			},
 			Payload: payload,
 		}
 
 		currentSequenceNumber++
 		if err := videoTrack.WriteRTP(rtpPacket); err != nil {
-			return err
+			log.Printf("[Go/Pion] Error writing FU-A RTP packet: %v\n", err)
+			return err // Return error on write failure
 		}
 
-		log.Printf("[Go/Pion] Sent H.264 FU-A packet (size: %d, offset: %d, PTS: %d, Seq: %d, Marker: %v)\n",
-			len(payload), offset, currentTimestamp, currentSequenceNumber-1, rtpPacket.Header.Marker)
+		log.Printf("[Go/Pion] Sent H.264 FU-A packet (payload size: %d, offset: %d, PTS: %d, Seq: %d, Marker: %v, FU Header: %02x)\n",
+			len(payload), offset, currentTimestamp, currentSequenceNumber-1, rtpPacket.Header.Marker, fuHeader)
 
 		offset += chunkSize
 		firstFragment = false

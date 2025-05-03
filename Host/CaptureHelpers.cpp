@@ -338,6 +338,10 @@ void PreProcessFrameConversion(winrt::com_ptr<ID3D11Device> device, winrt::com_p
 	auto bgraData = static_cast<uint8_t*>(mapped.pData);
 	int bgraPitch = mapped.RowPitch;
 
+    std::wcout << L"[DEBUG] desc.Width=" << desc.Width << L", desc.Height=" << desc.Height
+        << L", bgraPitch=" << bgraPitch << L", expected stride=" << (desc.Width * 4) << L"\n";
+
+
 	Encoder::ConvertFrame(bgraData, bgraPitch, desc.Width, desc.Height);
 	context->Unmap(stagingTexture.get(), 0);
     std::wcout << L"[ProcessFrames] Processed frame with sequence number: "
