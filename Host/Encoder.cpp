@@ -120,10 +120,10 @@ namespace Encoder {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
         std::wcout << L"[DEBUG] Initializing NVENC encoder with width=" << width << L", height=" << height << L", fps=" << fps << L"\n";
 
-        debugH264File.open("debug_h264_stream.h264", std::ios::binary);
+        /*debugH264File.open("debug_h264_stream.h264", std::ios::binary);
         if (!debugH264File.is_open()) {
             std::wcerr << L"[DEBUG] Failed to open debug_h264_stream.h264 for writing\n";
-        }
+        }*/
 
         // Initialize hardware device context for NVENC
         if (av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0) < 0) {
@@ -176,7 +176,7 @@ namespace Encoder {
         codecCtx->gop_size = 10;
         codecCtx->max_b_frames = 0;
         codecCtx->pix_fmt = AV_PIX_FMT_CUDA;
-        codecCtx->bit_rate = 20000000;
+        codecCtx->bit_rate = 30000000;
 
 
         //codecCtx->profile = FF_PROFILE_H264_BASELINE;
@@ -398,11 +398,11 @@ namespace Encoder {
                     }
                 }
 
-                static std::ofstream h264File("debug_stream.h264", std::ios::binary | std::ios::app);
+               /* static std::ofstream h264File("debug_stream.h264", std::ios::binary | std::ios::app);
                 if (h264File.is_open()) {
                     h264File.write((char*)packet->data, packet->size);
                     h264File.flush();
-                }
+                }*/
 
                 if (g_onEncodedFrameCallback) {
                     g_onEncodedFrameCallback(packet);

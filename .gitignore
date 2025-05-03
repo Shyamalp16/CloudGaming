@@ -367,6 +367,7 @@ debug_bgra.raw
 debug_h264_stream.h264
 debug_stream.h264
 debug_yuv420p.raw
+test.bat
 
 /Server/node_modules
 /Server/SignalingServer.js
