@@ -106,9 +106,9 @@ namespace Encoder {
 
         logNALUnits(packet->data, packet->size);
 
-        if (debugH264File.is_open()) {
+        /*if (debugH264File.is_open()) {
             debugH264File.write(reinterpret_cast<const char*>(packet->data), packet->size);
-        }
+        }*/
 
         int result = sendVideoPacket(packet->data, packet->size, packet->pts);
         if (result != 0) {
@@ -173,13 +173,16 @@ namespace Encoder {
         codecCtx->time_base = AVRational{ 1, fps };
         videoStream->time_base = codecCtx->time_base;
         codecCtx->framerate = { fps, 1 };
-        codecCtx->gop_size = 15;
+        codecCtx->gop_size = 10;
         codecCtx->max_b_frames = 0;
         codecCtx->pix_fmt = AV_PIX_FMT_CUDA;
-        codecCtx->bit_rate = 15000000;
+        codecCtx->bit_rate = 20000000;
 
-        codecCtx->profile = FF_PROFILE_H264_BASELINE;
-        codecCtx->level = 42;
+
+        //codecCtx->profile = FF_PROFILE_H264_BASELINE;
+		codecCtx->profile = FF_PROFILE_H264_MAIN;
+		//codecCtx->profile = FF_PROFILE_H264_HIGH;
+        codecCtx->level = 52;
 
         // Set hardware device context
         codecCtx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
@@ -204,7 +207,7 @@ namespace Encoder {
         framesCtx->sw_format = AV_PIX_FMT_YUV420P;
         framesCtx->width = width;
         framesCtx->height = height;
-        framesCtx->initial_pool_size = 20; // Number of frames to pre-allocate
+        framesCtx->initial_pool_size = 40; // Number of frames to pre-allocate
 
         if (av_hwframe_ctx_init(hwFramesCtx) < 0) {
             std::cerr << "[Encoder] Failed to initialize hardware frames context.\n";
@@ -229,7 +232,7 @@ namespace Encoder {
         av_dict_set(&opts, "preset", "p7", 0);
         av_dict_set(&opts, "rc", "vbr", 0);
         av_dict_set(&opts, "zerolatency", "1", 0);
-        av_dict_set(&opts, "level", "4.2", 0);
+        av_dict_set(&opts, "level", "52", 0);
 
         if (avcodec_open2(codecCtx, codec, &opts) < 0) {
             std::cerr << "[Encoder] Failed to open NVENC codec.\n";
@@ -551,7 +554,7 @@ namespace Encoder {
 
         sws_scale(swsCtx, inData, inLineSize, 0, height, nv12Frame->data, nv12Frame->linesize);
 
-        std::ofstream yuvOut("debug_yuv420p.raw", std::ios::binary | std::ios::app);
+        /*std::ofstream yuvOut("debug_yuv420p.raw", std::ios::binary | std::ios::app);
         for (int i = 0; i < height; i++) {
             yuvOut.write(reinterpret_cast<char*>(nv12Frame->data[0] + i * nv12Frame->linesize[0]), width);
         }
@@ -562,14 +565,14 @@ namespace Encoder {
             yuvOut.write(reinterpret_cast<char*>(nv12Frame->data[2] + i * nv12Frame->linesize[2]), width / 2);
         }
         yuvOut.close();
-        std::wcout << L"[DEBUG] Saved YUV420P frame to debug_yuv420p.raw\n";
+        std::wcout << L"[DEBUG] Saved YUV420P frame to debug_yuv420p.raw\n";*/
 
-        std::ofstream bgraFile("debug_bgra.raw", std::ios::binary | std::ios::app);
+       /* std::ofstream bgraFile("debug_bgra.raw", std::ios::binary | std::ios::app);
         for (int i = 0; i < height; i++) {
             bgraFile.write(reinterpret_cast<char*>(const_cast<uint8_t*>(bgraData) + i * bgraPitch), width * 4);
         }
         bgraFile.close();
-        std::wcout << L"[DEBUG] Saved BGRA input to debug_bgra.raw\n";
+        std::wcout << L"[DEBUG] Saved BGRA input to debug_bgra.raw\n";*/
 
         EncodeFrame();
     }

@@ -405,7 +405,7 @@ void StartCapture() {
     for (int i = 0; i < numThreads; i++) {
         workerThreads.emplace_back(ProcessFrames);
     }
-	Encoder::InitializeEncoder("output.mp4", 1920, 1080, 60);
+	Encoder::InitializeEncoder("output.mp4", 1920, 1080, 300);
     std::wcout << L"[StartCapture] Capture started with " << numThreads << L" threads.\n";
 }
 
