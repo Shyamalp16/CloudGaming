@@ -55,6 +55,7 @@ namespace Encoder {
     extern AVPacket* packet;
     extern AVFrame* hwFrame;
     extern AVBufferRef* hwDeviceCtx;
+    extern AVBufferRef* hwFramesCtx;
     extern int frameCounter;
     extern int64_t last_dts;
 
