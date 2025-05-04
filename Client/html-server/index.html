@@ -29,12 +29,14 @@
   <video id="remoteVideo" autoplay controls></video>
   <div id="log"></div>
 
+  <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
   <script>
     const serverUrl = 'ws://localhost:3000';
     let ws;
     let peerConnection;
     const videoElement = document.getElementById('remoteVideo');
     const logElement = document.getElementById('log');
+    let dataChannel;
 
     // Simple logging function to display logs in the UI
     function log(message) {
@@ -181,10 +183,9 @@
             direction: 'recvonly',
         });
 
-        const dataChannel = peerConnection.createDataChannel('tst');
+        const dataChannel = peerConnection.createDataChannel('keypressChannel');
         dataChannel.onopen = () => {
-            log('Data Channel Opened');
-            dataChannel.send('Hello From The Offerer!');
+            log('Data Channel Opened for Keypresses');
         };
         dataChannel.onmessage = (event) => {
             log('Received Message On Data Channel: ' + event.data);
@@ -195,6 +196,18 @@
         dataChannel.onerror = (err) => {
             log('Data Channel Error: ' + err.message);
         };
+
+        document.addEventListener('keydown', (event) => {
+            if(dataChannel.readyState == 'open'){
+                const keyData = {
+                    key: event.key,
+                    code: event.code,
+                    timestamp: Date.now()
+                };
+                // dataChannel.send(JSON.stringify(keyData));
+                log('Sent keypress: ' + JSON.stringify(keyData));
+            }
+        })
 
         try {
             const offer = await peerConnection.createOffer();
