@@ -69,7 +69,7 @@ namespace Encoder {
                 pos += 4;
                 if (pos >= size) break;
                 uint8_t nalUnitType = data[pos] & 0x1F;
-                std::wcout << L"[DEBUG] NAL Unit Type: " << (int)nalUnitType << L"\n";
+                //std::wcout << L"[DEBUG] NAL Unit Type: " << (int)nalUnitType << L"\n";
                 int nextPos = pos + 1;
                 while (nextPos + 3 < size) {
                     if (data[nextPos] == 0x00 && data[nextPos + 1] == 0x00 && data[nextPos + 2] == 0x00 && data[nextPos + 3] == 0x01) {
@@ -78,7 +78,7 @@ namespace Encoder {
                     nextPos++;
                 }
                 int nalSize = (nextPos + 3 < size) ? (nextPos - pos + 3) : (size - pos);
-                std::wcout << L"[DEBUG] NAL Unit Size: " << nalSize << L"\n";
+                //std::wcout << L"[DEBUG] NAL Unit Size: " << nalSize << L"\n";
                 pos = nextPos;
             }
             else {
@@ -88,7 +88,7 @@ namespace Encoder {
     }
 
     void pushPacketToWebRTC(AVPacket* packet) {
-        std::wcout << L"[WebRTC] Pushing encoded packets (PTS: " << packet->pts << L") to WebRTC module.\n";
+        //std::wcout << L"[WebRTC] Pushing encoded packets (PTS: " << packet->pts << L") to WebRTC module.\n";
         {
             std::lock_guard<std::mutex> lock(g_frameMutex);
             g_latestFrameData.assign(packet->data, packet->data + packet->size);
@@ -97,7 +97,7 @@ namespace Encoder {
         }
         g_frameAvailable.notify_one();
 
-        std::wcout << L"[WebRTC] Packet Size: " << packet->size << L", First 20 Bytes: ";
+        //std::wcout << L"[WebRTC] Packet Size: " << packet->size << L", First 20 Bytes: ";
         for (int i = 0; i < std::min(20, packet->size); i++) {
             std::wcout << std::hex << (int)packet->data[i] << L" ";
         }
@@ -280,7 +280,7 @@ namespace Encoder {
 
     void EncodeFrame() {
         try {
-            std::wcout << L"[DEBUG] EncodeFrame() - Start\n";
+            //std::wcout << L"[DEBUG] EncodeFrame() - Start\n";
 
             if (!nv12Frame) {
                 std::cerr << "[Encoder] Invalid frame (nv12Frame is NULL).\n";
@@ -299,11 +299,11 @@ namespace Encoder {
                 return;
             }
 
-            std::wcout << L"[DEBUG] EncodeFrame() - Frame: width=" << nv12Frame->width
-                << L", height=" << nv12Frame->height << L", format=" << nv12Frame->format << L"\n";
+            /*std::wcout << L"[DEBUG] EncodeFrame() - Frame: width=" << nv12Frame->width
+                << L", height=" << nv12Frame->height << L", format=" << nv12Frame->format << L"\n";*/
 
             if (nv12Frame->format != AV_PIX_FMT_YUV420P) {
-                std::wcout << L"[DEBUG] Fixing frame format to AV_PIX_FMT_YUV420P\n";
+                //std::wcout << L"[DEBUG] Fixing frame format to AV_PIX_FMT_YUV420P\n";
                 nv12Frame->format = AV_PIX_FMT_YUV420P;
             }
 
@@ -332,10 +332,10 @@ namespace Encoder {
 
             if (frameCounter == 0 || frameCounter % codecCtx->gop_size == 0) {
                 hwFrame->pict_type = AV_PICTURE_TYPE_I;
-                std::wcout << L"[DEBUG] Forcing KeyFrame at frame " << frameCounter << L"\n";
+                //std::wcout << L"[DEBUG] Forcing KeyFrame at frame " << frameCounter << L"\n";
             }
 
-            std::wcout << L"[DEBUG] Sending frame to NVENC encoder, PTS=" << hwFrame->pts << L"\n";
+            //std::wcout << L"[DEBUG] Sending frame to NVENC encoder, PTS=" << hwFrame->pts << L"\n";
             int ret = avcodec_send_frame(codecCtx, hwFrame);
             if (ret < 0) {
                 char errBuf[128];
@@ -349,13 +349,13 @@ namespace Encoder {
                 av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);
 
                 if (packet->dts < last_dts) {
-                    std::wcout << L"[DEBUG] Adjusting DTS: " << packet->dts << L" to " << (last_dts + 1) << L"\n";
+                    //std::wcout << L"[DEBUG] Adjusting DTS: " << packet->dts << L" to " << (last_dts + 1) << L"\n";
                     packet->dts = last_dts + 1;
                 }
                 last_dts = packet->dts;
 
-                std::wcout << L"[DEBUG] Encoded packet: size=" << packet->size << L", PTS=" << packet->pts
-                    << L", DTS=" << packet->dts << L", flags=" << packet->flags << L"\n";
+                /*std::wcout << L"[DEBUG] Encoded packet: size=" << packet->size << L", PTS=" << packet->pts
+                    << L", DTS=" << packet->dts << L", flags=" << packet->flags << L"\n";*/
 
                 if (packet->size > 0) {
                     int offset = 0;
@@ -386,8 +386,8 @@ namespace Encoder {
                                 if (next_start == packet->size) {
                                     nal_size = packet->size - offset;
                                 }
-                                std::wcout << L"[DEBUG] NAL unit type: " << static_cast<int>(nal_unit_type)
-                                    << L", size: " << nal_size << L" bytes\n";
+                                /*std::wcout << L"[DEBUG] NAL unit type: " << static_cast<int>(nal_unit_type)
+                                    << L", size: " << nal_size << L" bytes\n";*/
                                 offset += nal_size;
                             }
                         }
@@ -413,8 +413,8 @@ namespace Encoder {
                 av_packet_unref(packet);
             }
             frameCounter++;
-            std::wcout << L"[DEBUG] Frame encoded successfully. Frame Counter: " << frameCounter
-                << L", PTS: " << hwFrame->pts << L"\n";
+            /*std::wcout << L"[DEBUG] Frame encoded successfully. Frame Counter: " << frameCounter
+                << L", PTS: " << hwFrame->pts << L"\n";*/
         }
         catch (const std::exception& e) {
             std::cerr << "[EXCEPTION] EncodeFrame() - Exception caught: " << e.what() << "\n";
@@ -443,8 +443,8 @@ namespace Encoder {
             }
             last_dts = packet->dts;
 
-            std::wcout << L"[DEBUG] Flushing packet: size=" << packet->size << L", PTS=" << packet->pts
-                << L", DTS=" << packet->dts << L", flags=" << packet->flags << L"\n";
+            /*std::wcout << L"[DEBUG] Flushing packet: size=" << packet->size << L", PTS=" << packet->pts
+                << L", DTS=" << packet->dts << L", flags=" << packet->flags << L"\n";*/
 
             if (packet->size > 0) {
                 int offset = 0;
@@ -477,8 +477,8 @@ namespace Encoder {
                                 nal_size = packet->size - offset;
                             }
 
-                            std::wcout << L"[DEBUG] Flushing NAL unit type: " << static_cast<int>(nal_unit_type)
-                                << L", size: " << nal_size << L" bytes\n";
+                            /*std::wcout << L"[DEBUG] Flushing NAL unit type: " << static_cast<int>(nal_unit_type)
+                                << L", size: " << nal_size << L" bytes\n";*/
                             offset += nal_size;
                         }
                     }
@@ -496,13 +496,13 @@ namespace Encoder {
 
             av_packet_unref(packet);
         }
-        std::wcout << L"[DEBUG] NVENC encoder flush complete\n";
+        //std::wcout << L"[DEBUG] NVENC encoder flush complete\n";
     }
 
     void ConvertFrame(const uint8_t* bgraData, int bgraPitch, int width, int height) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
-        std::wcout << L"[CONV_DEBUG] width=" << width << L", height=" << height
-            << L", bgraPitch=" << bgraPitch << L", expected stride=" << (width * 4) << L"\n";
+        /*std::wcout << L"[CONV_DEBUG] width=" << width << L", height=" << height
+            << L", bgraPitch=" << bgraPitch << L", expected stride=" << (width * 4) << L"\n";*/
 
         if (!bgraData) {
             std::wcerr << L"[CONV_DEBUG] bgraData is NULL\n";
@@ -540,8 +540,8 @@ namespace Encoder {
 
             currentWidth = width;
             currentHeight = height;
-            std::wcout << L"[CONV_DEBUG] SWS context created: input=" << width << L"x" << height
-                << L", output=" << width << L"x" << height << L"\n";
+            /*std::wcout << L"[CONV_DEBUG] SWS context created: input=" << width << L"x" << height
+                << L", output=" << width << L"x" << height << L"\n";*/
         }
 
         uint8_t* inData[4] = { const_cast<uint8_t*>(bgraData), nullptr, nullptr, nullptr };

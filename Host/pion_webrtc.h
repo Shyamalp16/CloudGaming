@@ -57,6 +57,8 @@ extern "C" {
      */
     void onIceCandidate(const char* candidate);
 
+    char* getDataChannelMessage();
+
 #ifdef __cplusplus
 }
 #endif

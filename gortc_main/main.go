@@ -26,10 +26,49 @@ var (
 	lastAnswerSDP         string // Store answer SDP for C++ retrieval
 	currentSequenceNumber uint16
 	currentTimestamp      uint32
+	dataChannel           *webrtc.DataChannel
+	messageQueue          []string
+	queueMutex            sync.Mutex
 )
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
+}
+
+func enqueueMessage(msg string) {
+	queueMutex.Lock()
+	defer queueMutex.Unlock()
+	messageQueue = append(messageQueue, msg)
+	log.Printf("[Go/Pion] Enqueued message, queue size: %d\n", len(messageQueue))
+}
+
+//export getDataChannelMessage
+func getDataChannelMessage() *C.char {
+	queueMutex.Lock()
+	defer queueMutex.Unlock()
+	if len(messageQueue) == 0 {
+		log.Println("[Go/Pion] No messages in queue")
+		return nil
+	}
+	msg := messageQueue[0]
+	messageQueue = messageQueue[1:]
+	log.Printf("[Go/Pion] Dequeued message: %s\n", msg)
+	return C.CString(msg)
+}
+
+func newTrue() *bool {
+	b := true
+	return &b
+}
+
+func newFalse() *bool {
+	b := false
+	return &b
+}
+
+func newProtocol() *string {
+	b := ""
+	return &b
 }
 
 //export createPeerConnectionGo
@@ -42,6 +81,14 @@ func createPeerConnectionGo() C.int {
 		_ = peerConnection.Close()
 		peerConnection = nil
 		videoTrack = nil
+		if dataChannel != nil {
+			if err := dataChannel.Close(); err != nil {
+				log.Printf("[Go/Pion] Error closing existing DataChannel: %v\n", err)
+			}
+		}
+		dataChannel = nil
+		messageQueue = []string{}
+		lastAnswerSDP = ""
 	}
 
 	// Configure MediaEngine with H.264 codec
@@ -56,6 +103,11 @@ func createPeerConnectionGo() C.int {
 	}
 	if err := mediaEngine.RegisterCodec(codec, webrtc.RTPCodecTypeVideo); err != nil {
 		log.Printf("[Go/Pion] Error registering H.264 codec: %v\n", err)
+		return 0
+	}
+
+	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
+		log.Printf("[Go/Pion] Error registering default codecs: %v\n", err)
 		return 0
 	}
 
@@ -89,6 +141,8 @@ func createPeerConnectionGo() C.int {
 	)
 	if err != nil {
 		log.Printf("[Go/Pion] Error creating video track: %v\n", err)
+		_ = peerConnection.Close()
+		peerConnection = nil
 		return 0
 	}
 
@@ -97,8 +151,47 @@ func createPeerConnectionGo() C.int {
 
 	if _, err := peerConnection.AddTrack(videoTrack); err != nil {
 		log.Printf("[Go/Pion] Error adding video track: %v\n", err)
+		_ = peerConnection.Close()
 		return 0
 	}
+
+	peerConnection.OnDataChannel(func(dc *webrtc.DataChannel) {
+		log.Printf("[Go/Pion] Received data channel: '%s', ID: %d, Negotiated: %v\n", dc.Label(), *dc.ID(), dc.Negotiated())
+		if dc.Label() == "keyPressChannel" {
+			if dataChannel != nil && dataChannel != dc {
+				log.Printf("[Go/Pion] Closing previous data channel '%s'\n", dataChannel.Label())
+				_ = dataChannel.Close()
+			}
+			dataChannel = dc
+			pcMutex.Unlock()
+			log.Printf("[Go/Pion] Assigned data channel '%s' from client.\n", dc.Label())
+
+			dc.OnOpen(func() {
+				log.Println("[Go/Pion] Data channel opened")
+			})
+
+			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+				log.Printf("[Go/Pion] Received message on data channel '%s': %s\n", dc.Label(), string(msg.Data))
+				enqueueMessage(string(msg.Data))
+			})
+
+			dc.OnClose(func() {
+				log.Printf("[Go/Pion] Data channel '%s' closed (initiated by client).\n", dc.Label())
+				pcMutex.Lock()
+				if dataChannel == dc {
+					dataChannel = nil
+				}
+				pcMutex.Unlock()
+			})
+
+			dc.OnError(func(err error) {
+				log.Printf("[Go/Pion] Data channel '%s' error: %v\n", dc.Label(), err)
+			})
+		} else {
+			log.Printf("[Go/Pion] Received unexpected data channel: %s\n", dc.Label())
+		}
+	})
+	// log.Println("[Go/Pion] Data channel created for keypresses.")
 
 	// Set up callbacks
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
@@ -112,6 +205,9 @@ func createPeerConnectionGo() C.int {
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("[Go/Pion] PeerConnection State: %s\n", state.String())
 	})
+	peerConnection.OnDataChannel(func(d *webrtc.DataChannel) {
+		log.Printf("[Go/Pion] Received incoming data channel: %s, readyState: %s\n", d.Label(), d.ReadyState())
+	})
 
 	log.Println("[Go/Pion] PeerConnection created.")
 	return 1
@@ -120,14 +216,16 @@ func createPeerConnectionGo() C.int {
 //export handleOffer
 func handleOffer(offerSDP *C.char) {
 	pcMutex.Lock()
-	defer pcMutex.Unlock()
 
 	if peerConnection == nil {
 		log.Println("[Go/Pion] handleOffer: no PeerConnection, creating one.")
+		defer pcMutex.Unlock()
 		if createPeerConnectionGo() == 0 {
 			return
 		}
+		pcMutex.Lock()
 	}
+	defer pcMutex.Unlock()
 
 	sdpGoString := C.GoString(offerSDP)
 	log.Printf("[Go/Pion] handleOffer: %s\n", sdpGoString)
@@ -191,7 +289,6 @@ func handleRemoteIceCandidate(candidateStr *C.char) {
 }
 
 //export sendVideoPacket
-//export sendVideoPacket
 func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	pcMutex.Lock()
 	defer pcMutex.Unlock()
@@ -203,11 +300,8 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 
 	// Convert C data to Go byte slice
 	buf := C.GoBytes(data, size)
-	log.Printf("[Go/Pion] Raw H.264 buffer (first 20 bytes): %x\n", buf[:min(20, len(buf))])
+	// log.Printf("[Go/Pion] Raw H.264 buffer (first 20 bytes): %x\n", buf[:min(20, len(buf))])
 
-	// Convert PTS from microseconds to 90kHz timestamp
-	// currentTimestamp = uint32(pts * 90 / 1000)
-	// currentTimestamp = uint32((pts * 90000) / 1000000)
 	const frameRate = 60.0
 	const frameDuration90kHz = 90000.0 / frameRate
 	ptsFloat := float64(pts) / 1000000.0
@@ -237,7 +331,7 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	for i, nal := range nalUnits {
 		// Log the first few bytes of the NAL unit for debugging
 		if i == 0 {
-			log.Printf("[Go/Pion] First 4 bytes of frame: %x\n", nal[:min(4, len(nal))])
+			// log.Printf("[Go/Pion] First 4 bytes of frame: %x\n", nal[:min(4, len(nal))])
 		}
 
 		// If the NAL unit is smaller than the MTU, send it as a single RTP packet
@@ -260,8 +354,8 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 				return -1
 			}
 
-			log.Printf("[Go/Pion] Sent H.264 RTP packet (size: %d, PTS: %d, Seq: %d, Marker: %v)\n",
-				len(nal), currentTimestamp, currentSequenceNumber-1, rtpPacket.Header.Marker)
+			// log.Printf("[Go/Pion] Sent H.264 RTP packet (size: %d, PTS: %d, Seq: %d, Marker: %v)\n",
+			// 	len(nal), currentTimestamp, currentSequenceNumber-1, rtpPacket.Header.Marker)
 		} else {
 			// Fragment the NAL unit into FU-A packets
 			err := sendFragmentedNALUnit(nal, maxPacketSize, i == len(nalUnits)-1)
@@ -272,7 +366,7 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		}
 	}
 
-	log.Printf("[Go/Pion] Sent H.264 frame (total size: %d, PTS: %d)\n", size, currentTimestamp)
+	// log.Printf("[Go/Pion] Sent H.264 frame (total size: %d, PTS: %d)\n", size, currentTimestamp)
 	return 0
 }
 
@@ -314,8 +408,8 @@ func splitNALUnits(buf []byte) [][]byte {
 	for _, nal := range nalUnits {
 		if len(nal) > 0 {
 			// Log the NAL unit type for debugging
-			nalType := nal[0] & 0x1F
-			log.Printf("[Go/Pion] Parsed NAL Unit Type: %d, Size: %d\n", nalType, len(nal))
+			// nalType := nal[0] & 0x1F
+			// log.Printf("[Go/Pion] Parsed NAL Unit Type: %d, Size: %d\n", nalType, len(nal))
 			filteredNALs = append(filteredNALs, nal)
 		}
 	}
@@ -373,7 +467,7 @@ func sendFragmentedNALUnit(nal []byte, maxPacketSize int, isLastNAL bool) error 
 		// --- END CHANGE ---
 
 		// Log NAL type being fragmented
-		log.Printf("[Go/Pion] Fragmenting NAL Unit Type: %d\n", nalType)
+		// log.Printf("[Go/Pion] Fragmenting NAL Unit Type: %d\n", nalType)
 
 		// Send RTP packet
 		rtpPacket := &rtp.Packet{
@@ -396,8 +490,8 @@ func sendFragmentedNALUnit(nal []byte, maxPacketSize int, isLastNAL bool) error 
 			return err // Return error on write failure
 		}
 
-		log.Printf("[Go/Pion] Sent H.264 FU-A packet (payload size: %d, offset: %d, PTS: %d, Seq: %d, Marker: %v, FU Header: %02x)\n",
-			len(payload), offset, currentTimestamp, currentSequenceNumber-1, rtpPacket.Header.Marker, fuHeader)
+		// log.Printf("[Go/Pion] Sent H.264 FU-A packet (payload size: %d, offset: %d, PTS: %d, Seq: %d, Marker: %v, FU Header: %02x)\n",
+		// 	len(payload), offset, currentTimestamp, currentSequenceNumber-1, rtpPacket.Header.Marker, fuHeader)
 
 		offset += chunkSize
 		firstFragment = false

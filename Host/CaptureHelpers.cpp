@@ -278,7 +278,7 @@ GraphicsCaptureSession createCaptureSession(
 }
 
 winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool const& framePool) {
-    std::wcout << L"[FrameArrivedEventRegistration] Registering frame arrival handler...\n";
+    //std::wcout << L"[FrameArrivedEventRegistration] Registering frame arrival handler...\n";
 
     auto handler = TypedEventHandler<Direct3D11CaptureFramePool, winrt::Windows::Foundation::IInspectable>(
         [](Direct3D11CaptureFramePool sender, winrt::Windows::Foundation::IInspectable) {
@@ -304,7 +304,7 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                 }
                 queueCV.notify_one(); // Notify worker threads
 
-                std::wcout << L"[FrameArrived] Frame enqueued with sequence number: " << sequenceNumber << std::endl;
+                //std::wcout << L"[FrameArrived] Frame enqueued with sequence number: " << sequenceNumber << std::endl;
             }
             catch (const std::exception& e) {
                 std::wcerr << L"[FrameArrived] Exception: " << e.what() << L"\n";
@@ -340,14 +340,14 @@ void PreProcessFrameConversion(winrt::com_ptr<ID3D11Device> device, winrt::com_p
 	auto bgraData = static_cast<uint8_t*>(mapped.pData);
 	int bgraPitch = mapped.RowPitch;
 
-    std::wcout << L"[DEBUG] desc.Width=" << desc.Width << L", desc.Height=" << desc.Height
-        << L", bgraPitch=" << bgraPitch << L", expected stride=" << (desc.Width * 4) << L"\n";
+    /*std::wcout << L"[DEBUG] desc.Width=" << desc.Width << L", desc.Height=" << desc.Height
+        << L", bgraPitch=" << bgraPitch << L", expected stride=" << (desc.Width * 4) << L"\n";*/
 
 
 	Encoder::ConvertFrame(bgraData, bgraPitch, desc.Width, desc.Height);
 	context->Unmap(stagingTexture.get(), 0);
-    std::wcout << L"[ProcessFrames] Processed frame with sequence number: "
-        << sequenceNumber << std::endl;
+    /*std::wcout << L"[ProcessFrames] Processed frame with sequence number: "
+        << sequenceNumber << std::endl;*/
 }
 
 void ProcessFrames() {
@@ -372,14 +372,14 @@ void ProcessFrames() {
 
         // Check for sentinel value to exit thread
         if (frameData.sequenceNumber == -1) {
-            std::wcout << L"[ProcessFrames] Sentinel received, exiting thread.\n";
+            //std::wcout << L"[ProcessFrames] Sentinel received, exiting thread.\n";
             break;
         }
 
         if (frameData.surface) {
             // for debugging
             //SaveTextureAsPNG(GetD3DDevice(), GetTextureFromSurface(frameData.surface), L"frame", frameData.sequenceNumber);
-            std::wcout << L"[ProcessFrames] Processed frame with sequence number: " << frameData.sequenceNumber << std::endl;
+            //std::wcout << L"[ProcessFrames] Processed frame with sequence number: " << frameData.sequenceNumber << std::endl;
 
             auto device = GetD3DDevice();
             auto texture = GetTextureFromSurface(frameData.surface);

@@ -132,23 +132,23 @@
             log('Signaling state changed to: ' + peerConnection.signalingState);
         };
 
-        peerConnection.ondatachannel = (event) => {
-            const receiveChannel = event.channel;
-            log('Data Channel Received: ' + receiveChannel.label);
+        dataChannel = peerConnection.createDataChannel("keyPressChannel", {ordered: true})
+        log(`Client attempting to create data channel "${dataChannel.label}", initial state: ${dataChannel.readyState}`);
+        log('Data Channel Received: ' + dataChannel.label + ', readyState: ' + dataChannel.readyState);
 
-            receiveChannel.onopen = () => {
-                log('Data Channel Opened: ' + receiveChannel.label);
-                receiveChannel.send('Hello From The Receiver!');
-            };
-            receiveChannel.onmessage = (event) => {
-                log('Received Message on Data Channel: ' + event.data);
-            };
-            receiveChannel.onclose = () => {
-                log('Data Channel Closed: ' + receiveChannel.label);
-            };
-            receiveChannel.onerror = (err) => {
-                log('Data Channel Error: ' + err.message);
-            };
+        dataChannel.onopen = () => {
+            log('Data Channel Opened: ' + dataChannel.label + ', readyState: ' + dataChannel.readyState);                // receiveChannel.send('Hello From The Receiver!');
+            sendKeyPress({ key: 'c', code: 'KeyC', timestamp: Date.now() });
+        };
+        dataChannel.onmessage = (event) => {
+            log('Received Message on Data Channel: ' + event.data);
+        };
+        dataChannel.onclose = () => {
+            log('Data Channel Closed: ' + dataChannel.label);
+        };
+        dataChannel.onerror = (err) => {
+            const errorMessage = err.message || (err.name ? `${err.name}: ${err.code}` : 'Unknown DataChannel Error');
+            log(`Data Channel "${dataChannel.label}" error: ${errorMessage}`);
         };
     }
 
@@ -176,6 +176,21 @@
         }
     }
 
+    function sendKeyPress(keyData){
+        if(dataChannel && dataChannel.readyState === 'open'){
+            const message = JSON.stringify(keyData)
+            dataChannel.send(message)
+            log('Sent Keypress: ' + message)
+        }else{
+            log('Data channel not open, cannot send keypress: ' + JSON.stringify(keyData));
+            if(dataChannel){
+                // setTimeout(() => sendKeypress(keyData), 1000);
+            }else{
+                log('Data channel is null, check WebRTC setup');
+            }
+        }
+    }
+
     async function startConnection() {
         if (!peerConnection) createPeerConnection();
 
@@ -183,31 +198,37 @@
             direction: 'recvonly',
         });
 
-        const dataChannel = peerConnection.createDataChannel('keypressChannel');
-        dataChannel.onopen = () => {
-            log('Data Channel Opened for Keypresses');
-        };
-        dataChannel.onmessage = (event) => {
-            log('Received Message On Data Channel: ' + event.data);
-        };
-        dataChannel.onclose = () => {
-            log('Data Channel Closed');
-        };
-        dataChannel.onerror = (err) => {
-            log('Data Channel Error: ' + err.message);
-        };
+        // document.addEventListener('keydown', (event) => {
+        //     if(dataChannel.readyState == 'open'){
+        //         const keyData = {
+        //             key: event.key,
+        //             code: event.code,
+        //             timestamp: Date.now()
+        //         };
+        //         dataChannel.send(JSON.stringify(keyData));
+        //         log('Sent keypress: ' + JSON.stringify(keyData));
+        //     }
+        // })
 
         document.addEventListener('keydown', (event) => {
-            if(dataChannel.readyState == 'open'){
-                const keyData = {
-                    key: event.key,
-                    code: event.code,
-                    timestamp: Date.now()
-                };
-                // dataChannel.send(JSON.stringify(keyData));
-                log('Sent keypress: ' + JSON.stringify(keyData));
-            }
-        })
+            const keyData = {
+                key: event.key,
+                code: event.code,
+                type: 'keydown',
+                timestamp: Date.now()
+            };
+            sendKeyPress(keyData);
+        });
+
+        document.addEventListener('keyup', (event) => {
+            const keyData = {
+                key: event.key,
+                code: event.code,
+                type: 'keyup',
+                timestamp: Date.now()
+            };
+            sendKeyPress(keyData);
+        });
 
         try {
             const offer = await peerConnection.createOffer();
@@ -225,8 +246,18 @@
     connectToSignalingServer();
 
     setTimeout(() => {
-        startConnection();
-    }, 3000);
+        if(ws && ws.readyState === WebSocket.OPEN){
+            startConnection();
+        }else{
+            log("WebSocket not connected after timeout. Waiting for connection to start WebRTC.");
+            const wsOpenCheck = setInterval(() => {
+                if(ws && ws.readyState === WebSocket.OPEN){
+                    clearInterval(wsOpenCheck);
+                    startConnection();
+                }
+            }, 500)
+        }
+    }, 2000);
 </script>
 </body>
 </html>

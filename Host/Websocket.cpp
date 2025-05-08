@@ -1,5 +1,6 @@
 #include "Websocket.h"
 #include "Encoder.h"
+#include "KeyInputHandler.h"
 
 typedef websocketpp::client<websocketpp::config::asio_client> client;
 using json = nlohmann::json;
@@ -31,8 +32,7 @@ void sendFrames() {
                         std::cerr << "[WebSocket] Failed to send video packet: " << result << std::endl;
                     }
                     else {
-                        // Reduce log spam maybe? Only log errors or periodically?
-                        // std::cout << "[WebSocket] Sent video packet successfully (PTS: " << pts << ")" << std::endl;
+                         //std::cout << "[WebSocket] Sent video packet successfully (PTS: " << pts << ")" << std::endl;
                     }
                 }
                 else {
@@ -45,13 +45,6 @@ void sendFrames() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
-        // else { // No need for this else block, getEncodedFrame handles waiting
-        //    std::this_thread::sleep_for(std::chrono::milliseconds(33)); // Wait if no frame - REMOVE
-        // }
-
-        // Optional small sleep to prevent this loop from hogging CPU if frames arrive extremely fast
-        // Adjust as needed, or remove if relying purely on getEncodedFrame blocking.
-        // std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
@@ -82,6 +75,7 @@ void handleOffer(const std::string& offer) {
     if (!createPeerConnection()) return;
     handleOffer(offer.c_str());
     sendAnswer(); // Trigger sending the answer
+    initKeyInputHandler();
 }
 
 void handleRemoteIceCandidate(const json& candidateJson) {

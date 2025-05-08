@@ -116,6 +116,7 @@
     <ClInclude Include="Host\Encoder.h" />
     <ClInclude Include="Host\FrameCaptureThread.h" />
     <ClInclude Include="Host\GlobalTime.h" />
+    <ClInclude Include="Host\KeyInputHandler.h" />
     <ClInclude Include="Host\MyCreateSdpObserver.h" />
     <ClInclude Include="Host\MySetRemoteObserver.h" />
     <ClInclude Include="Host\pch.h" />
@@ -129,6 +130,7 @@
     <ClCompile Include="Host\D3DHelpers.cpp" />
     <ClCompile Include="Host\Encoder.cpp" />
     <ClCompile Include="Host\FrameCaptureThread.cpp" />
+    <ClCompile Include="Host\KeyInputHandler.cpp" />
     <ClCompile Include="Host\main.cpp" />
     <ClCompile Include="Host\MyCreateSdpObserver.cpp" />
     <ClCompile Include="Host\MySetRemoteObserver.cpp" />

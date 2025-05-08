@@ -97,11 +97,11 @@ int main()
     std::wcout << L"[main] Capture started!\n";
 
     // Keep the app alive for 10 seconds to see frame events
-   /* for (int i = 0; i < 10; i++)
+    /*for (int i = 0; i < 10; i++)
     {
         Sleep(1000);
         std::wcout << L"[main] Still capturing...\n";
-    }*/ 
+    } */
 
     std::wcout << L"[main] Press '0' to stop capturing";
     while (true) {
