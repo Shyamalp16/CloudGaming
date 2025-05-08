@@ -10,9 +10,10 @@
       margin: 20px;
     }
     video {
-      width: 640px;
-      height: 480px;
+      width: 640px; /* Adjust as needed */
+      height: 360px; /* Adjust as needed */
       border: 1px solid #ccc;
+      background-color: #000;
     }
     #log {
       margin-top: 20px;
@@ -21,12 +22,14 @@
       height: 200px;
       overflow-y: scroll;
       background-color: #f9f9f9;
+      font-size: 0.9em;
+      line-height: 1.4;
     }
   </style>
 </head>
 <body>
   <h1>WebRTC Video Receiver</h1>
-  <video id="remoteVideo" autoplay controls></video>
+  <video id="remoteVideo" autoplay playsinline controls></video>
   <div id="log"></div>
 
   <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
@@ -38,226 +41,304 @@
     const logElement = document.getElementById('log');
     let dataChannel;
 
-    // Simple logging function to display logs in the UI
+    // Simple logging function
     function log(message) {
         console.log(message);
         const p = document.createElement('p');
-        p.textContent = message;
+        p.textContent = typeof message === 'string' ? message : JSON.stringify(message);
         logElement.appendChild(p);
         logElement.scrollTop = logElement.scrollHeight;
     }
 
+    // WebSocket connection logic
     function connectToSignalingServer() {
+        log(`Attempting to connect to WebSocket server at ${serverUrl}...`);
         ws = new WebSocket(serverUrl);
 
         ws.onopen = () => {
             log('Connected to signaling server');
+            // Now that WS is open, we can consider starting WebRTC
+            // Let the setTimeout/setInterval logic handle calling startConnection
         };
 
         ws.onmessage = async (event) => {
             try {
                 const msg = JSON.parse(event.data);
-                log('Received from server: ' + JSON.stringify(msg, null, 2));
+                if (msg.sdp && msg.sdp.length > 100) {
+                     log(`Received from server: { type: ${msg.type}, sdp: '...', candidate: ${JSON.stringify(msg.candidate)} }`);
+                } else {
+                    log('Received from server: ' + JSON.stringify(msg, null, 2));
+                }
 
                 switch (msg.type) {
                     case 'answer':
                         await handleAnswer(msg);
                         break;
                     case 'ice-candidate':
-                        await handleRemoteIceCandidate(msg.candidate);
+                        if (msg.candidate && msg.candidate.candidate) {
+                             await handleRemoteIceCandidate(msg.candidate);
+                        } else if (msg.candidate === null) {
+                            log("Received null ICE candidate (end of candidates).");
+                        } else {
+                            log("Received invalid ICE candidate structure.");
+                        }
                         break;
                     case 'offer':
-                        log('Unexpected Offer Received, This Client Will Always Be The Offerer.');
+                        log('Unexpected Offer Received.');
                         break;
                     default:
                         log('Unknown Message Type: ' + msg.type);
                 }
             } catch (err) {
-                log('Error processing WebSocket message: ' + err.message);
+                log(`Error processing WebSocket message: ${err.message}. Data: ${event.data}`);
             }
         };
 
-        ws.onerror = (err) => {
-            log('WebSocket Error: ' + err.message);
+        ws.onerror = (event) => {
+            log('WebSocket Error occurred. Check browser console.');
+            console.error("WebSocket Error Event:", event);
         };
 
-        ws.onclose = () => {
-            log('WebSocket connection closed');
+        ws.onclose = (event) => {
+            log(`WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason || 'N/A'}`);
+            peerConnection?.close();
+            peerConnection = null;
+            dataChannel = null;
+            // Remove listeners on close to be tidy? Optional.
+            // window.removeEventListener('keydown', handleKeyDown);
+            // window.removeEventListener('keyup', handleKeyUp);
         };
     }
 
+    // PeerConnection setup
     function createPeerConnection() {
+        // Only create if it doesn't exist
+        if (peerConnection) {
+            log("PeerConnection already exists, not creating again.");
+            return;
+        }
+        log("Creating new PeerConnection...");
         const config = {
             iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
         };
         peerConnection = new RTCPeerConnection(config);
 
         peerConnection.ontrack = (event) => {
-            log('Received remote track: ' + event.track.kind + ' ' + event.track.id);
-            if (event.track.kind === 'video') {
-                const stream = event.streams[0];
-                videoElement.srcObject = stream;
-                log('Stream active: ' + stream.active + ', Tracks: ' + stream.getTracks().length);
-                videoElement.onloadedmetadata = () => log('Video metadata loaded');
-                videoElement.onplaying = () => log('Video playing');
-                videoElement.onerror = (e) => log('Video error: ' + e);
+            log(`Received remote track: Kind=${event.track.kind}, ID=${event.track.id}`);
+            if (event.track.kind === 'video' && videoElement.srcObject !== event.streams[0]) {
+                log(`Attaching stream ${event.streams[0].id} to video element.`);
+                videoElement.srcObject = event.streams[0];
+                // User interaction might be needed for autoplay
+                videoElement.play().catch(e => log(`Video play() failed: ${e}. User interaction might be required.`));
             }
         };
 
         peerConnection.onicecandidate = (event) => {
             if (event.candidate) {
-                log('Local ICE Candidate: ' + JSON.stringify(event.candidate, null, 2));
-                ws.send(JSON.stringify({
-                    type: 'ice-candidate',
-                    candidate: event.candidate
-                }));
+                console.log('Local ICE Candidate:', JSON.stringify(event.candidate, null, 2));
+                log(`Generated local ICE candidate (type: ${event.candidate.type || 'unknown'}). Sending...`);
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'ice-candidate',
+                        candidate: event.candidate
+                    }));
+                } else {
+                    log("WebSocket not open, cannot send ICE candidate.");
+                }
             } else {
-                log('ICE candidate gathering complete');
+                log('Local ICE candidate gathering complete.');
             }
         };
 
-        peerConnection.oniceconnectionstatechange = () => {
-            log('ICE connection state changed to: ' + peerConnection.iceConnectionState);
-        };
+        peerConnection.oniceconnectionstatechange = () => log('ICE connection state changed to: ' + peerConnection.iceConnectionState);
+        peerConnection.onicegatheringstatechange = () => log('ICE gathering state changed to: ' + peerConnection.iceGatheringState);
+        peerConnection.onconnectionstatechange = () => log('PeerConnection state changed to: ' + peerConnection.connectionState);
+        peerConnection.onsignalingstatechange = () => log('Signaling state changed to: ' + peerConnection.signalingState);
 
-        peerConnection.onicegatheringstatechange = () => {
-            log('ICE gathering state changed to: ' + peerConnection.iceGatheringState);
-        };
-
-        peerConnection.onconnectionstatechange = () => {
-            log('PeerConnection state changed to: ' + peerConnection.connectionState);
-        };
-
-        peerConnection.onsignalingstatechange = () => {
-            log('Signaling state changed to: ' + peerConnection.signalingState);
-        };
-
-        dataChannel = peerConnection.createDataChannel("keyPressChannel", {ordered: true})
+        dataChannel = peerConnection.createDataChannel("keyPressChannel", { ordered: true });
         log(`Client attempting to create data channel "${dataChannel.label}", initial state: ${dataChannel.readyState}`);
-        log('Data Channel Received: ' + dataChannel.label + ', readyState: ' + dataChannel.readyState);
 
-        dataChannel.onopen = () => {
-            log('Data Channel Opened: ' + dataChannel.label + ', readyState: ' + dataChannel.readyState);                // receiveChannel.send('Hello From The Receiver!');
-            // sendKeyPress({ key: 'c', code: 'KeyC', timestamp: Date.now() });
-        };
-        dataChannel.onmessage = (event) => {
-            log('Received Message on Data Channel: ' + event.data);
-        };
-        dataChannel.onclose = () => {
-            log('Data Channel Closed: ' + dataChannel.label);
-        };
-        dataChannel.onerror = (err) => {
-            const errorMessage = err.message || (err.name ? `${err.name}: ${err.code}` : 'Unknown DataChannel Error');
+        dataChannel.onopen = () => log(`Data Channel Opened: "${dataChannel.label}", ReadyState: ${dataChannel.readyState}`);
+        dataChannel.onmessage = (event) => log(`Received Message on Data Channel "${dataChannel.label}": ${event.data}`);
+        dataChannel.onclose = () => log(`Data Channel Closed: "${dataChannel.label}"`);
+        dataChannel.onerror = (event) => {
+            const error = event.error;
+            const errorMessage = error ? `${error.name}: ${error.message}` : 'Unknown DataChannel Error';
             log(`Data Channel "${dataChannel.label}" error: ${errorMessage}`);
         };
     }
 
+    // Handle incoming SDP answer
     async function handleAnswer(answerMsg) {
-        log('Received SDP in answer: ' + JSON.stringify(answerMsg, null, 2));
+        if (!peerConnection || peerConnection.signalingState !== 'have-local-offer') {
+            log("Received answer but PeerConnection is not ready or not expecting an answer.");
+            return;
+        }
+        log('Received SDP in answer.');
+        console.log("Answer SDP:", answerMsg.sdp);
         if (!answerMsg.sdp || typeof answerMsg.sdp !== 'string' || !answerMsg.sdp.startsWith('v=')) {
-            log('Invalid or missing SDP in answer: ' + JSON.stringify(answerMsg));
+            log('Invalid or missing SDP in answer.');
             return;
         }
         try {
             const remoteDesc = new RTCSessionDescription({ type: 'answer', sdp: answerMsg.sdp });
             await peerConnection.setRemoteDescription(remoteDesc);
-            log('Remote description set with answer');
+            log('Remote description (answer) set.');
         } catch (err) {
             log('Error setting remote description: ' + err.message);
         }
     }
 
+    // Handle incoming ICE candidates
     async function handleRemoteIceCandidate(candidate) {
-        try {
-            await peerConnection.addIceCandidate(candidate);
-            log('Added remote ICE candidate: ' + JSON.stringify(candidate, null, 2));
-        } catch (err) {
-            log('Error adding received ICE candidate: ' + err.message);
+        if (!peerConnection) {
+            log("Received ICE candidate but PeerConnection doesn't exist.");
+            return;
         }
-    }
-
-    function sendKeyPress(keyData){
-        if(dataChannel && dataChannel.readyState === 'open'){
-            const message = JSON.stringify(keyData)
-            dataChannel.send(message)
-            log('Sent Keypress: ' + message)
-        }else{
-            log('Data channel not open, cannot send keypress: ' + JSON.stringify(keyData));
-            if(dataChannel){
-                // setTimeout(() => sendKeypress(keyData), 1000);
-            }else{
-                log('Data channel is null, check WebRTC setup');
+        try {
+            // Use the RTCIceCandidate constructor for better validation
+            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            log('Added remote ICE candidate.');
+            console.log("Added remote candidate:", candidate);
+        } catch (err) {
+            // Ignore benign errors like adding candidate before remote description is set
+            if (!err.message.includes("Cannot add ICE candidate before setting remote description")) {
+                 log('Error adding received ICE candidate: ' + err.message);
+                 console.error("Candidate causing error:", candidate);
             }
         }
     }
 
-    async function startConnection() {
-        if (!peerConnection) createPeerConnection();
-
-        peerConnection.addTransceiver('video', {
-            direction: 'recvonly',
-        });
-
-        // document.addEventListener('keydown', (event) => {
-        //     if(dataChannel.readyState == 'open'){
-        //         const keyData = {
-        //             key: event.key,
-        //             code: event.code,
-        //             timestamp: Date.now()
-        //         };
-        //         dataChannel.send(JSON.stringify(keyData));
-        //         log('Sent keypress: ' + JSON.stringify(keyData));
-        //     }
-        // })
-
-        document.addEventListener('keydown', (event) => {
-            const keyData = {
-                key: event.key,
-                code: event.code,
-                type: 'keydown',
-                timestamp: Date.now()
-            };
-            sendKeyPress(keyData);
-        });
-
-        document.addEventListener('keyup', (event) => {
-            const keyData = {
-                key: event.key,
-                code: event.code,
-                type: 'keyup',
-                timestamp: Date.now()
-            };
-            sendKeyPress(keyData);
-        });
-
-        try {
-            const offer = await peerConnection.createOffer();
-            await peerConnection.setLocalDescription(offer);
-            ws.send(JSON.stringify({
-                type: 'offer',
-                sdp: offer.sdp
-            }));
-            log('Offer Sent: ' + offer.sdp);
-        } catch (err) {
-            log('Error creating or setting offer: ' + err.message);
+    // Send key data over the data channel
+    function sendKeyPress(keyData) {
+        if (dataChannel && dataChannel.readyState === 'open') {
+            const message = JSON.stringify(keyData);
+            dataChannel.send(message);
+            // Reduce logging spam for sent keys, keep in console
+            // log('Sent Key Event: ' + message);
+            console.log('Sent Key Event: ' + message);
+        } else {
+            // Log less frequently if channel isn't ready
+            // console.warn('Data channel not open, cannot send key event: ' + JSON.stringify(keyData));
         }
     }
 
-    connectToSignalingServer();
+    // --- Named functions for event handlers ---
+    function handleKeyDown(event) {
+        if (!event.code) { return; } // Filter empty code
+        // Log only to console to reduce UI spam
+        console.log(`handleKeyDown: Key=${event.key}, Code=${event.code}`);
+        const keyData = { key: event.key, code: event.code, type: 'keydown', timestamp: Date.now() };
+        sendKeyPress(keyData);
+    }
+
+    function handleKeyUp(event) {
+         if (!event.code) { return; } // Filter empty code
+         // Log only to console
+         console.log(`handleKeyUp: Key=${event.key}, Code=${event.code}`);
+        const keyData = { key: event.key, code: event.code, type: 'keyup', timestamp: Date.now() };
+        sendKeyPress(keyData);
+    }
+    // --- End named functions ---
+
+
+    // Start the WebRTC connection process
+    async function startConnection() {
+        log("startConnection called."); // Log when this function is entered
+        if (!peerConnection) {
+            createPeerConnection();
+        } else {
+            log("PeerConnection already exists.");
+        }
+
+        // Ensure video transceiver exists
+        if (!peerConnection.getTransceivers().some(t => t.receiver?.track?.kind === 'video')) {
+             peerConnection.addTransceiver('video', { direction: 'recvonly' });
+             log("Added video transceiver.");
+        } else {
+             log("Video transceiver already exists.");
+        }
+
+        // --- Listeners are now added globally, no need to add/remove here ---
+        // log("Setting up key event listeners (removing any existing first)...");
+        // window.removeEventListener('keydown', handleKeyDown);
+        // window.removeEventListener('keyup', handleKeyUp);
+        // window.addEventListener('keydown', handleKeyDown);
+        // window.addEventListener('keyup', handleKeyUp);
+
+        try {
+            // Only create offer if needed (e.g., state is 'new' or 'stable')
+            if (peerConnection.signalingState === 'stable' || peerConnection.signalingState === 'new') {
+                log("Creating offer...");
+                const offer = await peerConnection.createOffer();
+                log("Setting local description (offer)...");
+                await peerConnection.setLocalDescription(offer);
+
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    log("Sending offer to signaling server...");
+                    ws.send(JSON.stringify({
+                        type: 'offer',
+                        sdp: offer.sdp
+                    }));
+                    console.log('Offer SDP:', offer.sdp);
+                } else {
+                    log("WebSocket not open, cannot send offer.");
+                }
+            } else {
+                 log(`Not creating offer, signaling state is: ${peerConnection.signalingState}`);
+            }
+        } catch (err) {
+            log('Error creating/setting/sending offer: ' + err.message);
+        }
+    }
+
+    // --- Initialization ---
+
+    // --- Add Listeners Globally - ONCE ---
+    log("Adding global key event listeners to window...");
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    // --- End Global Listener Addition ---
+
+    connectToSignalingServer(); // Start WebSocket connection
+
+    // Wait for WebSocket to connect before starting WebRTC negotiation
+    // Use a flag to ensure startConnection is only called once by this timer/interval logic
+    let connectionStarted = false;
+    const startDelay = 2000; // Initial delay (ms)
+    log(`Will attempt to start WebRTC connection in ${startDelay / 1000} seconds...`);
 
     setTimeout(() => {
-        if(ws && ws.readyState === WebSocket.OPEN){
+        if (connectionStarted) return; // Don't start if already started
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            log("WebSocket connected on first check. Starting WebRTC connection.");
+            connectionStarted = true;
             startConnection();
-        }else{
-            log("WebSocket not connected after timeout. Waiting for connection to start WebRTC.");
+        } else {
+            log("WebSocket not connected after timeout. Waiting for connection via interval check...");
+            let checkCounter = 0;
+            const maxChecks = 10; // Limit checks to prevent infinite loop
             const wsOpenCheck = setInterval(() => {
-                if(ws && ws.readyState === WebSocket.OPEN){
-                    clearInterval(wsOpenCheck);
-                    startConnection();
+                checkCounter++;
+                log(`WebSocket connection check #${checkCounter}... State: ${ws?.readyState}`);
+                if (connectionStarted) { // Check again in case it started some other way
+                     clearInterval(wsOpenCheck);
+                     return;
                 }
-            }, 500)
+
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    log("WebSocket connected after delay. Starting WebRTC connection.");
+                    clearInterval(wsOpenCheck);
+                    connectionStarted = true;
+                    startConnection();
+                } else if (checkCounter >= maxChecks) {
+                    log("WebSocket did not connect after multiple checks. Aborting WebRTC start.");
+                    clearInterval(wsOpenCheck);
+                }
+            }, 500); // Check every 500ms
         }
-    }, 2000);
-</script>
+    }, startDelay);
+  </script>
 </body>
 </html>
