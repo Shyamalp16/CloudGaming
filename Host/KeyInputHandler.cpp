@@ -24,7 +24,7 @@ namespace KeyInputHandler {
 
 	void messagePollingLoop() {
 		while (isRunning) {
-			std::cout << "[KeyInputHandler] Polling for message..." << std::endl;
+			//std::cout << "[KeyInputHandler] Polling for message..." << std::endl;
 			char* msg = getDataChannelMessage();
 			if (msg != nullptr) {
 				try {
@@ -43,7 +43,7 @@ namespace KeyInputHandler {
 				}
 			}
 		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		std::this_thread::sleep_for(std::chrono::milliseconds(100000));
 	}
 
 	void initializeDataChannel() {

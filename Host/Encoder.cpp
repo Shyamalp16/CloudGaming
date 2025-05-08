@@ -99,9 +99,9 @@ namespace Encoder {
 
         //std::wcout << L"[WebRTC] Packet Size: " << packet->size << L", First 20 Bytes: ";
         for (int i = 0; i < std::min(20, packet->size); i++) {
-            std::wcout << std::hex << (int)packet->data[i] << L" ";
+            //std::wcout << std::hex << (int)packet->data[i] << L" ";
         }
-        std::wcout << std::dec << L"\n";
+        //std::wcout << std::dec << L"\n";
 
         logNALUnits(packet->data, packet->size);
 
@@ -111,7 +111,7 @@ namespace Encoder {
 
         int result = sendVideoPacket(packet->data, packet->size, packet->pts);
         if (result != 0) {
-            std::wcerr << L"[WebRTC] Failed to send video packet to WebRTC module. Error code: " << result << L"\n";
+            //std::wcerr << L"[WebRTC] Failed to send video packet to WebRTC module. Error code: " << result << L"\n";
         }
     }
 
