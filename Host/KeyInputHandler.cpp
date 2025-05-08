@@ -10,15 +10,22 @@ namespace KeyInputHandler {
 	static bool isRunning = false;
 	static std::thread messageThread;
 
-	void simulateKeyPress(const std::string& key) {
+	void simulateKeyPress(const std::string& key, const std::string& type) {
 		INPUT input = { 0 };
 		input.type = INPUT_KEYBOARD;
 		input.ki.wVk = VkKeyScan(key[0] & 0xFF);
-		input.ki.dwFlags = 0; // Key down
-		SendInput(1, &input, sizeof(INPUT));
+		if (type == "keydown") {
+			input.ki.dwFlags = 0;
+			SendInput(1, &input, sizeof(INPUT));
+		}
+		else if (type == "keyup") {
+			input.ki.dwFlags = KEYEVENTF_KEYUP;
+			SendInput(1, &input, sizeof(INPUT));
+		}
+		//input.ki.dwFlags = 0; // Key down
 
-		input.ki.dwFlags = KEYEVENTF_KEYUP; // Key up
-		SendInput(1, &input, sizeof(INPUT));
+		//input.ki.dwFlags = KEYEVENTF_KEYUP; // Key up
+		//SendInput(1, &input, sizeof(INPUT));
 		std::wcout << L"[KeyInputHandler] Simulated keypress: " << key.c_str() << L"\n";
 	}
 
@@ -29,11 +36,14 @@ namespace KeyInputHandler {
 			if (msg != nullptr) {
 				try {
 					std::string message(msg);
-					free(msg);
+					//free(msg);
+					msg = nullptr;
 					json j = json::parse(message);
 					if (j.is_object() && j.contains("key")) {
-						std::string key = j["key"].get<std::string>();
-						simulateKeyPress(key);
+						std::string jsKey = j["key"].get<std::string>();
+						std::string jsCode = j.value("code", "");
+						std::string jsType = j.value("type", "");
+						simulateKeyPress(jsKey, jsType);
 					}else {
 						std::cout << "[KeyInputHandler] Ignoring non-key message: " << message << std::endl;
 					}

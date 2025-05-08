@@ -138,7 +138,7 @@
 
         dataChannel.onopen = () => {
             log('Data Channel Opened: ' + dataChannel.label + ', readyState: ' + dataChannel.readyState);                // receiveChannel.send('Hello From The Receiver!');
-            sendKeyPress({ key: 'c', code: 'KeyC', timestamp: Date.now() });
+            // sendKeyPress({ key: 'c', code: 'KeyC', timestamp: Date.now() });
         };
         dataChannel.onmessage = (event) => {
             log('Received Message on Data Channel: ' + event.data);

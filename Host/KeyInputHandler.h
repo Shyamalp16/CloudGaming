@@ -1,10 +1,14 @@
 #pragma once
 #include "Websocket.h"
-#include <windows.h>
-#include <nlohmann/json.hpp>
 #include <iostream>
+#include <string>
+#include <vector>
 #include <thread>
 #include <chrono>
+#include <stdexcept> 
+#include <windows.h>
+#include <map>
+#include <nlohmann/json.hpp>
 
 #ifndef KEY_INPUT_HANDLER_H
 #define KEY_INPUT_HANDLER_H
