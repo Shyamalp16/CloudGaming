@@ -10,8 +10,8 @@
       margin: 20px;
     }
     video {
-      width: 640px; /* Adjust as needed */
-      height: 360px; /* Adjust as needed */
+      width: 640px;
+      height: 360px;
       border: 1px solid #ccc;
       background-color: #000;
     }
@@ -40,6 +40,8 @@
     const videoElement = document.getElementById('remoteVideo');
     const logElement = document.getElementById('log');
     let dataChannel;
+    let isWindowFocused = document.hasFocus(); // Track window focus
+    const keyState = new Set(); // Track keys currently pressed
 
     // Simple logging function
     function log(message) {
@@ -50,6 +52,19 @@
         logElement.scrollTop = logElement.scrollHeight;
     }
 
+    // Debounce utility
+    function debounce(func, wait) {
+        let timeout;
+        return function executedFunction(...args) {
+            const later = () => {
+                clearTimeout(timeout);
+                func(...args);
+            };
+            clearTimeout(timeout);
+            timeout = setTimeout(later, wait);
+        };
+    }
+
     // WebSocket connection logic
     function connectToSignalingServer() {
         log(`Attempting to connect to WebSocket server at ${serverUrl}...`);
@@ -57,15 +72,13 @@
 
         ws.onopen = () => {
             log('Connected to signaling server');
-            // Now that WS is open, we can consider starting WebRTC
-            // Let the setTimeout/setInterval logic handle calling startConnection
         };
 
         ws.onmessage = async (event) => {
             try {
                 const msg = JSON.parse(event.data);
                 if (msg.sdp && msg.sdp.length > 100) {
-                     log(`Received from server: { type: ${msg.type}, sdp: '...', candidate: ${JSON.stringify(msg.candidate)} }`);
+                    log(`Received from server: { type: ${msg.type}, sdp: '...', candidate: ${JSON.stringify(msg.candidate)} }`);
                 } else {
                     log('Received from server: ' + JSON.stringify(msg, null, 2));
                 }
@@ -76,7 +89,7 @@
                         break;
                     case 'ice-candidate':
                         if (msg.candidate && msg.candidate.candidate) {
-                             await handleRemoteIceCandidate(msg.candidate);
+                            await handleRemoteIceCandidate(msg.candidate);
                         } else if (msg.candidate === null) {
                             log("Received null ICE candidate (end of candidates).");
                         } else {
@@ -104,15 +117,11 @@
             peerConnection?.close();
             peerConnection = null;
             dataChannel = null;
-            // Remove listeners on close to be tidy? Optional.
-            // window.removeEventListener('keydown', handleKeyDown);
-            // window.removeEventListener('keyup', handleKeyUp);
         };
     }
 
     // PeerConnection setup
     function createPeerConnection() {
-        // Only create if it doesn't exist
         if (peerConnection) {
             log("PeerConnection already exists, not creating again.");
             return;
@@ -128,7 +137,6 @@
             if (event.track.kind === 'video' && videoElement.srcObject !== event.streams[0]) {
                 log(`Attaching stream ${event.streams[0].id} to video element.`);
                 videoElement.srcObject = event.streams[0];
-                // User interaction might be needed for autoplay
                 videoElement.play().catch(e => log(`Video play() failed: ${e}. User interaction might be required.`));
             }
         };
@@ -196,78 +204,83 @@
             return;
         }
         try {
-            // Use the RTCIceCandidate constructor for better validation
             await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
             log('Added remote ICE candidate.');
             console.log("Added remote candidate:", candidate);
         } catch (err) {
-            // Ignore benign errors like adding candidate before remote description is set
             if (!err.message.includes("Cannot add ICE candidate before setting remote description")) {
-                 log('Error adding received ICE candidate: ' + err.message);
-                 console.error("Candidate causing error:", candidate);
+                log('Error adding received ICE candidate: ' + err.message);
+                console.error("Candidate causing error:", candidate);
             }
         }
     }
 
     // Send key data over the data channel
     function sendKeyPress(keyData) {
-        if (dataChannel && dataChannel.readyState === 'open') {
+        if (dataChannel && dataChannel.readyState === 'open' && dataChannel.bufferedAmount < 65536) {
             const message = JSON.stringify(keyData);
             dataChannel.send(message);
-            // Reduce logging spam for sent keys, keep in console
-            // log('Sent Key Event: ' + message);
             console.log('Sent Key Event: ' + message);
+            log('Sent Key Event: ' + message); // Log all events for debugging
         } else {
-            // Log less frequently if channel isn't ready
-            // console.warn('Data channel not open, cannot send key event: ' + JSON.stringify(keyData));
+            console.warn('Data channel not open or buffer full, cannot send key event: ' + JSON.stringify(keyData));
         }
     }
 
-    // --- Named functions for event handlers ---
+    // Debounce with 10ms for responsiveness
+    const debouncedSendKeyPress = debounce(sendKeyPress, 10);
+
+    // Key event handlers
     function handleKeyDown(event) {
-        if (!event.code) { return; } // Filter empty code
-        // Log only to console to reduce UI spam
+        if (!isWindowFocused || !event.code || event.repeat) return; // Ignore if not focused, empty code, or repeat
         console.log(`handleKeyDown: Key=${event.key}, Code=${event.code}`);
+        keyState.add(event.code); // Mark key as pressed
         const keyData = { key: event.key, code: event.code, type: 'keydown', timestamp: Date.now() };
-        sendKeyPress(keyData);
+        debouncedSendKeyPress(keyData);
     }
 
     function handleKeyUp(event) {
-         if (!event.code) { return; } // Filter empty code
-         // Log only to console
-         console.log(`handleKeyUp: Key=${event.key}, Code=${event.code}`);
+        if (!isWindowFocused || !event.code) return; // Ignore if not focused or empty code
+        if (!keyState.has(event.code)) return; // Ignore keyup if no matching keydown
+        console.log(`handleKeyUp: Key=${event.key}, Code=${event.code}`);
+        keyState.delete(event.code); // Clear key state
         const keyData = { key: event.key, code: event.code, type: 'keyup', timestamp: Date.now() };
-        sendKeyPress(keyData);
+        debouncedSendKeyPress(keyData);
     }
-    // --- End named functions ---
 
+    // Focus and blur handlers
+    function handleFocus() {
+        isWindowFocused = true;
+        log('Window gained focus.');
+    }
+
+    function handleBlur() {
+        isWindowFocused = false;
+        log('Window lost focus. Clearing key states.');
+        keyState.forEach(code => {
+            const keyData = { key: code, code: code, type: 'keyup', timestamp: Date.now() };
+            debouncedSendKeyPress(keyData);
+        });
+        keyState.clear();
+    }
 
     // Start the WebRTC connection process
     async function startConnection() {
-        log("startConnection called."); // Log when this function is entered
+        log("startConnection called.");
         if (!peerConnection) {
             createPeerConnection();
         } else {
             log("PeerConnection already exists.");
         }
 
-        // Ensure video transceiver exists
         if (!peerConnection.getTransceivers().some(t => t.receiver?.track?.kind === 'video')) {
-             peerConnection.addTransceiver('video', { direction: 'recvonly' });
-             log("Added video transceiver.");
+            peerConnection.addTransceiver('video', { direction: 'recvonly' });
+            log("Added video transceiver.");
         } else {
-             log("Video transceiver already exists.");
+            log("Video transceiver already exists.");
         }
 
-        // --- Listeners are now added globally, no need to add/remove here ---
-        // log("Setting up key event listeners (removing any existing first)...");
-        // window.removeEventListener('keydown', handleKeyDown);
-        // window.removeEventListener('keyup', handleKeyUp);
-        // window.addEventListener('keydown', handleKeyDown);
-        // window.addEventListener('keyup', handleKeyUp);
-
         try {
-            // Only create offer if needed (e.g., state is 'new' or 'stable')
             if (peerConnection.signalingState === 'stable' || peerConnection.signalingState === 'new') {
                 log("Creating offer...");
                 const offer = await peerConnection.createOffer();
@@ -285,31 +298,28 @@
                     log("WebSocket not open, cannot send offer.");
                 }
             } else {
-                 log(`Not creating offer, signaling state is: ${peerConnection.signalingState}`);
+                log(`Not creating offer, signaling state is: ${peerConnection.signalingState}`);
             }
         } catch (err) {
             log('Error creating/setting/sending offer: ' + err.message);
         }
     }
 
-    // --- Initialization ---
-
-    // --- Add Listeners Globally - ONCE ---
-    log("Adding global key event listeners to window...");
+    // Initialization
+    log("Adding global key event and focus listeners to window...");
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
-    // --- End Global Listener Addition ---
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('blur', handleBlur);
 
-    connectToSignalingServer(); // Start WebSocket connection
+    connectToSignalingServer();
 
-    // Wait for WebSocket to connect before starting WebRTC negotiation
-    // Use a flag to ensure startConnection is only called once by this timer/interval logic
     let connectionStarted = false;
-    const startDelay = 2000; // Initial delay (ms)
+    const startDelay = 2000;
     log(`Will attempt to start WebRTC connection in ${startDelay / 1000} seconds...`);
 
     setTimeout(() => {
-        if (connectionStarted) return; // Don't start if already started
+        if (connectionStarted) return;
 
         if (ws && ws.readyState === WebSocket.OPEN) {
             log("WebSocket connected on first check. Starting WebRTC connection.");
@@ -318,13 +328,13 @@
         } else {
             log("WebSocket not connected after timeout. Waiting for connection via interval check...");
             let checkCounter = 0;
-            const maxChecks = 10; // Limit checks to prevent infinite loop
+            const maxChecks = 10;
             const wsOpenCheck = setInterval(() => {
                 checkCounter++;
                 log(`WebSocket connection check #${checkCounter}... State: ${ws?.readyState}`);
-                if (connectionStarted) { // Check again in case it started some other way
-                     clearInterval(wsOpenCheck);
-                     return;
+                if (connectionStarted) {
+                    clearInterval(wsOpenCheck);
+                    return;
                 }
 
                 if (ws && ws.readyState === WebSocket.OPEN) {
@@ -336,7 +346,7 @@
                     log("WebSocket did not connect after multiple checks. Aborting WebRTC start.");
                     clearInterval(wsOpenCheck);
                 }
-            }, 500); // Check every 500ms
+            }, 500);
         }
     }, startDelay);
   </script>
