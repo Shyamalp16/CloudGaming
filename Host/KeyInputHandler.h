@@ -9,6 +9,8 @@
 #include <windows.h>
 #include <map>
 #include <nlohmann/json.hpp>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Capture.h>
 
 #ifndef KEY_INPUT_HANDLER_H
 #define KEY_INPUT_HANDLER_H

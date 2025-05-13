@@ -40,7 +40,7 @@
     const videoElement = document.getElementById('remoteVideo');
     const logElement = document.getElementById('log');
     let dataChannel;
-    let isWindowFocused = document.hasFocus(); // Track window focus
+    // let isWindowFocused = document.hasFocus(); // Track window focus
     const keyState = new Set(); // Track keys currently pressed
 
     // Simple logging function
@@ -232,7 +232,8 @@
 
     // Key event handlers
     function handleKeyDown(event) {
-        if (!isWindowFocused || !event.code || event.repeat) return; // Ignore if not focused, empty code, or repeat
+        // if (!isWindowFocused || !event.code || event.repeat) return; // Ignore if not focused, empty code, or repeat
+        if (!event.code || event.repeat) return; // Ignore if not focused, empty code, or repeat
         console.log(`handleKeyDown: Key=${event.key}, Code=${event.code}`);
         keyState.add(event.code); // Mark key as pressed
         const keyData = { key: event.key, code: event.code, type: 'keydown', timestamp: Date.now() };
@@ -240,7 +241,8 @@
     }
 
     function handleKeyUp(event) {
-        if (!isWindowFocused || !event.code) return; // Ignore if not focused or empty code
+        // if (!isWindowFocused || !event.code) return; // Ignore if not focused or empty code
+        if (!event.code) return; // Ignore if not focused or empty code
         if (!keyState.has(event.code)) return; // Ignore keyup if no matching keydown
         console.log(`handleKeyUp: Key=${event.key}, Code=${event.code}`);
         keyState.delete(event.code); // Clear key state
@@ -309,8 +311,8 @@
     log("Adding global key event and focus listeners to window...");
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
-    window.addEventListener('focus', handleFocus);
-    window.addEventListener('blur', handleBlur);
+    // window.addEventListener('focus', handleFocus);
+    // window.addEventListener('blur', handleBlur);
 
     connectToSignalingServer();
 

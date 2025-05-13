@@ -299,8 +299,8 @@ namespace Encoder {
                 return;
             }
 
-            /*std::wcout << L"[DEBUG] EncodeFrame() - Frame: width=" << nv12Frame->width
-                << L", height=" << nv12Frame->height << L", format=" << nv12Frame->format << L"\n";*/
+            std::wcout << L"[DEBUG] EncodeFrame() - Frame: width=" << nv12Frame->width
+                << L", height=" << nv12Frame->height << L", format=" << nv12Frame->format << L"\n";
 
             if (nv12Frame->format != AV_PIX_FMT_YUV420P) {
                 //std::wcout << L"[DEBUG] Fixing frame format to AV_PIX_FMT_YUV420P\n";
@@ -501,8 +501,8 @@ namespace Encoder {
 
     void ConvertFrame(const uint8_t* bgraData, int bgraPitch, int width, int height) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
-        /*std::wcout << L"[CONV_DEBUG] width=" << width << L", height=" << height
-            << L", bgraPitch=" << bgraPitch << L", expected stride=" << (width * 4) << L"\n";*/
+        std::wcout << L"[CONV_DEBUG] width=" << width << L", height=" << height
+            << L", bgraPitch=" << bgraPitch << L", expected stride=" << (width * 4) << L"\n";
 
         if (!bgraData) {
             std::wcerr << L"[CONV_DEBUG] bgraData is NULL\n";

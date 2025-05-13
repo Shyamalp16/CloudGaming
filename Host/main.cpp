@@ -45,7 +45,7 @@ int main()
 	//Enumerate All Windows, Then From The Enumerated Windows Find The Windows With The Process Name "cs2.exe"
     auto windows = EnumerateAllWindows();
     //auto msedge = FindWindowsByProcessName(L"vlc.exe");
-    auto msedge = FindWindowsByProcessName(L"vlc.exe");
+    auto msedge = FindWindowsByProcessName(L"cs2.exe");
     std::wcout << L"[main] Found " << msedge.size() << L" CS2 windows.\n";
     for (auto& w : msedge) {
         std::wcout << L"[main] HWND = " << w.hwnd << L"\n Title = " << w.title << L"\n Process = " << w.processName << L"\n";
