@@ -81,7 +81,7 @@ namespace KeyInputHandler {
 	void SimulateWindowsKeyEvent(const std::string& eventCode, bool isKeyDown){
 		WORD virtualKeyCode = MapJavaScriptCodeToVK(eventCode);
 		if (virtualKeyCode == 0) {
-			std::cerr << "[SimulateWindowsKeyEvent] Warning: No VK code mapping for JS code '" << eventCode << "'. Ignoring." << std::endl;
+			//std::cerr << "[SimulateWindowsKeyEvent] Warning: No VK code mapping for JS code '" << eventCode << "'. Ignoring." << std::endl;
 			return;
 		}
 
@@ -101,7 +101,7 @@ namespace KeyInputHandler {
 			virtualKeyCode == VK_LCONTROL || virtualKeyCode == VK_RCONTROL ||
 			virtualKeyCode == VK_LMENU || virtualKeyCode == VK_RMENU ||
 			virtualKeyCode == VK_LWIN || virtualKeyCode == VK_RWIN ||
-			virtualKeyCode == VK_APPS
+			virtualKeyCode == VK_APPS || (eventCode == "NumpadEnter")
 		);
 
 		bool isPrintable = (
@@ -112,56 +112,8 @@ namespace KeyInputHandler {
 			virtualKeyCode == VK_OEM_5 || virtualKeyCode == VK_OEM_6 ||
 			virtualKeyCode == VK_OEM_7 || virtualKeyCode == VK_OEM_PLUS ||
 			virtualKeyCode == VK_OEM_COMMA || virtualKeyCode == VK_OEM_MINUS ||
-			virtualKeyCode == VK_OEM_PERIOD
-		);
-
-		//const char* targetWindow = "cs2.exe";
-
-		HWND currentForeground = GetForegroundWindow();
-		char currentWindowTitle[256];
-		GetWindowTextA(currentForeground, currentWindowTitle, sizeof(currentWindowTitle));
-		std::cout << "[SimulateWindowsKeyEvent] Current foreground window: " << currentWindowTitle << std::endl;
-
-
-		const char* targetWindow = "Counter-Strike 2";
-		HWND hwnd = FindWindowA(NULL, targetWindow);
-		if (hwnd) {
-			SetForegroundWindow(hwnd);
-			std::cout << "[SimulateWindowsKeyEvent] Focused window: " << targetWindow << std::endl;
-		}
-		else {
-			std::cerr << "[SimulateWindowsKeyEvent] Could not find window: " << targetWindow << std::endl;
-		}
-
-		//WORD scanCode = MapVirtualKey(virtualKeyCode, MAPVK_VK_TO_VSC);
-		//if (scanCode != 0) {
-		//	input.ki.wScan = static_cast<WORD>(scanCode);
-		//	input.ki.dwFlags = KEYEVENTF_SCANCODE;
-		//	if (isExtendedKey) {
-		//		input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-		//	}
-		//	if (!isKeyDown) {
-		//		input.ki.dwFlags |= KEYEVENTF_KEYUP;
-		//	}
-		//	input.ki.wVk = 0; 
-		//	std::cout << "[SimulateWindowsKeyEvent] Sending Input (Scan Code) - Code: '" << eventCode << "', Scan: " << scanCode << ", Flags: " << input.ki.dwFlags
-		//		<< (isKeyDown ? " (DOWN)" : " (UP)") << std::endl;
-		//}
-		//else {
-		//	//vk fallback
-		//	std::cerr << "[SimulateWindowsKeyEvent] Warning: Could not map VK " << virtualKeyCode << " to Scan Code for JS code '" << eventCode << "'. Using VK only." << std::endl;
-		//	input.ki.wVk = virtualKeyCode;
-		//	input.ki.dwFlags = 0;
-		//	if (isExtendedKey) {
-		//		input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-		//	}
-		//	if (!isKeyDown) {
-		//		input.ki.dwFlags |= KEYEVENTF_KEYUP;
-		//	}
-		//	input.ki.wVk = virtualKeyCode;
-		//	std::cout << "[SimulateWindowsKeyEvent] Sending Input (VK Fallback) - Code: '" << eventCode << "', VK: " << virtualKeyCode << ", Flags: " << input.ki.dwFlags
-		//		<< (isKeyDown ? " (DOWN)" : " (UP)") << std::endl;
-		//}
+			virtualKeyCode == VK_OEM_PERIOD || virtualKeyCode == VK_SPACE
+			);
 
 		if (isPrintable) {
 			// Use VK for printable characters (VLC compatibility)
@@ -220,7 +172,6 @@ namespace KeyInputHandler {
 		else {
 			std::cout << "[SimulateWindowsKeyEvent] SendInput succeeded for '" << eventCode << "' ("
 				<< (isKeyDown ? "DOWN" : "UP") << ")" << std::endl;
-			SetForegroundWindow(currentForeground); 
 		}
 	}
 
