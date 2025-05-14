@@ -1,7 +1,7 @@
 const WebSocket = require('ws')
 const server = new WebSocket.Server({port : 3000})
 
-//array of max 2 peers
+//array of max 2 peer connection
 let connections = []
 
 server.on('connection', (ws) => {
