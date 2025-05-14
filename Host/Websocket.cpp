@@ -7,7 +7,7 @@ using json = nlohmann::json;
 
 client wsClient;
 websocketpp::connection_hdl g_connectionHandle;
-std::string uri = "ws://localhost:3000";
+std::string uri = "ws://10.0.0.134:3000";
 
 void on_open(client* c, websocketpp::connection_hdl hdl);
 void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg);
