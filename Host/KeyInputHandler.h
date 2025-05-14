@@ -8,6 +8,8 @@
 #include <stdexcept> 
 #include <windows.h>
 #include <map>
+#include <set>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Capture.h>
