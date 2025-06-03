@@ -15,7 +15,6 @@ int main()
     //Initialize C++/WinRT apartment
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     std::wcout << L"[main] Apartment initialized.\n";
-
     //Create D3D device + context
     winrt::com_ptr<ID3D11Device> d3dDevice;
     winrt::com_ptr<ID3D11DeviceContext> d3dContext;
@@ -45,7 +44,7 @@ int main()
 	//Enumerate All Windows, Then From The Enumerated Windows Find The Windows With The Process Name "cs2.exe"
     auto windows = EnumerateAllWindows();
     //auto msedge = FindWindowsByProcessName(L"vlc.exe");
-    auto msedge = FindWindowsByProcessName(L"cs2.exe");
+    auto msedge = FindWindowsByProcessName(L"vlc.exe");
     std::wcout << L"[main] Found " << msedge.size() << L" CS2 windows.\n";
     for (auto& w : msedge) {
         std::wcout << L"[main] HWND = " << w.hwnd << L"\n Title = " << w.title << L"\n Process = " << w.processName << L"\n";

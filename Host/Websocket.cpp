@@ -1,13 +1,15 @@
 #include "Websocket.h"
 #include "Encoder.h"
 #include "KeyInputHandler.h"
+#include "MouseInputHandler.h"
 
 typedef websocketpp::client<websocketpp::config::asio_client> client;
 using json = nlohmann::json;
 
 client wsClient;
 websocketpp::connection_hdl g_connectionHandle;
-std::string uri = "ws://10.0.0.134:3000";
+//std::string uri = "ws://10.0.0.134:3000";
+std::string uri = "ws://localhost:3000";
 
 void on_open(client* c, websocketpp::connection_hdl hdl);
 void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg);
@@ -32,7 +34,7 @@ void sendFrames() {
                         std::cerr << "[WebSocket] Failed to send video packet: " << result << std::endl;
                     }
                     else {
-                         //std::cout << "[WebSocket] Sent video packet successfully (PTS: " << pts << ")" << std::endl;
+                         std::cout << "[WebSocket] Sent video packet successfully (PTS: " << pts << ")" << std::endl;
                     }
                 }
                 else {
@@ -40,8 +42,8 @@ void sendFrames() {
                 }
             }
             else {
-                // std::cout << "[WebSocket] Waiting for PeerConnection to initialize..." << std::endl;
-                // Avoid busy-waiting if PC is not ready, sleep a bit longer
+                 std::cout << "[WebSocket] Waiting for PeerConnection to initialize..." << std::endl;
+                 //Avoid busy-waiting if PC is not ready, sleep a bit longer
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
@@ -76,6 +78,7 @@ void handleOffer(const std::string& offer) {
     handleOffer(offer.c_str());
     sendAnswer(); // Trigger sending the answer
     initKeyInputHandler();
+    //initMouseInputHandler();
 }
 
 void handleRemoteIceCandidate(const json& candidateJson) {

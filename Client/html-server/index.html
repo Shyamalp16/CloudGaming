@@ -34,14 +34,18 @@
 
   <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
   <script>
-    const serverUrl = 'ws://10.0.0.134:3000';
+    // const serverUrl = 'ws://10.0.0.134:3000';
+    const serverUrl = "ws://localhost:3000"
     let ws;
     let peerConnection;
     const videoElement = document.getElementById('remoteVideo');
     const logElement = document.getElementById('log');
-    let dataChannel;
+    let dataChannel; //keyboard channel
+    let mouseChannel; //mouse coords channel
     // let isWindowFocused = document.hasFocus(); // Track window focus
     const keyState = new Set(); // Track keys currently pressed
+    const mouseButtonState = new Set(); //Track current mouse position
+    const mousePosition = {x:0, y:0}
 
     // Simple logging function
     function log(message) {
@@ -64,6 +68,44 @@
             timeout = setTimeout(later, wait);
         };
     }
+
+    
+    const throttleIntervalMouse = 15 //ms
+    let lastMouseMoveTime = 0
+
+    function throttle(func, wait){
+        let inThrottle, lastFn, lastTime;
+        return function(){
+            const context = this
+            args = arguments
+            if(!inThrottle){
+                func.apply(context, args)
+                lastTime = Date.now()
+                inThrottle = true
+            }else{
+                clearTimeout(lastFn)
+                lastFn = setTimeout(function() {
+                    if(Date.now() - lastTime >= wait){
+                        func.apply(context, args)
+                        lastTime = Date.now()
+                    }
+                }, Math.max(wait - (Date.now() - lastTime), 0))
+            }
+        }
+    }
+
+    const throttledSendMouseMove = throttle((event) => {
+        const mouseData = {
+            type: "mousemove",
+            x: event.clientX,
+            y: event.clientY,
+            timestamp: Date.now(),
+        };
+
+        sendMouseEvent(mouseData)
+        mousePosition.x = event.clientX
+        mousePosition.y = event.clientY
+    }, throttleIntervalMouse)
 
     // WebSocket connection logic
     function connectToSignalingServer() {
@@ -164,7 +206,9 @@
         peerConnection.onsignalingstatechange = () => log('Signaling state changed to: ' + peerConnection.signalingState);
 
         dataChannel = peerConnection.createDataChannel("keyPressChannel", { ordered: true });
+        mouseChannel = peerConnection.createDataChannel("mouseChannel", {ordered: true})
         log(`Client attempting to create data channel "${dataChannel.label}", initial state: ${dataChannel.readyState}`);
+        log(`Client attempting to create data channel "${mouseChannel.label}", initial state: ${mouseChannel.readyState}`);
 
         dataChannel.onopen = () => log(`Data Channel Opened: "${dataChannel.label}", ReadyState: ${dataChannel.readyState}`);
         dataChannel.onmessage = (event) => log(`Received Message on Data Channel "${dataChannel.label}": ${event.data}`);
@@ -174,6 +218,15 @@
             const errorMessage = error ? `${error.name}: ${error.message}` : 'Unknown DataChannel Error';
             log(`Data Channel "${dataChannel.label}" error: ${errorMessage}`);
         };
+
+        mouseChannel.onopen = () => log(`Mouse Channel Opened: "${mouseChannel.label}", ReadyState: ${mouseChannel.readyState}`)
+        // mouseChannel.onmessage = (event) => log(`Received Message on Mouse Channel " ${mouseChannel.label}": ${event.data}`)
+        mouseChannel.onclose = () => log(`Mouse Channel Closed: "${mouseChannel.label}"`)
+        mouseChannel.onerror = (event) => {
+            const error = event.error
+            const errorMessage = error ? `${error.name}: ${error.message}` : 'Unknown MouseChannel Error'
+            log(`Mouse Channel "${mouseChannel.label}" error: ${errorMessage}`)
+        }
     }
 
     // Handle incoming SDP answer
@@ -220,7 +273,7 @@
         if (dataChannel && dataChannel.readyState === 'open' && dataChannel.bufferedAmount < 65536) {
             const message = JSON.stringify(keyData);
             dataChannel.send(message);
-            console.log('Sent Key Event: ' + message);
+            // console.log('Sent Key Event: ' + message);
             log('Sent Key Event: ' + message); // Log all events for debugging
         } else {
             console.warn('Data channel not open or buffer full, cannot send key event: ' + JSON.stringify(keyData));
@@ -228,7 +281,7 @@
     }
 
     // Debounce with 10ms for responsiveness
-    const debouncedSendKeyPress = debounce(sendKeyPress, 10);
+    const debouncedSendKeyPress = debounce(sendKeyPress, 5);
 
     // Key event handlers
     function handleKeyDown(event) {
@@ -264,6 +317,51 @@
             debouncedSendKeyPress(keyData);
         });
         keyState.clear();
+
+        
+    }
+
+    function sendMouseEvent(mouseData){
+        if(mouseChannel && mouseChannel.readyState === 'open' && mouseChannel.bufferedAmount < 65536){
+            const message = JSON.stringify(mouseData)
+            mouseChannel.send(message);
+            // console.log('Sent Mouse Event: '+ messsage)
+            // log('Sent Mouse Event: ' + message); // Log all events for debugging
+        }else{
+            console.warn('Mouse channel not open or buffer full, cannot send mouse event: ' + JSON.stringify(mouseData))
+        }
+    }
+
+    function handleMouseMove(event){
+        //if (!isWindowFocused) return;
+        throttledSendMouseMove(event)
+    }
+
+    function handleMouseDown(event){
+        //if (!isWindowFocused) return;
+        mouseButtonState.add(event.button);
+        const mouseData = {
+            type: 'mousedown',
+            x: event.clientX,
+            y: event.clientY,
+            button: event.button,
+            timestamp: Date.now(),
+        }
+        sendMouseEvent(mouseData)
+    }
+
+    function handleMouseUp(event){
+        //if (!isWindowFocused) return;
+        if (!mouseButtonState.has(event.button)) return; // Ignore mouseup if no matching mousedown
+        mouseButtonState.add(event.button);
+        const mouseData = {
+            type: 'mouseup',
+            x: event.clientX,
+            y: event.clientY,
+            button: event.button,
+            timestamp: Date.now(),
+        }
+        sendMouseEvent(mouseData)
     }
 
     // Start the WebRTC connection process
@@ -313,6 +411,10 @@
     window.addEventListener('keyup', handleKeyUp);
     // window.addEventListener('focus', handleFocus);
     // window.addEventListener('blur', handleBlur);
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('mouseup', handleMouseUp);
 
     connectToSignalingServer();
     

@@ -69,7 +69,7 @@ namespace Encoder {
                 pos += 4;
                 if (pos >= size) break;
                 uint8_t nalUnitType = data[pos] & 0x1F;
-                //std::wcout << L"[DEBUG] NAL Unit Type: " << (int)nalUnitType << L"\n";
+                std::wcout << L"[DEBUG] NAL Unit Type: " << (int)nalUnitType << L"\n";
                 int nextPos = pos + 1;
                 while (nextPos + 3 < size) {
                     if (data[nextPos] == 0x00 && data[nextPos + 1] == 0x00 && data[nextPos + 2] == 0x00 && data[nextPos + 3] == 0x01) {
@@ -78,7 +78,7 @@ namespace Encoder {
                     nextPos++;
                 }
                 int nalSize = (nextPos + 3 < size) ? (nextPos - pos + 3) : (size - pos);
-                //std::wcout << L"[DEBUG] NAL Unit Size: " << nalSize << L"\n";
+                std::wcout << L"[DEBUG] NAL Unit Size: " << nalSize << L"\n";
                 pos = nextPos;
             }
             else {
@@ -88,7 +88,7 @@ namespace Encoder {
     }
 
     void pushPacketToWebRTC(AVPacket* packet) {
-        //std::wcout << L"[WebRTC] Pushing encoded packets (PTS: " << packet->pts << L") to WebRTC module.\n";
+        std::wcout << L"[WebRTC] Pushing encoded packets (PTS: " << packet->pts << L") to WebRTC module.\n";
         {
             std::lock_guard<std::mutex> lock(g_frameMutex);
             g_latestFrameData.assign(packet->data, packet->data + packet->size);
@@ -97,7 +97,7 @@ namespace Encoder {
         }
         g_frameAvailable.notify_one();
 
-        //std::wcout << L"[WebRTC] Packet Size: " << packet->size << L", First 20 Bytes: ";
+        std::wcout << L"[WebRTC] Packet Size: " << packet->size << L", First 20 Bytes: ";
         for (int i = 0; i < std::min(20, packet->size); i++) {
             //std::wcout << std::hex << (int)packet->data[i] << L" ";
         }
@@ -111,7 +111,7 @@ namespace Encoder {
 
         int result = sendVideoPacket(packet->data, packet->size, packet->pts);
         if (result != 0) {
-            //std::wcerr << L"[WebRTC] Failed to send video packet to WebRTC module. Error code: " << result << L"\n";
+            std::wcerr << L"[WebRTC] Failed to send video packet to WebRTC module. Error code: " << result << L"\n";
         }
     }
 
@@ -354,8 +354,8 @@ namespace Encoder {
                 }
                 last_dts = packet->dts;
 
-                /*std::wcout << L"[DEBUG] Encoded packet: size=" << packet->size << L", PTS=" << packet->pts
-                    << L", DTS=" << packet->dts << L", flags=" << packet->flags << L"\n";*/
+                std::wcout << L"[DEBUG] Encoded packet: size=" << packet->size << L", PTS=" << packet->pts
+                    << L", DTS=" << packet->dts << L", flags=" << packet->flags << L"\n";
 
                 if (packet->size > 0) {
                     int offset = 0;
@@ -413,8 +413,8 @@ namespace Encoder {
                 av_packet_unref(packet);
             }
             frameCounter++;
-            /*std::wcout << L"[DEBUG] Frame encoded successfully. Frame Counter: " << frameCounter
-                << L", PTS: " << hwFrame->pts << L"\n";*/
+            std::wcout << L"[DEBUG] Frame encoded successfully. Frame Counter: " << frameCounter
+                << L", PTS: " << hwFrame->pts << L"\n";
         }
         catch (const std::exception& e) {
             std::cerr << "[EXCEPTION] EncodeFrame() - Exception caught: " << e.what() << "\n";
@@ -552,27 +552,6 @@ namespace Encoder {
         }
 
         sws_scale(swsCtx, inData, inLineSize, 0, height, nv12Frame->data, nv12Frame->linesize);
-
-        /*std::ofstream yuvOut("debug_yuv420p.raw", std::ios::binary | std::ios::app);
-        for (int i = 0; i < height; i++) {
-            yuvOut.write(reinterpret_cast<char*>(nv12Frame->data[0] + i * nv12Frame->linesize[0]), width);
-        }
-        for (int i = 0; i < height / 2; i++) {
-            yuvOut.write(reinterpret_cast<char*>(nv12Frame->data[1] + i * nv12Frame->linesize[1]), width / 2);
-        }
-        for (int i = 0; i < height / 2; i++) {
-            yuvOut.write(reinterpret_cast<char*>(nv12Frame->data[2] + i * nv12Frame->linesize[2]), width / 2);
-        }
-        yuvOut.close();
-        std::wcout << L"[DEBUG] Saved YUV420P frame to debug_yuv420p.raw\n";*/
-
-       /* std::ofstream bgraFile("debug_bgra.raw", std::ios::binary | std::ios::app);
-        for (int i = 0; i < height; i++) {
-            bgraFile.write(reinterpret_cast<char*>(const_cast<uint8_t*>(bgraData) + i * bgraPitch), width * 4);
-        }
-        bgraFile.close();
-        std::wcout << L"[DEBUG] Saved BGRA input to debug_bgra.raw\n";*/
-
         EncodeFrame();
     }
 

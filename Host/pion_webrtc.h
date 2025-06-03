@@ -59,6 +59,8 @@ extern "C" {
 
     char* getDataChannelMessage();
 
+    char* getMouseChannelMessage();
+
 #ifdef __cplusplus
 }
 #endif
