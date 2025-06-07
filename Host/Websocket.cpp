@@ -78,7 +78,7 @@ void handleOffer(const std::string& offer) {
     handleOffer(offer.c_str());
     sendAnswer(); // Trigger sending the answer
     initKeyInputHandler();
-    //initMouseInputHandler();
+    initMouseInputHandler();
 }
 
 void handleRemoteIceCandidate(const json& candidateJson) {

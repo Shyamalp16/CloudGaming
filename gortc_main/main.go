@@ -41,17 +41,33 @@ func init() {
 func enqueueMessage(msg string) {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
-	log.Printf("[Go/Pion] --> Enqueueing message: '%s'. Queue size BEFORE: %d\n", msg, len(messageQueue))
+	log.Printf(
+		"[Go/Pion] --> Enqueueing message: '%s'. Queue size BEFORE: %d\n",
+		msg,
+		len(messageQueue),
+	)
 	messageQueue = append(messageQueue, msg)
-	log.Printf("[Go/Pion] --> Enqueued message: '%s'. Queue size AFTER: %d\n", msg, len(messageQueue))
+	log.Printf(
+		"[Go/Pion] --> Enqueued message: '%s'. Queue size AFTER: %d\n",
+		msg,
+		len(messageQueue),
+	)
 }
 
 func enqueueMouseEvent(msg string) {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
-	log.Printf("[Go/Pion] --> Enqueueing message: '%s'. Queue size BEFORE: %d\n", msg, len(mouseQueue))
+	log.Printf(
+		"[Go/Pion] --> Enqueueing message: '%s'. Queue size BEFORE: %d\n",
+		msg,
+		len(mouseQueue),
+	)
 	mouseQueue = append(mouseQueue, msg)
-	log.Printf("[Go/Pion] --> Enqueued message: '%s'. Queue size AFTER: %d\n", msg, len(mouseQueue))
+	log.Printf(
+		"[Go/Pion] --> Enqueued message: '%s'. Queue size AFTER: %d\n",
+		msg,
+		len(mouseQueue),
+	)
 }
 
 //export getDataChannelMessage
@@ -59,12 +75,15 @@ func getDataChannelMessage() *C.char {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
 	if len(messageQueue) == 0 {
-		// log.Println("[Go/Pion] No messages in queue")
 		return nil
 	}
 	msg := messageQueue[0]
 	messageQueue = messageQueue[1:]
-	log.Printf("[Go/Pion] <-- getDataChannelMessage: Dequeued: '%s'. Queue size AFTER: %d\n", msg, len(messageQueue))
+	log.Printf(
+		"[Go/Pion] <-- getDataChannelMessage: Dequeued: '%s'. Queue size AFTER: %d\n",
+		msg,
+		len(messageQueue),
+	)
 	return C.CString(msg)
 }
 
@@ -77,7 +96,11 @@ func getMouseChannelMessage() *C.char {
 	}
 	msg := mouseQueue[0]
 	mouseQueue = mouseQueue[1:]
-	log.Printf("[Go/Pion] <-- getMouseChannelMessage: Dequeued: '%s'. Queue size AFTER: %d\n", msg, len(mouseQueue))
+	log.Printf(
+		"[Go/Pion] <-- getMouseChannelMessage: Dequeued: '%s'. Queue size AFTER: %d\n",
+		msg,
+		len(mouseQueue),
+	)
 	return C.CString(msg)
 }
 
@@ -101,14 +124,16 @@ func createPeerConnectionGo() C.int {
 	pcMutex.Lock()
 	// defer pcMutex.Unlock()
 
-	// Close existing PeerConnection if any
 	if peerConnection != nil {
 		_ = peerConnection.Close()
 		peerConnection = nil
 		videoTrack = nil
 		if dataChannel != nil {
 			if err := dataChannel.Close(); err != nil {
-				log.Printf("[Go/Pion] Error closing existing DataChannel: %v\n", err)
+				log.Printf(
+					"[Go/Pion] Error closing existing DataChannel: %v\n",
+					err,
+				)
 			}
 		}
 		dataChannel = nil
@@ -116,10 +141,11 @@ func createPeerConnectionGo() C.int {
 		messageQueue = []string{}
 		mouseQueue = []string{}
 		lastAnswerSDP = ""
-		log.Println("[Go/Pion] createPeerConnectionGo: Closed previous PeerConnection and reset state.")
+		log.Println(
+			"[Go/Pion] createPeerConnectionGo: Closed previous PeerConnection and reset state.",
+		)
 	}
 
-	// Configure MediaEngine with H.264 codec
 	mediaEngine := &webrtc.MediaEngine{}
 	codec := webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
@@ -127,26 +153,39 @@ func createPeerConnectionGo() C.int {
 			ClockRate:   90000,
 			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
 		},
-		// PayloadType: 96, // Default payload type for H.264
-		PayloadType: 109,
+		PayloadType: 96,
 	}
 	if err := mediaEngine.RegisterCodec(codec, webrtc.RTPCodecTypeVideo); err != nil {
 		log.Printf("[Go/Pion] Error registering H.264 codec: %v\n", err)
-		pcMutex.Unlock()
+		// pcMutex.Unlock()
 		return 0
 	}
 
 	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
 		log.Printf("[Go/Pion] Error registering default codecs: %v\n", err)
-		pcMutex.Unlock()
+		// pcMutex.Unlock()
 		return 0
 	}
 	log.Println("[Go/Pion] createPeerConnectionGo: MediaEngine configured.")
 
-	// Create API
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine))
 
-	// Configure STUN server
+	// config := webrtc.Configuration{
+	// 	ICEServers: []webrtc.ICEServer{
+	// 		{
+	// 			URLs: []string{"stun:stun.l.google.com:19302"},
+	// 		},
+	// 		{
+	// 			URLs:           []string{"turn:turn.pion.ly:3478"},
+	// 			Username:       "pion",
+	// 			Credential:     "pion",
+	// 			CredentialType: webrtc.ICECredentialTypePassword,
+	// 		},
+	// 	},
+	// 	SDPSemantics:       webrtc.SDPSemanticsUnifiedPlan,
+	// 	ICETransportPolicy: webrtc.ICETransportPolicyRelay,
+	// }
+
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
@@ -162,39 +201,53 @@ func createPeerConnectionGo() C.int {
 		pcMutex.Unlock()
 		return 0
 	}
-	log.Println("[Go/Pion] createPeerConnectionGo: New PeerConnection instance created successfully.")
+	log.Println(
+		"[Go/Pion] createPeerConnectionGo: New PeerConnection instance created successfully.",
+	)
 
 	peerConnection.OnDataChannel(func(dc *webrtc.DataChannel) {
-		// This callback (OnDataChannel) is invoked by Pion when SetRemoteDescription
-		// processes an offer containing an m=application line for a data channel.
 		actualLabel := dc.Label()
 		var idStr string
 		if dc.ID() != nil {
 			idStr = fmt.Sprintf("%d", *dc.ID())
 		} else {
-			idStr = "nil" // Should not happen for non-negotiated (in-band) channels
+			idStr = "nil"
 		}
 
-		log.Printf("[Go/Pion] OnDataChannel FIRED! Actual Label RECEIVED: '%s', ID: %s, Negotiated: %v, ReadyState: %s\n",
-			actualLabel, idStr, dc.Negotiated(), dc.ReadyState().String())
+		log.Printf(
+			"[Go/Pion] OnDataChannel FIRED! Actual Label RECEIVED: '%s', ID: %s, Negotiated: %v, ReadyState: %s\n",
+			actualLabel,
+			idStr,
+			dc.Negotiated(),
+			dc.ReadyState().String(),
+		)
 
 		if actualLabel == "keyPressChannel" {
-			log.Printf("[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global dataChannel and attaching handlers.\n", actualLabel)
-			pcMutex.Lock()
-			// If there was an old global dataChannel, and it's different from the new one, close the old one.
+			log.Printf(
+				"[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global dataChannel and attaching handlers.\n",
+				actualLabel,
+			)
+			// --- DEADLOCK FIX: REMOVED pcMutex.Lock() HERE ---
 			if dataChannel != nil && dataChannel != dc {
-				log.Printf("[Go/Pion] OnDataChannel: Closing previous global data channel '%s' before assigning new one.\n", dataChannel.Label())
+				log.Printf(
+					"[Go/Pion] OnDataChannel: Closing previous global data channel '%s' before assigning new one.\n",
+					dataChannel.Label(),
+				)
 				if errClose := dataChannel.Close(); errClose != nil {
-					log.Printf("[Go/Pion] OnDataChannel: Error closing previous global dataChannel: %v\n", errClose)
+					log.Printf(
+						"[Go/Pion] OnDataChannel: Error closing previous global dataChannel: %v\n",
+						errClose,
+					)
 				}
 			}
 			dataChannel = dc
-			log.Printf("[Go/Pion] OnDataChannel: Global 'dataChannel' variable assigned to new DC with label '%s'.", dataChannel.Label())
-			pcMutex.Unlock()
+			log.Printf(
+				"[Go/Pion] OnDataChannel: Global 'dataChannel' variable assigned to new DC with label '%s'.",
+				dataChannel.Label(),
+			)
+			// --- DEADLOCK FIX: REMOVED pcMutex.Unlock() HERE ---
 
-			// Attach handlers to the 'dc' instance received in this OnDataChannel callback parameter
 			dc.OnOpen(func() {
-				// For logging, let's check the state of the global dataChannel too
 				pcMutex.Lock()
 				gdcLabel := "nil (global)"
 				gdcID := "nil"
@@ -205,41 +258,79 @@ func createPeerConnectionGo() C.int {
 					}
 				}
 				pcMutex.Unlock()
-				log.Printf("[Go/Pion] Data channel '%s' (local, ID: %s) OnOpen event. Current Global DC: '%s' (ID: %s). Local DC ReadyState: %s\n",
-					dc.Label(), idStr, gdcLabel, gdcID, dc.ReadyState().String())
+				log.Printf(
+					"[Go/Pion] Data channel '%s' (local, ID: %s) OnOpen event. Current Global DC: '%s' (ID: %s). Local DC ReadyState: %s\n",
+					dc.Label(),
+					idStr,
+					gdcLabel,
+					gdcID,
+					dc.ReadyState().String(),
+				)
 			})
 
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-				log.Printf("[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s\n", dc.Label(), idStr, string(msg.Data))
-				enqueueMessage(string(msg.Data)) // This function handles its own locking for messageQueue
+				log.Printf(
+					"[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s\n",
+					dc.Label(),
+					idStr,
+					string(msg.Data),
+				)
+				enqueueMessage(string(msg.Data))
 			})
 
 			dc.OnClose(func() {
-				log.Printf("[Go/Pion] Data channel '%s' (ID: %s) OnClose event. ReadyState: %s\n", dc.Label(), idStr, dc.ReadyState().String())
+				log.Printf(
+					"[Go/Pion] Data channel '%s' (ID: %s) OnClose event. ReadyState: %s\n",
+					dc.Label(),
+					idStr,
+					dc.ReadyState().String(),
+				)
 				pcMutex.Lock()
-				if dataChannel == dc { // If the closed channel is the one currently assigned to global
-					log.Printf("[Go/Pion] OnClose: Global dataChannel ('%s', ID: %s) is being closed. Setting global to nil.\n", dc.Label(), idStr)
+				if dataChannel == dc {
+					log.Printf(
+						"[Go/Pion] OnClose: Global dataChannel ('%s', ID: %s) is being closed. Setting global to nil.\n",
+						dc.Label(),
+						idStr,
+					)
 					dataChannel = nil
 				}
 				pcMutex.Unlock()
 			})
 
 			dc.OnError(func(err error) {
-				log.Printf("[Go/Pion] Data channel '%s' (ID: %s) OnError event: %v\n", dc.Label(), idStr, err)
+				log.Printf(
+					"[Go/Pion] Data channel '%s' (ID: %s) OnError event: %v\n",
+					dc.Label(),
+					idStr,
+					err,
+				)
 			})
-			log.Printf("[Go/Pion] OnDataChannel: All handlers (OnOpen, OnMessage, OnClose, OnError) attached for DC '%s'.\n", actualLabel)
+			log.Printf(
+				"[Go/Pion] OnDataChannel: All handlers (OnOpen, OnMessage, OnClose, OnError) attached for DC '%s'.\n",
+				actualLabel,
+			)
 
 		} else if actualLabel == "mouseChannel" {
-			log.Printf("[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global mouseChannel and attaching handlers.\n", actualLabel)
-			pcMutex.Lock()
-
+			log.Printf(
+				"[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global mouseChannel and attaching handlers.\n",
+				actualLabel,
+			)
+			// --- DEADLOCK FIX: REMOVED pcMutex.Lock() HERE ---
 			if mouseChannel != nil && mouseChannel != dc {
-				log.Printf("[Go/Pion] OnDataChannel: Closing previous global mouse channel '%s' (ID: %s) before assigning new one.\n", mouseChannel.Label(), fmt.Sprintf("%d", *mouseChannel.ID()))
+				log.Printf(
+					"[Go/Pion] OnDataChannel: Closing previous global mouse channel '%s' (ID: %s) before assigning new one.\n",
+					mouseChannel.Label(),
+					fmt.Sprintf("%d", *mouseChannel.ID()),
+				)
 				if errClose := mouseChannel.Close(); errClose != nil {
-					log.Printf("[Go/Pion] OnDataChannel: Error closing previous global mouseChannel: %v\n", errClose)
+					log.Printf(
+						"[Go/Pion] OnDataChannel: Error closing previous global mouseChannel: %v\n",
+						errClose,
+					)
 				}
 			}
 			mouseChannel = dc
+			// --- DEADLOCK FIX: REMOVED pcMutex.Unlock() HERE ---
 
 			dc.OnOpen(func() {
 				pcMutex.Lock()
@@ -252,37 +343,69 @@ func createPeerConnectionGo() C.int {
 					}
 				}
 				pcMutex.Unlock()
-				log.Printf("[Go/Pion] Mouse channel '%s' (local, ID: %s) OnOpen event. Current Global DC: '%s' (ID: %s). Local DC ReadyState: %s\n",
-					dc.Label(), idStr, gdcLabel, gdcID, dc.ReadyState().String())
+				log.Printf(
+					"[Go/Pion] Mouse channel '%s' (local, ID: %s) OnOpen event. Current Global DC: '%s' (ID: %s). Local DC ReadyState: %s\n",
+					dc.Label(),
+					idStr,
+					gdcLabel,
+					gdcID,
+					dc.ReadyState().String(),
+				)
 			})
 
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-				log.Printf("[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s\n", dc.Label(), idStr, string(msg.Data))
+				log.Printf(
+					"[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s\n",
+					dc.Label(),
+					idStr,
+					string(msg.Data),
+				)
 				enqueueMouseEvent(string(msg.Data))
 			})
 
 			dc.OnClose(func() {
-				log.Printf("[Go/Pion] Mouse channel '%s' (ID: %s) OnClose event. ReadyState: %s\n", dc.Label(), idStr, dc.ReadyState().String())
+				log.Printf(
+					"[Go/Pion] Mouse channel '%s' (ID: %s) OnClose event. ReadyState: %s\n",
+					dc.Label(),
+					idStr,
+					dc.ReadyState().String(),
+				)
 				pcMutex.Lock()
 				if mouseChannel == dc {
-					log.Printf("[Go/Pion] OnClose: Global mouseChannel ('%s', ID: %s) is being closed. Setting global to nil.\n", dc.Label(), idStr)
+					log.Printf(
+						"[Go/Pion] OnClose: Global mouseChannel ('%s', ID: %s) is being closed. Setting global to nil.\n",
+						dc.Label(),
+						idStr,
+					)
 					mouseChannel = nil
 				}
 				pcMutex.Unlock()
 			})
 
 			dc.OnError(func(err error) {
-				log.Printf("[Go/Pion] Data channel '%s' (ID: %s) OnError event: %v\n", dc.Label(), idStr, err)
+				log.Printf(
+					"[Go/Pion] Data channel '%s' (ID: %s) OnError event: %v\n",
+					dc.Label(),
+					idStr,
+					err,
+				)
 			})
-			log.Printf("[Go/Pion] OnDataChannel: All handlers attached for mouse DC '%s'.\n", actualLabel)
+			log.Printf(
+				"[Go/Pion] OnDataChannel: All handlers attached for mouse DC '%s'.\n",
+				actualLabel,
+			)
 		} else {
-			log.Printf("[Go/Pion] OnDataChannel: Label MISMATCH. Expected 'keyPressChannel' but received '%s' (ID: %s). Handlers NOT attached for this DC.\n",
-				actualLabel, idStr)
+			log.Printf(
+				"[Go/Pion] OnDataChannel: Label MISMATCH. Expected 'keyPressChannel' or 'mouseChannel' but received '%s' (ID: %s). Handlers NOT attached for this DC.\n",
+				actualLabel,
+				idStr,
+			)
 		}
 	})
-	log.Println("[Go/Pion] createPeerConnectionGo: OnDataChannel handler has been set up on the PeerConnection.")
+	log.Println(
+		"[Go/Pion] createPeerConnectionGo: OnDataChannel handler has been set up on the PeerConnection.",
+	)
 
-	// Create H.264 video track
 	videoTrack, err = webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{
 			MimeType:    "video/h264",
@@ -295,33 +418,53 @@ func createPeerConnectionGo() C.int {
 	if err != nil {
 		log.Printf("[Go/Pion] Error creating video track: %v\n", err)
 		if pcErr := peerConnection.Close(); pcErr != nil {
-			log.Printf("[Go/Pion] createPeerConnectionGo: Error closing PeerConnection after track failure: %v\n", pcErr)
+			log.Printf(
+				"[Go/Pion] createPeerConnectionGo: Error closing PeerConnection after track failure: %v\n",
+				pcErr,
+			)
 		}
 		peerConnection = nil
 		pcMutex.Unlock()
 		return 0
 	}
 
-	trackSSRC = rand.Uint32()
-	// log.Print("[Go/Pion] Generated SSRC for video track: %d\n", trackSSRC)
-
-	if _, err := peerConnection.AddTrack(videoTrack); err != nil {
+	rtpSender, err := peerConnection.AddTrack(videoTrack)
+	if err != nil {
 		log.Printf("[Go/Pion] Error adding video track: %v\n", err)
 		if pcErr := peerConnection.Close(); pcErr != nil {
-			log.Printf("[Go/Pion] createPeerConnectionGo: Error closing PeerConnection after AddTrack failure: %v\n", pcErr)
+			log.Printf(
+				"[Go/Pion] createPeerConnectionGo: Error closing PeerConnection after AddTrack failure: %v\n",
+				pcErr,
+			)
 		}
-		peerConnection = nil // Nullify
-		pcMutex.Unlock()     // Unlock before returning on error
+		peerConnection = nil
+		pcMutex.Unlock()
 		return 0
 	}
 
-	// Set up callbacks
+	params := rtpSender.GetParameters()
+	if len(params.Encodings) > 0 {
+		trackSSRC = uint32(params.Encodings[0].SSRC)
+		log.Printf(
+			"[Go/Pion] Successfully captured SSRC for video track: %d\n",
+			trackSSRC,
+		)
+	} else {
+		log.Println(
+			"[Go/Pion] CRITICAL: Could not get SSRC from RTPSender parameters.",
+		)
+	}
+
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
-			log.Printf("[Go/Pion] OnICECandidate: %s\n", candidate.ToJSON().Candidate)
-			// Signaling of this candidate to the remote peer (JS client) is handled by C++ via WebSocket
+			log.Printf(
+				"[Go/Pion] OnICECandidate: %s\n",
+				candidate.ToJSON().Candidate,
+			)
 		} else {
-			log.Println("[Go/Pion] OnICECandidate: ICE Candidate gathering complete (nil candidate received).")
+			log.Println(
+				"[Go/Pion] OnICECandidate: ICE Candidate gathering complete (nil candidate received).",
+			)
 		}
 	})
 	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
@@ -344,16 +487,22 @@ func handleOffer(offerSDP *C.char) {
 		log.Println("[Go/Pion] handleOffer: no PeerConnection, creating one.")
 		pcMutex.Unlock()
 		if createPeerConnectionGo() == 0 {
-			log.Println("[Go/Pion] handleOffer: Failed to create PeerConnection. Aborting offer handling.")
+			log.Println(
+				"[Go/Pion] handleOffer: Failed to create PeerConnection. Aborting offer handling.",
+			)
 			return
 		}
 		pcMutex.Lock()
 		if peerConnection == nil {
-			log.Println("[Go/Pion] handleOffer: PeerConnection is STILL nil after creation attempt. Aborting.")
+			log.Println(
+				"[Go/Pion] handleOffer: PeerConnection is STILL nil after creation attempt. Aborting.",
+			)
 			pcMutex.Unlock()
 			return
 		}
-		log.Println("[Go/Pion] handleOffer: PeerConnection successfully created and available.")
+		log.Println(
+			"[Go/Pion] handleOffer: PeerConnection successfully created and available.",
+		)
 	}
 	defer pcMutex.Unlock()
 
@@ -368,7 +517,9 @@ func handleOffer(offerSDP *C.char) {
 		log.Printf("[Go/Pion] Error setting remote offer: %v\n", err)
 		return
 	}
-	log.Println("[Go/Pion] handleOffer: Remote description (offer) set successfully. If offer had a DataChannel, OnDataChannel should have triggered.")
+	log.Println(
+		"[Go/Pion] handleOffer: Remote description (offer) set successfully. If offer had a DataChannel, OnDataChannel should have triggered.",
+	)
 
 	answer, err := peerConnection.CreateAnswer(nil)
 	if err != nil {
@@ -380,22 +531,34 @@ func handleOffer(offerSDP *C.char) {
 	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
 	log.Println("[Go/Pion] handleOffer: Setting Local Description (answer).")
 	if err := peerConnection.SetLocalDescription(answer); err != nil {
-		log.Printf("[Go/Pion] handleOffer: Error setting local description (answer): %v\n", err)
-		return // pcMutex will be unlocked by defer
+		log.Printf(
+			"[Go/Pion] handleOffer: Error setting local description (answer): %v\n",
+			err,
+		)
+		return
 	}
 	select {
 	case <-gatherComplete:
-		log.Println("[Go/Pion] handleOffer: ICE candidate gathering complete for the answer.")
+		log.Println(
+			"[Go/Pion] handleOffer: ICE candidate gathering complete for the answer.",
+		)
 	case <-time.After(10 * time.Second):
-		log.Println("[Go/Pion] handleOffer: ICE candidate gathering timed out for the answer.")
+		log.Println(
+			"[Go/Pion] handleOffer: ICE candidate gathering timed out for the answer.",
+		)
 	}
 
 	if ld := peerConnection.LocalDescription(); ld != nil {
-		lastAnswerSDP = ld.SDP // Store the SDP for C++ to retrieve
-		log.Printf("[Go/Pion] handleOffer: Answer SDP generated and stored (length: %d)\n", len(lastAnswerSDP))
+		lastAnswerSDP = ld.SDP
+		log.Printf(
+			"[Go/Pion] handleOffer: Answer SDP generated and stored (length: %d)\n",
+			len(lastAnswerSDP),
+		)
 	} else {
-		log.Println("[Go/Pion] handleOffer: LocalDescription is nil after ICE gathering for answer. Cannot provide SDP.")
-		lastAnswerSDP = "" // Ensure it's empty if no SDP.
+		log.Println(
+			"[Go/Pion] handleOffer: LocalDescription is nil after ICE gathering for answer. Cannot provide SDP.",
+		)
+		lastAnswerSDP = ""
 	}
 	log.Println("[Go/Pion] handleOffer: Processing complete.")
 }
@@ -439,13 +602,10 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	defer pcMutex.Unlock()
 
 	if peerConnection == nil || videoTrack == nil {
-		log.Println("[Go/Pion] sendVideoPacket: PeerConnection or videoTrack not initialized!")
 		return -1
 	}
 
-	// Convert C data to Go byte slice
 	buf := C.GoBytes(data, size)
-	// log.Printf("[Go/Pion] Raw H.264 buffer (first 20 bytes): %x\n", buf[:min(20, len(buf))])
 
 	const frameRate = 60.0
 	const frameDuration90kHz = 90000.0 / frameRate
@@ -465,27 +625,17 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 
 	const maxPacketSize = 1000
 
-	// Parse NAL units from the buffer
 	nalUnits := splitNALUnits(buf)
 	if len(nalUnits) == 0 {
-		// log.Println("[Go/Pion] sendVideoPacket: No NAL units found in buffer")
 		return -1
 	}
 
-	// Process each NAL unit
 	for i, nal := range nalUnits {
-		// Log the first few bytes of the NAL unit for debugging
-		if i == 0 {
-			// log.Printf("[Go/Pion] First 4 bytes of frame: %x\n", nal[:min(4, len(nal))])
-		}
-
-		// If the NAL unit is smaller than the MTU, send it as a single RTP packet
 		if len(nal) <= maxPacketSize {
 			rtpPacket := &rtp.Packet{
 				Header: rtp.Header{
-					Version: 2,
-					// PayloadType:    96,
-					PayloadType:    109,
+					Version:        2,
+					PayloadType:    96,
 					SequenceNumber: currentSequenceNumber,
 					Timestamp:      currentTimestamp,
 					SSRC:           trackSSRC,
@@ -496,66 +646,49 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 
 			currentSequenceNumber++
 			if err := videoTrack.WriteRTP(rtpPacket); err != nil {
-				log.Printf("[Go/Pion] Error sending RTP packet: %v\n", err)
 				return -1
 			}
-
-			// log.Printf("[Go/Pion] Sent H.264 RTP packet (size: %d, PTS: %d, Seq: %d, Marker: %v)\n",
-			// 	len(nal), currentTimestamp, currentSequenceNumber-1, rtpPacket.Header.Marker)
 		} else {
-			// Fragment the NAL unit into FU-A packets
 			err := sendFragmentedNALUnit(nal, maxPacketSize, i == len(nalUnits)-1)
 			if err != nil {
-				log.Printf("[Go/Pion] Error sending fragmented NAL unit: %v\n", err)
 				return -1
 			}
 		}
 	}
 
-	log.Printf("[Go/Pion] Sent H.264 frame (total size: %d, PTS: %d)\n", size, currentTimestamp)
 	return 0
 }
 
-// splitNALUnits splits the H.264 bitstream into individual NAL units
-// splitNALUnits splits the H.264 bitstream into individual NAL units
 func splitNALUnits(buf []byte) [][]byte {
 	var nalUnits [][]byte
 	start := 0
 	i := 0
 
 	for i < len(buf) {
-		// Look for the start code (0x00000001 or 0x000001)
 		if i+3 < len(buf) && buf[i] == 0 && buf[i+1] == 0 && buf[i+2] == 0 && buf[i+3] == 1 {
 			if i > start {
-				// Add the NAL unit (excluding the start code)
 				nalUnits = append(nalUnits, buf[start:i])
 			}
-			start = i + 4 // Skip the 4-byte start code
+			start = i + 4
 			i += 4
 		} else if i+2 < len(buf) && buf[i] == 0 && buf[i+1] == 0 && buf[i+2] == 1 {
 			if i > start {
-				// Add the NAL unit (excluding the start code)
 				nalUnits = append(nalUnits, buf[start:i])
 			}
-			start = i + 3 // Skip the 3-byte start code
+			start = i + 3
 			i += 3
 		} else {
 			i++
 		}
 	}
 
-	// Add the last NAL unit
 	if start < len(buf) {
 		nalUnits = append(nalUnits, buf[start:])
 	}
 
-	// Filter out any empty or invalid NAL units
 	var filteredNALs [][]byte
 	for _, nal := range nalUnits {
 		if len(nal) > 0 {
-			// Log the NAL unit type for debugging
-			// nalType := nal[0] & 0x1F
-			// log.Printf("[Go/Pion] Parsed NAL Unit Type: %d, Size: %d\n", nalType, len(nal))
 			filteredNALs = append(filteredNALs, nal)
 		}
 	}
@@ -563,82 +696,55 @@ func splitNALUnits(buf []byte) [][]byte {
 	return filteredNALs
 }
 
-// sendFragmentedNALUnit sends a large NAL unit as FU-A packets
-// In main.go :: sendFragmentedNALUnit()
-
 func sendFragmentedNALUnit(nal []byte, maxPacketSize int, isLastNAL bool) error {
 	if len(nal) < 2 {
-		// log.Printf("[Go/Pion] NAL unit too small to fragment (size: %d)\n", len(nal))
-		// Optionally send as single packet if possible, or log error
-		// For now, let's just return, though this might drop small NALs
-		// that somehow triggered fragmentation logic.
-		return nil // Or handle appropriately
+		return nil
 	}
 
-	nalType := nal[0] & 0x1F            // Extract the NAL unit type (5 bits)
-	fuIndicator := (nal[0] & 0xE0) | 28 // FU-A type (28), NRI bits from original NAL
-	maxPayloadSize := maxPacketSize - 2 // Account for FU indicator and FU header
+	nalType := nal[0] & 0x1F
+	fuIndicator := (nal[0] & 0xE0) | 28
+	maxPayloadSize := maxPacketSize - 2
 
-	// --- CHANGE: Fragment the NAL payload (nal[1:]) ---
 	nalPayload := nal[1:]
 	offset := 0
 	firstFragment := true
-	// --- END CHANGE ---
 
-	// --- CHANGE: Loop condition uses nalPayload ---
 	for offset < len(nalPayload) {
-		// --- CHANGE: chunkSize calculation uses nalPayload ---
 		chunkSize := len(nalPayload) - offset
 		if chunkSize > maxPayloadSize {
 			chunkSize = maxPayloadSize
 		}
 
-		// FU Header
 		fuHeader := byte(0)
 		if firstFragment {
-			fuHeader |= 0x80 // Set start bit
+			fuHeader |= 0x80
 		}
-		// --- CHANGE: End bit check uses nalPayload ---
 		if offset+chunkSize >= len(nalPayload) {
-			fuHeader |= 0x40 // Set end bit
+			fuHeader |= 0x40
 		}
-		fuHeader |= nalType // Set original NAL type
+		fuHeader |= nalType
 
-		// Create the FU-A payload
 		payload := make([]byte, 2+chunkSize)
 		payload[0] = fuIndicator
 		payload[1] = fuHeader
-		// --- CHANGE: Copy chunk from nalPayload ---
 		copy(payload[2:], nalPayload[offset:offset+chunkSize])
-		// --- END CHANGE ---
 
-		// Log NAL type being fragmented
-		// log.Printf("[Go/Pion] Fragmenting NAL Unit Type: %d\n", nalType)
-
-		// Send RTP packet
 		rtpPacket := &rtp.Packet{
 			Header: rtp.Header{
-				Version: 2,
-				// PayloadType:    96, // Make sure this matches SDP
-				PayloadType:    109,
+				Version:        2,
+				PayloadType:    96,
 				SequenceNumber: currentSequenceNumber,
 				Timestamp:      currentTimestamp,
 				SSRC:           trackSSRC,
-				// --- CHANGE: Marker bit check uses nalPayload ---
-				Marker: (offset+chunkSize >= len(nalPayload)) && isLastNAL, // Marker on last packet of last NAL
-				// --- END CHANGE ---
+				Marker:         (offset+chunkSize >= len(nalPayload)) && isLastNAL,
 			},
 			Payload: payload,
 		}
 
 		currentSequenceNumber++
 		if err := videoTrack.WriteRTP(rtpPacket); err != nil {
-			// log.Printf("[Go/Pion] Error writing FU-A RTP packet: %v\n", err)
-			return err // Return error on write failure
+			return err
 		}
-
-		// log.Printf("[Go/Pion] Sent H.264 FU-A packet (payload size: %d, offset: %d, PTS: %d, Seq: %d, Marker: %v, FU Header: %02x)\n",
-		// 	len(payload), offset, currentTimestamp, currentSequenceNumber-1, rtpPacket.Header.Marker, fuHeader)
 
 		offset += chunkSize
 		firstFragment = false
@@ -669,6 +775,36 @@ func closePeerConnection() {
 		videoTrack = nil
 		lastAnswerSDP = ""
 		log.Println("[Go/Pion] PeerConnection closed.")
+	}
+}
+
+//export getPeerConnectionState
+func getPeerConnectionState() C.int {
+	pcMutex.Lock()
+	defer pcMutex.Unlock()
+
+	if peerConnection == nil {
+		return C.int(0)
+	}
+
+	state := peerConnection.ConnectionState()
+	log.Printf("[Go/Pion] PeerConnection state: %s\n", state.String())
+
+	switch state {
+	case webrtc.PeerConnectionStateNew:
+		return C.int(0)
+	case webrtc.PeerConnectionStateConnecting:
+		return C.int(1)
+	case webrtc.PeerConnectionStateConnected:
+		return C.int(3)
+	case webrtc.PeerConnectionStateDisconnected:
+		return C.int(4)
+	case webrtc.PeerConnectionStateFailed:
+		return C.int(5)
+	case webrtc.PeerConnectionStateClosed:
+		return C.int(6)
+	default:
+		return C.int(-1)
 	}
 }
 
