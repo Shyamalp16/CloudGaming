@@ -35,8 +35,6 @@ std::vector<uint8_t> Encoder::g_latestFrameData;
 int64_t Encoder::g_latestPTS = 0;
 bool Encoder::g_frameReady = false;
 
-std::ofstream debugH264File;
-
 static std::chrono::steady_clock::time_point encoderStartTime;
 static bool isFirstFrame = true;
 
@@ -105,10 +103,6 @@ namespace Encoder {
 
         logNALUnits(packet->data, packet->size);
 
-        /*if (debugH264File.is_open()) {
-            debugH264File.write(reinterpret_cast<const char*>(packet->data), packet->size);
-        }*/
-
         int result = sendVideoPacket(packet->data, packet->size, packet->pts);
         if (result != 0) {
             std::wcerr << L"[WebRTC] Failed to send video packet to WebRTC module. Error code: " << result << L"\n";
@@ -118,11 +112,6 @@ namespace Encoder {
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
         std::wcout << L"[DEBUG] Initializing NVENC encoder with width=" << width << L", height=" << height << L", fps=" << fps << L"\n";
-
-        /*debugH264File.open("debug_h264_stream.h264", std::ios::binary);
-        if (!debugH264File.is_open()) {
-            std::wcerr << L"[DEBUG] Failed to open debug_h264_stream.h264 for writing\n";
-        }*/
 
         // Initialize hardware device context for NVENC
         if (av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0) < 0) {
@@ -397,12 +386,6 @@ namespace Encoder {
                     }
                 }
 
-               /* static std::ofstream h264File("debug_stream.h264", std::ios::binary | std::ios::app);
-                if (h264File.is_open()) {
-                    h264File.write((char*)packet->data, packet->size);
-                    h264File.flush();
-                }*/
-
                 if (g_onEncodedFrameCallback) {
                     g_onEncodedFrameCallback(packet);
                 }
@@ -578,11 +561,6 @@ namespace Encoder {
         av_packet_free(&packet);
         av_buffer_unref(&hwFramesCtx);
         av_buffer_unref(&hwDeviceCtx);
-
-        if (debugH264File.is_open()) {
-            debugH264File.close();
-        }
-
         std::wcout << L"[Encoder] NVENC Encoder finalized.\n";
     }
 }

@@ -170,22 +170,6 @@ func createPeerConnectionGo() C.int {
 
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine))
 
-	// config := webrtc.Configuration{
-	// 	ICEServers: []webrtc.ICEServer{
-	// 		{
-	// 			URLs: []string{"stun:stun.l.google.com:19302"},
-	// 		},
-	// 		{
-	// 			URLs:           []string{"turn:turn.pion.ly:3478"},
-	// 			Username:       "pion",
-	// 			Credential:     "pion",
-	// 			CredentialType: webrtc.ICECredentialTypePassword,
-	// 		},
-	// 	},
-	// 	SDPSemantics:       webrtc.SDPSemanticsUnifiedPlan,
-	// 	ICETransportPolicy: webrtc.ICETransportPolicyRelay,
-	// }
-
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
