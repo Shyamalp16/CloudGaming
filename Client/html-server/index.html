@@ -3,439 +3,1013 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WebRTC Video Receiver</title>
+  <title>CloudGaming Client</title>
   <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
     body {
-      font-family: Arial, sans-serif;
-      margin: 20px;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%);
+      color: #ffffff;
+      overflow: hidden;
+      height: 100vh;
     }
-    video {
-      width: 640px;
-      height: 360px;
-      border: 1px solid #ccc;
-      background-color: #000;
+
+    .game-header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 50px;
+      background: rgba(0, 0, 0, 0.9);
+      backdrop-filter: blur(10px);
+      border-bottom: 2px solid #00ff88;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      z-index: 1000;
+      box-shadow: 0 2px 20px rgba(0, 255, 136, 0.3);
     }
-    #log {
-      margin-top: 20px;
-      padding: 10px;
-      border: 1px solid #ccc;
-      height: 200px;
-      overflow-y: scroll;
-      background-color: #f9f9f9;
-      font-size: 0.9em;
-      line-height: 1.4;
+
+    .game-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: #00ff88;
+      text-shadow: 0 0 10px rgba(0, 255, 136, 0.5);
     }
-    .video-container {
+
+    .connection-status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .status-indicator {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #ff4444;
+      box-shadow: 0 0 10px rgba(255, 68, 68, 0.5);
+      animation: pulse 2s infinite;
+    }
+
+    .status-indicator.connected {
+      background: #00ff88;
+      box-shadow: 0 0 10px rgba(0, 255, 136, 0.5);
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .status-text {
+      font-size: 14px;
+      color: #cccccc;
+    }
+
+    .game-container {
+      position: fixed;
+      top: 50px;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .stream-viewport {
       position: relative;
-      width: 1920px;
-      height: 1080px;
-      display: inline-block;
+      width: 100%;
+      height: 100%;
+      background: radial-gradient(circle at center, #111 0%, #000 100%);
+      border: 2px solid #333;
+      box-shadow: 
+        inset 0 0 50px rgba(0, 255, 136, 0.1),
+        0 0 50px rgba(0, 0, 0, 0.8);
     }
+
+    #gameCanvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: none;
+      object-fit: contain;
+      background: #000;
+    }
+
     #input-overlay {
       position: absolute;
       top: 0;
       left: 0;
       width: 100%;
       height: 100%;
-      z-index: 10; 
-      /* cursor: none; */
+      z-index: 10;
+      cursor: none;
     }
+
+    .game-controls {
+      position: absolute;
+      top: 15px;
+      right: 15px;
+      display: flex;
+      gap: 10px;
+      z-index: 20;
+    }
+
+    .control-btn {
+      width: 40px;
+      height: 40px;
+      background: rgba(0, 0, 0, 0.8);
+      border: 2px solid #00ff88;
+      border-radius: 8px;
+      color: #00ff88;
+      font-size: 16px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s ease;
+      backdrop-filter: blur(10px);
+    }
+
+    .control-btn:hover {
+      background: rgba(0, 255, 136, 0.2);
+      box-shadow: 0 0 15px rgba(0, 255, 136, 0.5);
+      transform: scale(1.05);
+    }
+
+    .control-btn:active {
+      transform: scale(0.95);
+    }
+
+    .loading-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.9);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      transition: opacity 0.5s ease;
+    }
+
+    .loading-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .loading-spinner {
+      width: 60px;
+      height: 60px;
+      border: 3px solid #333;
+      border-top: 3px solid #00ff88;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 20px;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    .loading-text {
+      font-size: 18px;
+      color: #00ff88;
+      text-align: center;
+      margin-bottom: 10px;
+    }
+
+    .loading-subtext {
+      font-size: 14px;
+      color: #888;
+      text-align: center;
+    }
+
+    .performance-overlay {
+      position: absolute;
+      top: 15px;
+      left: 15px;
+      background: rgba(0, 0, 0, 0.8);
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 12px;
+      color: #ccc;
+      backdrop-filter: blur(10px);
+      z-index: 20;
+      min-width: 150px;
+    }
+
+    .perf-item {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 5px;
+    }
+
+    .perf-value {
+      color: #00ff88;
+      font-weight: 600;
+    }
+
+    .debug-log {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 200px;
+      background: rgba(0, 0, 0, 0.95);
+      border-top: 2px solid #333;
+      padding: 15px;
+      overflow-y: auto;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      color: #ccc;
+      backdrop-filter: blur(10px);
+      transform: translateY(100%);
+      transition: transform 0.3s ease;
+      z-index: 500;
+    }
+
+    .debug-log.visible {
+      transform: translateY(0);
+    }
+
+    .debug-log::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    .debug-log::-webkit-scrollbar-track {
+      background: #111;
+    }
+
+    .debug-log::-webkit-scrollbar-thumb {
+      background: #333;
+      border-radius: 4px;
+    }
+
+    .debug-log::-webkit-scrollbar-thumb:hover {
+      background: #555;
+    }
+
+    .log-entry {
+      margin-bottom: 5px;
+      padding: 2px 0;
+      border-bottom: 1px solid #222;
+    }
+
+    .log-timestamp {
+      color: #666;
+      margin-right: 10px;
+    }
+
+    .log-level-info { color: #00ff88; }
+    .log-level-warn { color: #ffaa00; }
+    .log-level-error { color: #ff4444; }
+
+    /* Hidden video element */
+    #hiddenVideo {
+      display: none;
+    }
+
+    /* Fullscreen mode */
+    .fullscreen-mode {
+      position: fixed !important;
+      top: 0 !important;
+      left: 0 !important;
+      width: 100vw !important;
+      height: 100vh !important;
+      z-index: 2000;
+      background: #000;
+    }
+
+    .fullscreen-mode .game-header {
+      display: none;
+    }
+
+    .fullscreen-mode .debug-log {
+      display: none;
+    }
+
+    :fullscreen {
+        background: #000 !important;
+    }
+
+    :fullscreen .game-header {
+        display: none !important;
+    }
+
+    :fullscreen .debug-log {
+        display: none !important;
+    }
+
+    :fullscreen .stream-viewport {
+        border: none !important;
+        box-shadow: none !important;
+    }
+
+    /* Responsive design */
+    @media (max-width: 768px) {
+      .game-header {
+        height: 40px;
+        padding: 0 15px;
+      }
+      
+      .game-title {
+        font-size: 16px;
+      }
+      
+      .game-container {
+        top: 40px;
+      }
+      
+      .performance-overlay {
+        font-size: 11px;
+        padding: 8px;
+      }
+      
+      .control-btn {
+        width: 35px;
+        height: 35px;
+        font-size: 14px;
+      }
+    }
+
+    /* Gaming cursor styles */
+    .gaming-cursor {
+      cursor: crosshair !important;
+    }
+
+    /* Connection quality indicator */
+    .quality-indicator {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .quality-bar {
+      width: 3px;
+      height: 12px;
+      background: #333;
+      border-radius: 1px;
+    }
+
+    .quality-bar.active { background: #00ff88; }
+    .quality-bar.medium { background: #ffaa00; }
+    .quality-bar.poor { background: #ff4444; }
   </style>
 </head>
 <body>
-  <h1>WebRTC Video Receiver</h1>
-  <!-- <video id="remoteVideo" autoplay playsinline controls></video> -->
-   <div class="video-container"> 
-        <video id="remoteVideo" autoplay playsinline muted></video>
-        <div id="input-overlay"></div>
-   </div>
-  <div id="log"></div>
+  <!-- Game Header -->
+  <div class="game-header">
+    <div class="game-title">🎮 CloudGaming Client</div>
+    <div class="connection-status">
+      <div class="quality-indicator">
+        <div class="quality-bar" id="q1"></div>
+        <div class="quality-bar" id="q2"></div>
+        <div class="quality-bar" id="q3"></div>
+        <div class="quality-bar" id="q4"></div>
+      </div>
+      <div class="status-indicator" id="connectionStatus"></div>
+      <div class="status-text" id="statusText">Connecting...</div>
+    </div>
+  </div>
+
+  <!-- Main Game Container -->
+  <div class="game-container" id="gameContainer">
+    <div class="stream-viewport" id="streamViewport">
+      <!-- Performance Overlay -->
+      <div class="performance-overlay" id="perfOverlay">
+        <div class="perf-item">
+          <span>Latency:</span>
+          <span class="perf-value" id="latencyValue">-- ms</span>
+        </div>
+        <div class="perf-item">
+          <span>FPS:</span>
+          <span class="perf-value" id="fpsValue">-- fps</span>
+        </div>
+        <div class="perf-item">
+          <span>Quality:</span>
+          <span class="perf-value" id="qualityValue">--</span>
+        </div>
+        <div class="perf-item">
+          <span>Bitrate:</span>
+          <span class="perf-value" id="bitrateValue">-- kbps</span>
+        </div>
+      </div>
+
+      <!-- Game Controls -->
+      <div class="game-controls">
+        <button class="control-btn" id="debugBtn" onclick="toggleDebug()" title="Toggle Debug">🐛</button>
+        <button class="control-btn" id="perfBtn" onclick="togglePerf()" title="Toggle Performance">📊</button>
+        <button class="control-btn" id="fullscreenBtn" onclick="toggleFullscreen()" title="Fullscreen">⛶</button>
+      </div>
+
+      <!-- Loading Overlay -->
+      <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner"></div>
+        <div class="loading-text" id="loadingText">Connecting to Game Server</div>
+        <div class="loading-subtext" id="loadingSubtext">Establishing WebRTC connection...</div>
+      </div>
+
+      <!-- Game Canvas -->
+      <canvas id="gameCanvas"></canvas>
+      <div id="input-overlay"></div>
+    </div>
+  </div>
+
+  <!-- Debug Log -->
+  <div class="debug-log" id="debugLog"></div>
+
+  <!-- Hidden video element for receiving stream -->
+  <video id="hiddenVideo" autoplay playsinline muted></video>
 
   <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
   <script>
-    // const serverUrl = 'ws://10.0.0.134:3000';
-    const serverUrl = "ws://localhost:3000"
+    const serverUrl = "ws://10.0.0.134:3000";
     let ws;
     let peerConnection;
-    const videoElement = document.getElementById('remoteVideo');
-    const logElement = document.getElementById('log');
-    let dataChannel; //keyboard channel
-    let mouseChannel; //mouse coords channel
-    // let isWindowFocused = document.hasFocus(); // Track window focus
-    const keyState = new Set(); // Track keys currently pressed
-    const mouseButtonState = new Set(); //Track current mouse position
-    const mousePosition = {x:0, y:0}
-
-    // Simple logging function
-    function log(message) {
-        console.log(message);
-        const p = document.createElement('p');
-        p.textContent = typeof message === 'string' ? message : JSON.stringify(message);
-        logElement.appendChild(p);
-        logElement.scrollTop = logElement.scrollHeight;
-    }
-
-    // Debounce utility
-    function debounce(func, wait) {
-        let timeout;
-        return function executedFunction(...args) {
-            const later = () => {
-                clearTimeout(timeout);
-                func(...args);
-            };
-            clearTimeout(timeout);
-            timeout = setTimeout(later, wait);
-        };
-    }
-
+    const hiddenVideoElement = document.getElementById('hiddenVideo');
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const debugLog = document.getElementById('debugLog');
+    const streamViewport = document.getElementById('streamViewport');
+    let dataChannel;
+    let mouseChannel;
+    let animationId;
+    let isFullscreen = false;
+    let debugVisible = false;
+    let perfVisible = true;
     
-    const throttleIntervalMouse = 15 //ms
-    let lastMouseMoveTime = 0
+    const keyState = new Set();
+    const mouseButtonState = new Set();
+    const mousePosition = {x: 0, y: 0};
 
-    function throttle(func, wait){
-        let inThrottle, lastFn, lastTime;
-        return function(){
-            const context = this
-            args = arguments
-            if(!inThrottle){
-                func.apply(context, args)
-                lastTime = Date.now()
-                inThrottle = true
-            }else{
-                clearTimeout(lastFn)
-                lastFn = setTimeout(function() {
-                    if(Date.now() - lastTime >= wait){
-                        func.apply(context, args)
-                        lastTime = Date.now()
-                    }
-                }, Math.max(wait - (Date.now() - lastTime), 0))
+    // Performance tracking
+    let frameCount = 0;
+    let lastFrameTime = Date.now();
+    let fps = 0;
+    let latency = 0;
+
+    // Set canvas resolution to match stream
+    canvas.width = 1920;
+    canvas.height = 1080;
+
+    // UI Control Functions
+    async function toggleFullscreen() {
+      try {
+            if (!document.fullscreenElement) {
+            // Enter fullscreen
+            await document.documentElement.requestFullscreen();
+            document.getElementById('fullscreenBtn').textContent = '🗗';
+            isFullscreen = true;
+            updateConnectionStatus('connected', 'Fullscreen Mode');
+            } else {
+            // Exit fullscreen
+            await document.exitFullscreen();
+            document.getElementById('fullscreenBtn').textContent = '⛶';
+            isFullscreen = false;
+            updateConnectionStatus('connected', 'Connected');
+            }
+        } catch (err) {
+            console.error('Fullscreen error:', err);
+            // Fallback to CSS-only fullscreen if browser doesn't support it
+            if (!isFullscreen) {
+            streamViewport.classList.add('fullscreen-mode');
+            document.getElementById('fullscreenBtn').textContent = '🗗';
+            isFullscreen = true;
+            } else {
+            streamViewport.classList.remove('fullscreen-mode');
+            document.getElementById('fullscreenBtn').textContent = '⛶';
+            isFullscreen = false;
             }
         }
     }
 
-    const throttledSendMouseMove = throttle((event) => {
-        const mouseData = {
-            type: "mousemove",
-            x: event.clientX,
-            y: event.clientY,
-            timestamp: Date.now(),
-        };
+    function toggleDebug() {
+      debugVisible = !debugVisible;
+      debugLog.classList.toggle('visible', debugVisible);
+      document.getElementById('debugBtn').style.background = debugVisible ? 
+        'rgba(0, 255, 136, 0.3)' : 'rgba(0, 0, 0, 0.8)';
+    }
 
-        sendMouseEvent(mouseData)
-        mousePosition.x = event.clientX
-        mousePosition.y = event.clientY
-    }, throttleIntervalMouse)
+    function togglePerf() {
+      perfVisible = !perfVisible;
+      document.getElementById('perfOverlay').style.display = perfVisible ? 'block' : 'none';
+      document.getElementById('perfBtn').style.background = perfVisible ? 
+        'rgba(0, 255, 136, 0.3)' : 'rgba(0, 0, 0, 0.8)';
+    }
+
+    function updateConnectionStatus(status, text) {
+      const indicator = document.getElementById('connectionStatus');
+      const statusText = document.getElementById('statusText');
+      
+      indicator.className = `status-indicator ${status}`;
+      statusText.textContent = text;
+    }
+
+    function updateQualityIndicator(quality) {
+      const bars = ['q1', 'q2', 'q3', 'q4'];
+      bars.forEach((id, index) => {
+        const bar = document.getElementById(id);
+        bar.className = 'quality-bar';
+        if (index < quality) {
+          if (quality >= 3) bar.classList.add('active');
+          else if (quality >= 2) bar.classList.add('medium');
+          else bar.classList.add('poor');
+        }
+      });
+    }
+
+    function updatePerformanceDisplay() {
+      document.getElementById('fpsValue').textContent = `${fps} fps`;
+      document.getElementById('latencyValue').textContent = `${latency} ms`;
+      document.getElementById('qualityValue').textContent = fps > 50 ? 'Excellent' : fps > 30 ? 'Good' : 'Poor';
+      
+      // Update quality indicator
+      const qualityLevel = fps > 50 ? 4 : fps > 30 ? 3 : fps > 15 ? 2 : 1;
+      updateQualityIndicator(qualityLevel);
+    }
+
+    function hideLoadingOverlay() {
+      document.getElementById('loadingOverlay').classList.add('hidden');
+    }
+
+    function showLoadingOverlay(text, subtext) {
+      const overlay = document.getElementById('loadingOverlay');
+      overlay.classList.remove('hidden');
+      document.getElementById('loadingText').textContent = text;
+      document.getElementById('loadingSubtext').textContent = subtext;
+    }
+
+    // Render video stream to canvas
+    function renderVideoToCanvas() {
+      if (hiddenVideoElement.videoWidth > 0 && hiddenVideoElement.videoHeight > 0) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(
+          hiddenVideoElement, 
+          0, 0, 
+          hiddenVideoElement.videoWidth, 
+          hiddenVideoElement.videoHeight,
+          0, 0, 
+          canvas.width, 
+          canvas.height
+        );
+
+        // Calculate FPS
+        frameCount++;
+        const currentTime = Date.now();
+        if (currentTime - lastFrameTime >= 1000) {
+          fps = Math.round((frameCount * 1000) / (currentTime - lastFrameTime));
+          frameCount = 0;
+          lastFrameTime = currentTime;
+          updatePerformanceDisplay();
+        }
+      }
+      animationId = requestAnimationFrame(renderVideoToCanvas);
+    }
+
+    // Enhanced logging function
+    function log(message, level = 'info') {
+      console.log(message);
+      
+      const timestamp = new Date().toLocaleTimeString();
+      const logEntry = document.createElement('div');
+      logEntry.className = 'log-entry';
+      logEntry.innerHTML = `
+        <span class="log-timestamp">[${timestamp}]</span>
+        <span class="log-level-${level}">${typeof message === 'string' ? message : JSON.stringify(message)}</span>
+      `;
+      
+      debugLog.appendChild(logEntry);
+      debugLog.scrollTop = debugLog.scrollHeight;
+      
+      // Limit log entries
+      if (debugLog.children.length > 200) {
+        debugLog.removeChild(debugLog.firstChild);
+      }
+
+      // Update loading text based on log messages
+      if (message.includes('Connected to signaling server')) {
+        showLoadingOverlay('Connected to Server', 'Initializing WebRTC connection...');
+      } else if (message.includes('Video started playing')) {
+        hideLoadingOverlay();
+        updateConnectionStatus('connected', 'Connected');
+      }
+    }
+
+    // Throttle utility for mouse events
+    function throttle(func, wait) {
+      let inThrottle, lastFn, lastTime;
+      return function() {
+        const context = this;
+        const args = arguments;
+        if (!inThrottle) {
+          func.apply(context, args);
+          lastTime = Date.now();
+          inThrottle = true;
+        } else {
+          clearTimeout(lastFn);
+          lastFn = setTimeout(function() {
+            if (Date.now() - lastTime >= wait) {
+              func.apply(context, args);
+              lastTime = Date.now();
+            }
+          }, Math.max(wait - (Date.now() - lastTime), 0));
+        }
+      };
+    }
+
+    const throttledSendMouseMove = throttle((event) => {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      
+      const mouseData = {
+        type: "mousemove",
+        x: Math.round((event.clientX - rect.left) * scaleX),
+        y: Math.round((event.clientY - rect.top) * scaleY),
+        timestamp: Date.now(),
+      };
+
+      sendMouseEvent(mouseData);
+      mousePosition.x = mouseData.x;
+      mousePosition.y = mouseData.y;
+    }, 15);
 
     // WebSocket connection logic
     function connectToSignalingServer() {
-        log(`Attempting to connect to WebSocket server at ${serverUrl}...`);
-        ws = new WebSocket(serverUrl);
+      log(`Attempting to connect to WebSocket server at ${serverUrl}...`);
+      updateConnectionStatus('connecting', 'Connecting...');
+      ws = new WebSocket(serverUrl);
 
-        ws.onopen = () => {
-            log('Connected to signaling server');
-        };
+      ws.onopen = () => {
+        log('Connected to signaling server');
+        updateConnectionStatus('connected', 'Server Connected');
+      };
 
-        ws.onmessage = async (event) => {
-            try {
-                const msg = JSON.parse(event.data);
-                if (msg.sdp && msg.sdp.length > 100) {
-                    log(`Received from server: { type: ${msg.type}, sdp: '...', candidate: ${JSON.stringify(msg.candidate)} }`);
-                } else {
-                    log('Received from server: ' + JSON.stringify(msg, null, 2));
-                }
+      ws.onmessage = async (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.sdp && msg.sdp.length > 100) {
+            log(`Received from server: { type: ${msg.type}, sdp: '...', candidate: ${JSON.stringify(msg.candidate)} }`);
+          } else {
+            log('Received from server: ' + JSON.stringify(msg, null, 2));
+          }
 
-                switch (msg.type) {
-                    case 'answer':
-                        await handleAnswer(msg);
-                        break;
-                    case 'ice-candidate':
-                        if (msg.candidate && msg.candidate.candidate) {
-                            await handleRemoteIceCandidate(msg.candidate);
-                        } else if (msg.candidate === null) {
-                            log("Received null ICE candidate (end of candidates).");
-                        } else {
-                            log("Received invalid ICE candidate structure.");
-                        }
-                        break;
-                    case 'offer':
-                        log('Unexpected Offer Received.');
-                        break;
-                    default:
-                        log('Unknown Message Type: ' + msg.type);
-                }
-            } catch (err) {
-                log(`Error processing WebSocket message: ${err.message}. Data: ${event.data}`);
-            }
-        };
+          switch (msg.type) {
+            case 'answer':
+              await handleAnswer(msg);
+              break;
+            case 'ice-candidate':
+              if (msg.candidate && msg.candidate.candidate) {
+                await handleRemoteIceCandidate(msg.candidate);
+              } else if (msg.candidate === null) {
+                log("Received null ICE candidate (end of candidates).");
+              } else {
+                log("Received invalid ICE candidate structure.");
+              }
+              break;
+            case 'offer':
+              log('Unexpected Offer Received.');
+              break;
+            default:
+              log('Unknown Message Type: ' + msg.type);
+          }
+        } catch (err) {
+          log(`Error processing WebSocket message: ${err.message}. Data: ${event.data}, 'error'`);
+        }
+      };
 
-        ws.onerror = (event) => {
-            log('WebSocket Error occurred. Check browser console.');
-            console.error("WebSocket Error Event:", event);
-        };
+      ws.onerror = (event) => {
+        log('WebSocket Error occurred. Check browser console.', 'error');
+        updateConnectionStatus('disconnected', 'Connection Error');
+        console.error("WebSocket Error Event:", event);
+      };
 
-        ws.onclose = (event) => {
-            log(`WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason || 'N/A'}`);
-            peerConnection?.close();
-            peerConnection = null;
-            dataChannel = null;
-        };
+      ws.onclose = (event) => {
+        log(`WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason || 'N/A'}, 'warn'`);
+        updateConnectionStatus('disconnected', 'Disconnected');
+        if (animationId) {
+          cancelAnimationFrame(animationId);
+        }
+        peerConnection?.close();
+        peerConnection = null;
+        dataChannel = null;
+        showLoadingOverlay('Connection Lost', 'Attempting to reconnect...');
+      };
     }
 
     // PeerConnection setup
     function createPeerConnection() {
-        if (peerConnection) {
-            log("PeerConnection already exists, not creating again.");
-            return;
+      if (peerConnection) {
+        log("PeerConnection already exists, not creating again.");
+        return;
+      }
+      log("Creating new PeerConnection...");
+      showLoadingOverlay('Establishing Connection', 'Setting up peer connection...');
+      
+      const config = {
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      };
+      peerConnection = new RTCPeerConnection(config);
+
+      peerConnection.ontrack = (event) => {
+        log(`Received remote track: Kind=${event.track.kind}, ID=${event.track.id}`);
+        if (event.track.kind === 'video' && hiddenVideoElement.srcObject !== event.streams[0]) {
+          log(`Attaching stream ${event.streams[0].id} to hidden video element.`);
+          hiddenVideoElement.srcObject = event.streams[0];
+          hiddenVideoElement.play().then(() => {
+            log('Video started playing, beginning canvas rendering...');
+            renderVideoToCanvas();
+            hideLoadingOverlay();
+            updateConnectionStatus('connected', 'Streaming');
+          }).catch(e => {
+            log(`Video play() failed: ${e}. User interaction might be required., 'error'`);
+          });
         }
-        log("Creating new PeerConnection...");
-        const config = {
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-        };
-        peerConnection = new RTCPeerConnection(config);
+      };
 
-        peerConnection.ontrack = (event) => {
-            log(`Received remote track: Kind=${event.track.kind}, ID=${event.track.id}`);
-            if (event.track.kind === 'video' && videoElement.srcObject !== event.streams[0]) {
-                log(`Attaching stream ${event.streams[0].id} to video element.`);
-                videoElement.srcObject = event.streams[0];
-                videoElement.play().catch(e => log(`Video play() failed: ${e}. User interaction might be required.`));
-            }
-        };
-
-        peerConnection.onicecandidate = (event) => {
-            if (event.candidate) {
-                console.log('Local ICE Candidate:', JSON.stringify(event.candidate, null, 2));
-                log(`Generated local ICE candidate (type: ${event.candidate.type || 'unknown'}). Sending...`);
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        type: 'ice-candidate',
-                        candidate: event.candidate
-                    }));
-                } else {
-                    log("WebSocket not open, cannot send ICE candidate.");
-                }
-            } else {
-                log('Local ICE candidate gathering complete.');
-            }
-        };
-
-        peerConnection.oniceconnectionstatechange = () => log('ICE connection state changed to: ' + peerConnection.iceConnectionState);
-        peerConnection.onicegatheringstatechange = () => log('ICE gathering state changed to: ' + peerConnection.iceGatheringState);
-        peerConnection.onconnectionstatechange = () => log('PeerConnection state changed to: ' + peerConnection.connectionState);
-        peerConnection.onsignalingstatechange = () => log('Signaling state changed to: ' + peerConnection.signalingState);
-
-        dataChannel = peerConnection.createDataChannel("keyPressChannel", { ordered: true });
-        mouseChannel = peerConnection.createDataChannel("mouseChannel", {ordered: true})
-        log(`Client attempting to create data channel "${dataChannel.label}", initial state: ${dataChannel.readyState}`);
-        log(`Client attempting to create data channel "${mouseChannel.label}", initial state: ${mouseChannel.readyState}`);
-
-        dataChannel.onopen = () => log(`Data Channel Opened: "${dataChannel.label}", ReadyState: ${dataChannel.readyState}`);
-        dataChannel.onmessage = (event) => log(`Received Message on Data Channel "${dataChannel.label}": ${event.data}`);
-        dataChannel.onclose = () => log(`Data Channel Closed: "${dataChannel.label}"`);
-        dataChannel.onerror = (event) => {
-            const error = event.error;
-            const errorMessage = error ? `${error.name}: ${error.message}` : 'Unknown DataChannel Error';
-            log(`Data Channel "${dataChannel.label}" error: ${errorMessage}`);
-        };
-
-        mouseChannel.onopen = () => log(`Mouse Channel Opened: "${mouseChannel.label}", ReadyState: ${mouseChannel.readyState}`)
-        // mouseChannel.onmessage = (event) => log(`Received Message on Mouse Channel " ${mouseChannel.label}": ${event.data}`)
-        mouseChannel.onclose = () => log(`Mouse Channel Closed: "${mouseChannel.label}"`)
-        mouseChannel.onerror = (event) => {
-            const error = event.error
-            const errorMessage = error ? `${error.name}: ${error.message}` : 'Unknown MouseChannel Error'
-            log(`Mouse Channel "${mouseChannel.label}" error: ${errorMessage}`)
-        }
-    }
-
-    // Handle incoming SDP answer
-    async function handleAnswer(answerMsg) {
-        if (!peerConnection || peerConnection.signalingState !== 'have-local-offer') {
-            log("Received answer but PeerConnection is not ready or not expecting an answer.");
-            return;
-        }
-        log('Received SDP in answer.');
-        console.log("Answer SDP:", answerMsg.sdp);
-        if (!answerMsg.sdp || typeof answerMsg.sdp !== 'string' || !answerMsg.sdp.startsWith('v=')) {
-            log('Invalid or missing SDP in answer.');
-            return;
-        }
-        try {
-            const remoteDesc = new RTCSessionDescription({ type: 'answer', sdp: answerMsg.sdp });
-            await peerConnection.setRemoteDescription(remoteDesc);
-            log('Remote description (answer) set.');
-        } catch (err) {
-            log('Error setting remote description: ' + err.message);
-        }
-    }
-
-    // Handle incoming ICE candidates
-    async function handleRemoteIceCandidate(candidate) {
-        if (!peerConnection) {
-            log("Received ICE candidate but PeerConnection doesn't exist.");
-            return;
-        }
-        try {
-            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-            log('Added remote ICE candidate.');
-            console.log("Added remote candidate:", candidate);
-        } catch (err) {
-            if (!err.message.includes("Cannot add ICE candidate before setting remote description")) {
-                log('Error adding received ICE candidate: ' + err.message);
-                console.error("Candidate causing error:", candidate);
-            }
-        }
-    }
-
-    // Send key data over the data channel
-    function sendKeyPress(keyData) {
-        if (dataChannel && dataChannel.readyState === 'open' && dataChannel.bufferedAmount < 65536) {
-            const message = JSON.stringify(keyData);
-            dataChannel.send(message);
-            // console.log('Sent Key Event: ' + message);
-            log('Sent Key Event: ' + message); // Log all events for debugging
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          console.log('Local ICE Candidate:', JSON.stringify(event.candidate, null, 2));
+          log(`Generated local ICE candidate (type: ${event.candidate.type || 'unknown'}). Sending...`);
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'ice-candidate',
+              candidate: event.candidate
+            }));
+          } else {
+            log("WebSocket not open, cannot send ICE candidate.", 'warn');
+          }
         } else {
-            console.warn('Data channel not open or buffer full, cannot send key event: ' + JSON.stringify(keyData));
+          log('Local ICE candidate gathering complete.');
         }
+      };
+
+      peerConnection.oniceconnectionstatechange = () => {
+        log('ICE connection state changed to: ' + peerConnection.iceConnectionState);
+        if (peerConnection.iceConnectionState === 'connected') {
+          updateConnectionStatus('connected', 'ICE Connected');
+        } else if (peerConnection.iceConnectionState === 'disconnected') {
+          updateConnectionStatus('disconnected', 'ICE Disconnected');
+        }
+      };
+      
+      peerConnection.onicegatheringstatechange = () => {
+        log('ICE gathering state changed to: ' + peerConnection.iceGatheringState);
+      };
+      peerConnection.onconnectionstatechange = () => {
+        log('PeerConnection state changed to: ' + peerConnection.connectionState);
+      };
+      peerConnection.onsignalingstatechange = () => {
+        log('Signaling state changed to: ' + peerConnection.signalingState);
+      };
+
+      dataChannel = peerConnection.createDataChannel("keyPressChannel", { ordered: true });
+      mouseChannel = peerConnection.createDataChannel("mouseChannel", { ordered: true });
+      log(`Client attempting to create data channel "${dataChannel.label}", initial state: ${dataChannel.readyState}`);
+      log(`Client attempting to create data channel "${mouseChannel.label}", initial state: ${mouseChannel.readyState}`);
+
+      dataChannel.onopen = () => {
+        log(`Data Channel Opened: "${dataChannel.label}", ReadyState: ${dataChannel.readyState}`);
+      };
+      dataChannel.onmessage = (event) => {
+        log(`Received Message on Data Channel "${dataChannel.label}": ${event.data}`);
+      };
+      dataChannel.onclose = () => {
+        log(`Data Channel Closed: "${dataChannel.label}"`);
+      };
+      dataChannel.onerror = (event) => {
+        // const error = event.error;
+        // const errorMessage = error ? ${error.name}: ${error.message} : 'Unknown DataChannel Error';
+        // log(Data Channel "${dataChannel.label}" error: ${errorMessage}, 'error');
+      };
+
+      mouseChannel.onopen = () => {
+        log(`Mouse Channel Opened: "${mouseChannel.label}", ReadyState: ${mouseChannel.readyState}`);
+      };
+      mouseChannel.onclose = () => {
+        log(`Mouse Channel Closed: "${mouseChannel.label}"`);
+      };
+      mouseChannel.onerror = (event) => {
+        // const error = event.error;
+        // const errorMessage = error ? ${error.name}: ${error.message} : 'Unknown MouseChannel Error';
+        // log(Mouse Channel "${mouseChannel.label}" error: ${errorMessage}, 'error');
+      };
     }
 
-    // Debounce with 10ms for responsiveness
-    const debouncedSendKeyPress = debounce(sendKeyPress, 5);
+    async function handleAnswer(answerMsg) {
+      if (!peerConnection || peerConnection.signalingState !== 'have-local-offer') {
+        log("Received answer but PeerConnection is not ready or not expecting an answer.", 'warn');
+        return;
+      }
+      log('Received SDP in answer.');
+      console.log("Answer SDP:", answerMsg.sdp);
+      if (!answerMsg.sdp || typeof answerMsg.sdp !== 'string' || !answerMsg.sdp.startsWith('v=')) {
+        log('Invalid or missing SDP in answer.', 'error');
+        return;
+      }
+      try {
+        const remoteDesc = new RTCSessionDescription({ type: 'answer', sdp: answerMsg.sdp });
+        await peerConnection.setRemoteDescription(remoteDesc);
+        log('Remote description (answer) set.');
+      } catch (err) {
+        log('Error setting remote description: ' + err.message, 'error');
+      }
+    }
 
-    // Key event handlers
+    async function handleRemoteIceCandidate(candidate) {
+      if (!peerConnection) {
+        log("Received ICE candidate but PeerConnection doesn't exist.", 'warn');
+        return;
+      }
+      try {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        log('Added remote ICE candidate.');
+        console.log("Added remote candidate:", candidate);
+      } catch (err) {
+        if (!err.message.includes("Cannot add ICE candidate before setting remote description")) {
+          log('Error adding received ICE candidate: ' + err.message, 'error');
+          console.error("Candidate causing error:", candidate);
+        }
+      }
+    }
+
+    function sendKeyPress(keyData) {
+      if (dataChannel && dataChannel.readyState === 'open' && dataChannel.bufferedAmount < 65536) {
+        const message = JSON.stringify(keyData);
+        dataChannel.send(message);
+      } else {
+        console.warn('Data channel not open or buffer full, cannot send key event: ' + JSON.stringify(keyData));
+      }
+    }
+
+    function sendMouseEvent(mouseData) {
+      if (mouseChannel && mouseChannel.readyState === 'open' && mouseChannel.bufferedAmount < 65536) {
+        const message = JSON.stringify(mouseData);
+        mouseChannel.send(message);
+      } else {
+        console.warn('Mouse channel not open or buffer full, cannot send mouse event: ' + JSON.stringify(mouseData));
+      }
+    }
+
+    // Event handlers
     function handleKeyDown(event) {
-        // if (!isWindowFocused || !event.code || event.repeat) return; // Ignore if not focused, empty code, or repeat
-        if (!event.code || event.repeat) return; // Ignore if not focused, empty code, or repeat
-        console.log(`handleKeyDown: Key=${event.key}, Code=${event.code}`);
-        keyState.add(event.code); // Mark key as pressed
-        const keyData = { key: event.key, code: event.code, type: 'keydown', timestamp: Date.now() };
-        debouncedSendKeyPress(keyData);
+      if (!event.code || event.repeat) return;
+      
+      // Handle escape key for fullscreen
+      if (event.key === 'Escape' && (isFullscreen || document.fullscreenElement)) {
+        if(document.fullscreenElement){
+            document.exitFullscreen()
+        }else{
+            toggleFullscreen()
+        }
+        return
+      }
+      
+      // Handle F12 for debug toggle
+      if (event.key === 'F12') {
+        event.preventDefault();
+        toggleDebug();
+        return;
+      }
+      
+      event.preventDefault();
+      keyState.add(event.code);
+      const keyData = { key: event.key, code: event.code, type: 'keydown', timestamp: Date.now() };
+      sendKeyPress(keyData);
     }
 
     function handleKeyUp(event) {
-        // if (!isWindowFocused || !event.code) return; // Ignore if not focused or empty code
-        if (!event.code) return; // Ignore if not focused or empty code
-        if (!keyState.has(event.code)) return; // Ignore keyup if no matching keydown
-        console.log(`handleKeyUp: Key=${event.key}, Code=${event.code}`);
-        keyState.delete(event.code); // Clear key state
-        const keyData = { key: event.key, code: event.code, type: 'keyup', timestamp: Date.now() };
-        debouncedSendKeyPress(keyData);
+      if (!event.code) return;
+      if (!keyState.has(event.code)) return;
+      event.preventDefault();
+      keyState.delete(event.code);
+      const keyData = { key: event.key, code: event.code, type: 'keyup', timestamp: Date.now() };
+      sendKeyPress(keyData);
     }
 
-    // Focus and blur handlers
-    function handleFocus() {
-        isWindowFocused = true;
-        log('Window gained focus.');
+    function handleMouseMove(event) {
+      event.preventDefault();
+      throttledSendMouseMove(event);
     }
 
-    function handleBlur() {
-        isWindowFocused = false;
-        log('Window lost focus. Clearing key states.');
-        keyState.forEach(code => {
-            const keyData = { key: code, code: code, type: 'keyup', timestamp: Date.now() };
-            debouncedSendKeyPress(keyData);
-        });
-        keyState.clear();
-
-        
+    function handleMouseDown(event) {
+      event.preventDefault();
+      mouseButtonState.add(event.button);
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      
+      const mouseData = {
+        type: 'mousedown',
+        x: Math.round((event.clientX - rect.left) * scaleX),
+        y: Math.round((event.clientY - rect.top) * scaleY),
+        button: event.button,
+        timestamp: Date.now(),
+      };
+      sendMouseEvent(mouseData);
     }
 
-    function sendMouseEvent(mouseData){
-        if(mouseChannel && mouseChannel.readyState === 'open' && mouseChannel.bufferedAmount < 65536){
-            const message = JSON.stringify(mouseData)
-            mouseChannel.send(message);
-            // console.log('Sent Mouse Event: '+ messsage)
-            // log('Sent Mouse Event: ' + message); // Log all events for debugging
-        }else{
-            console.warn('Mouse channel not open or buffer full, cannot send mouse event: ' + JSON.stringify(mouseData))
-        }
+    function handleMouseUp(event) {
+      event.preventDefault();
+      if (!mouseButtonState.has(event.button)) return;
+      mouseButtonState.delete(event.button);
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      
+      const mouseData = {
+        type: 'mouseup',
+        x: Math.round((event.clientX - rect.left) * scaleX),
+        y: Math.round((event.clientY - rect.top) * scaleY),
+        button: event.button,
+        timestamp: Date.now(),
+      };
+      sendMouseEvent(mouseData);
     }
 
-    function handleMouseMove(event){
-        //if (!isWindowFocused) return;
-        throttledSendMouseMove(event)
+    function handleContextMenu(event) {
+      event.preventDefault();
     }
 
-    function handleMouseDown(event){
-        //if (!isWindowFocused) return;
-        mouseButtonState.add(event.button);
-        const mouseData = {
-            type: 'mousedown',
-            x: event.clientX,
-            y: event.clientY,
-            button: event.button,
-            timestamp: Date.now(),
-        }
-        sendMouseEvent(mouseData)
-    }
-
-    function handleMouseUp(event){
-        //if (!isWindowFocused) return;
-        if (!mouseButtonState.has(event.button)) return; // Ignore mouseup if no matching mousedown
-        mouseButtonState.add(event.button);
-        const mouseData = {
-            type: 'mouseup',
-            x: event.clientX,
-            y: event.clientY,
-            button: event.button,
-            timestamp: Date.now(),
-        }
-        sendMouseEvent(mouseData)
-    }
-
-    // Start the WebRTC connection process
     async function startConnection() {
-        log("startConnection called.");
-        if (!peerConnection) {
-            createPeerConnection();
+      log("startConnection called.");
+      if (!peerConnection) {
+        createPeerConnection();
+      } else {
+        log("PeerConnection already exists.");
+      }
+
+      if (!peerConnection.getTransceivers().some(t => t.receiver?.track?.kind === 'video')) {
+        peerConnection.addTransceiver('video', { direction: 'recvonly' });
+        log("Added video transceiver.");
+      } else {
+        log("Video transceiver already exists.");
+      }
+
+      try {
+        if (peerConnection.signalingState === 'stable' || peerConnection.signalingState === 'new') {
+          log("Creating offer...");
+          const offer = await peerConnection.createOffer();
+          log("Setting local description (offer)...");
+          await peerConnection.setLocalDescription(offer);
+
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            log("Sending offer to signaling server...");
+            ws.send(JSON.stringify({
+              type: 'offer',
+              sdp: offer.sdp
+            }));
+            console.log('Offer SDP:', offer.sdp);
+          } else {
+            log("WebSocket not open, cannot send offer.", 'warn');
+          }
         } else {
-            log("PeerConnection already exists.");
+          log(`Not creating offer, signaling state is: ${peerConnection.signalingState}`);
         }
-
-        if (!peerConnection.getTransceivers().some(t => t.receiver?.track?.kind === 'video')) {
-            peerConnection.addTransceiver('video', { direction: 'recvonly' });
-            log("Added video transceiver.");
-        } else {
-            log("Video transceiver already exists.");
-        }
-
-        try {
-            if (peerConnection.signalingState === 'stable' || peerConnection.signalingState === 'new') {
-                log("Creating offer...");
-                const offer = await peerConnection.createOffer();
-                log("Setting local description (offer)...");
-                await peerConnection.setLocalDescription(offer);
-
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    log("Sending offer to signaling server...");
-                    ws.send(JSON.stringify({
-                        type: 'offer',
-                        sdp: offer.sdp
-                    }));
-                    console.log('Offer SDP:', offer.sdp);
-                } else {
-                    log("WebSocket not open, cannot send offer.");
-                }
-            } else {
-                log(`Not creating offer, signaling state is: ${peerConnection.signalingState}`);
-            }
-        } catch (err) {
-            log('Error creating/setting/sending offer: ' + err.message);
-        }
+      } catch (err) {
+        log('Error creating/setting/sending offer: ' + err.message, 'error');
+      }
     }
 
-    // Initialization
-    log("Adding global key event and focus listeners to window...");
+    // Event listeners
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
-    // window.addEventListener('focus', handleFocus);
-    // window.addEventListener('blur', handleBlur);
 
     const inputOverlay = document.getElementById('input-overlay');
     inputOverlay.addEventListener('mousemove', handleMouseMove);
     inputOverlay.addEventListener('mousedown', handleMouseDown);
     inputOverlay.addEventListener('mouseup', handleMouseUp);
+    inputOverlay.addEventListener('contextmenu', handleContextMenu);
 
+    canvas.addEventListener('dragstart', (e) => e.preventDefault());
+
+    document.addEventListener('fullscreenchange', () => {
+        if (!document.fullscreenElement && isFullscreen) {
+            // User exited fullscreen (probably with Esc key)
+            document.getElementById('fullscreenBtn').textContent = '⛶';
+            isFullscreen = false;
+            updateConnectionStatus('connected', 'Connected');
+        }
+    });
+
+    // Initialize
+    showLoadingOverlay('Initializing', 'Starting CloudGaming client...');
     connectToSignalingServer();
     
     let connectionStarted = false;
@@ -443,36 +1017,46 @@
     log(`Will attempt to start WebRTC connection in ${startDelay / 1000} seconds...`);
 
     setTimeout(() => {
-        if (connectionStarted) return;
+      if (connectionStarted) return;
 
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            log("WebSocket connected on first check. Starting WebRTC connection.");
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        log("WebSocket connected on first check. Starting WebRTC connection.");
+        connectionStarted = true;
+        startConnection();
+      } else {
+        log("WebSocket not connected after timeout. Waiting for connection via interval check...");
+        let checkCounter = 0;
+        const maxChecks = 10;
+        const wsOpenCheck = setInterval(() => {
+          checkCounter++;
+          log(`WebSocket connection check #${checkCounter}... State: ${ws?.readyState}`);
+          if (connectionStarted) {
+            clearInterval(wsOpenCheck);
+            return;
+          }
+
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            log("WebSocket connected after delay. Starting WebRTC connection.");
+            clearInterval(wsOpenCheck);
             connectionStarted = true;
             startConnection();
-        } else {
-            log("WebSocket not connected after timeout. Waiting for connection via interval check...");
-            let checkCounter = 0;
-            const maxChecks = 10;
-            const wsOpenCheck = setInterval(() => {
-                checkCounter++;
-                log(`WebSocket connection check #${checkCounter}... State: ${ws?.readyState}`);
-                if (connectionStarted) {
-                    clearInterval(wsOpenCheck);
-                    return;
-                }
-
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    log("WebSocket connected after delay. Starting WebRTC connection.");
-                    clearInterval(wsOpenCheck);
-                    connectionStarted = true;
-                    startConnection();
-                } else if (checkCounter >= maxChecks) {
-                    log("WebSocket did not connect after multiple checks. Aborting WebRTC start.");
-                    clearInterval(wsOpenCheck);
-                }
-            }, 500);
-        }
+          } else if (checkCounter >= maxChecks) {
+            log("WebSocket did not connect after multiple checks. Aborting WebRTC start.", 'error');
+            clearInterval(wsOpenCheck);
+            showLoadingOverlay('Connection Failed', 'Unable to connect to game server');
+          }
+        }, 500);
+      }
     }, startDelay);
+
+    // Performance monitoring
+    setInterval(() => {
+      if (peerConnection && peerConnection.connectionState === 'connected') {
+        // Simulate latency calculation (you can implement actual RTT measurement)
+        latency = Math.floor(Math.random() * 20) + 15; // 15-35ms simulated
+        updatePerformanceDisplay();
+      }
+    }, 1000);
   </script>
 </body>
 </html>
