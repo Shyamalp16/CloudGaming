@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <fstream>
 #include <chrono>
+#include "PacketQueue.h"
 
 SwsContext* Encoder::swsCtx = nullptr;
 AVFrame* Encoder::nv12Frame = nullptr;
@@ -35,6 +36,8 @@ std::vector<uint8_t> Encoder::g_latestFrameData;
 int64_t Encoder::g_latestPTS = 0;
 bool Encoder::g_frameReady = false;
 
+static bool g_shutdown = false;
+
 static std::chrono::steady_clock::time_point encoderStartTime;
 static bool isFirstFrame = true;
 
@@ -43,20 +46,28 @@ namespace Encoder {
         g_onEncodedFrameCallback = callback;
     }
 
+    void SignalEncoderShutdown() {
+        std::lock_guard<std::mutex> lock(g_frameMutex);
+        g_shutdown = true;
+        g_frameAvailable.notify_all(); // Wake up any waiting threads
+    }
+
     bool getEncodedFrame(std::vector<uint8_t>& frameData, int64_t& pts) {
         std::unique_lock<std::mutex> lock(g_frameMutex);
-        if (!g_frameReady) {
-            g_frameAvailable.wait(lock, [] { return g_frameReady; });
+        if (g_frameAvailable.wait_for(lock, std::chrono::milliseconds(100), [] { return g_frameReady || g_shutdown; })) {
+            if (g_shutdown) {
+                return false; // Exit if shutdown is signaled
+            }
+
+            if (g_latestFrameData.empty()) {
+                return false;
+            }
+            frameData = g_latestFrameData;
+            pts = g_latestPTS;
+            g_frameReady = false;
+            return true;
         }
-        if (g_latestFrameData.empty()) {
-            return false;
-        }
-        frameData = g_latestFrameData;
-        pts = g_latestPTS;
-        g_frameReady = false;
-        lock.unlock();
-        g_frameAvailable.notify_one();
-        return true;
+        return false; // Timeout
     }
 
     void logNALUnits(const uint8_t* data, int size) {
@@ -390,7 +401,11 @@ namespace Encoder {
                     g_onEncodedFrameCallback(packet);
                 }
                 else {
-                    pushPacketToWebRTC(packet);
+                    // Instead of directly pushing to WebRTC, push to the thread-safe queue
+                    Packet p;
+                    p.data.assign(packet->data, packet->data + packet->size);
+                    p.pts = packet->pts;
+                    g_packetQueue.push(p);
                 }
 
                 av_packet_unref(packet);

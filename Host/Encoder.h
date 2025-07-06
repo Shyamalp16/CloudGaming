@@ -38,6 +38,8 @@ namespace Encoder {
 
     void FlushEncoder();
 
+    void SignalEncoderShutdown();
+
     // External declaration for WebRTC interaction
     extern "C" int sendVideoPacket(uint8_t* data, int size, int64_t pts);
 

@@ -23,3 +23,4 @@
 using json = nlohmann::json;
 void send_message(const json& message);
 void initWebsocket();
+void stopWebsocket();

@@ -9,6 +9,8 @@
 #include "CaptureHelpers.h"
 #include "FrameCaptureThread.h"
 #include "Websocket.h"
+#include "AudioCapturer.h"
+#include "ShutdownManager.h"
 
 int main()
 {
@@ -93,16 +95,18 @@ int main()
 	//Start worker threads to process frames
     StartCapture();
     initWebsocket();
+    AudioCapturer audioCapturer;
+    audioCapturer.StartCapture(L"D:\\output.wav");
     std::wcout << L"[main] Capture started!\n";
 
     // Keep the app alive for 10 seconds to see frame events
-    /*for (int i = 0; i < 10; i++)
+    for (int i = 0; i < 10; i++)
     {
         Sleep(1000);
         std::wcout << L"[main] Still capturing...\n";
-    } */
+    } 
 
-    std::wcout << L"[main] Press '0' to stop capturing";
+    /*std::wcout << L"[main] Press '0' to stop capturing";
     while (true) {
         if (_kbhit()) {
 			char key = _getch();
@@ -112,8 +116,10 @@ int main()
         }
         Sleep(100);
 		std::wcout << L"[main] Still capturing...\n";
-    }
+    }*/
     std::wcout << L"[main] Stopping capture...\n";
+    audioCapturer.StopCapture();
+    stopWebsocket();
     StopCapture(token, framePool);
     //framePool.Close();
     session.Close();
@@ -126,8 +132,6 @@ int main()
 		std::wcout << L"[main] HWND = " << w.hwnd << L"\n Title = " << w.title << L"\n Process = " << w.processName << L".\n";
     }*/
 
-	std::wcout << L"[main] Press any key...\n";
-    std::wstring dummy;
-	std::getline(std::wcin, dummy);
+	
     return 0;
 }

@@ -57,7 +57,13 @@
     <ClInclude Include="Host\MouseInputHandler.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Host\AudioHelper.h">
+    <ClInclude Include="Host\AudioCapturer.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Host\ShutdownManager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Host\PacketQueue.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
@@ -101,7 +107,13 @@
     <ClCompile Include="Host\MouseInputHandler.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Host\AudioHelper.cpp">
+    <ClCompile Include="Host\AudioCapturer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\ShutdownManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\PacketQueue.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

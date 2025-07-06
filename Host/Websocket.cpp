@@ -2,50 +2,52 @@
 #include "Encoder.h"
 #include "KeyInputHandler.h"
 #include "MouseInputHandler.h"
+#include "ShutdownManager.h"
+#include "PacketQueue.h"
 
 typedef websocketpp::client<websocketpp::config::asio_client> client;
 using json = nlohmann::json;
 
 client wsClient;
 websocketpp::connection_hdl g_connectionHandle;
-//std::string uri = "ws://10.0.0.134:3000";
 std::string uri = "ws://localhost:3000";
+std::thread g_websocket_thread;
+std::thread g_frame_thread;
+std::thread g_sender_thread;
 
 void on_open(client* c, websocketpp::connection_hdl hdl);
 void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg);
 void send_message(const json& message);
 
+void senderThread() {
+    while (!g_shutdown_flag) {
+        Packet packet;
+        if (g_packetQueue.pop(packet)) {
+            if (getIceConnectionState() >= 0) {
+                if (!packet.data.empty() && packet.data.data() != nullptr) {
+                    int result = sendVideoPacket(packet.data.data(), static_cast<int>(packet.data.size()), packet.pts);
+                    if (result != 0) {
+                        std::cerr << "[SenderThread] Failed to send video packet: " << result << std::endl;
+                    }
+                    else {
+                        std::cout << "[SenderThread] Sent video packet successfully (PTS: " << packet.pts << ")" << std::endl;
+                    }
+                }
+            }
+        }
+    }
+}
+
 void sendFrames() {
-    while (true) {
+    while (!g_shutdown_flag) {
         std::vector<uint8_t> frameData;
         int64_t pts = 0;
 
-        // getEncodedFrame will block until a frame is ready due to condition variable
         if (Encoder::getEncodedFrame(frameData, pts)) {
-            // Check if PeerConnection is initialized
-            // Note: getIceConnectionState() might not be the best check,
-            // maybe check peerConnection.ConnectionState() == webrtc.PeerConnectionStateConnected in Go?
-            // For now, assuming getIceConnectionState >= 0 means ready enough.
-            if (getIceConnectionState() >= 0) { 
-                if (!frameData.empty() && frameData.data() != nullptr) {
-                    // Pass data pointer and size directly
-                    int result = sendVideoPacket(frameData.data(), static_cast<int>(frameData.size()), pts);
-                    if (result != 0) {
-                        std::cerr << "[WebSocket] Failed to send video packet: " << result << std::endl;
-                    }
-                    else {
-                         std::cout << "[WebSocket] Sent video packet successfully (PTS: " << pts << ")" << std::endl;
-                    }
-                }
-                else {
-                    std::cerr << "[WebSocket] Invalid frame data buffer retrieved" << std::endl;
-                }
-            }
-            else {
-                 std::cout << "[WebSocket] Waiting for PeerConnection to initialize..." << std::endl;
-                 //Avoid busy-waiting if PC is not ready, sleep a bit longer
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
+            Packet packet;
+            packet.data = frameData;
+            packet.pts = pts;
+            g_packetQueue.push(packet);
         }
     }
 }
@@ -144,7 +146,7 @@ void initWebsocket() {
     wsClient.connect(con);
     std::wcout << L"[WebSocket] Connection made\n";
 
-    std::thread t([&]() {
+    g_websocket_thread = std::thread([&]() {
         try {
             wsClient.run();
         }
@@ -152,9 +154,59 @@ void initWebsocket() {
             std::cerr << "[WebSocket] run() Threw Exception: " << ex.what() << std::endl;
         }
         });
-    t.detach();
-    std::wcout << L"[WebSocket] Websocket started in a separate thread\n";
 
-    std::thread frameThread(&sendFrames);
-    frameThread.detach();
+    g_frame_thread = std::thread(&sendFrames);
+    g_sender_thread = std::thread(&senderThread);
+}
+
+void stopWebsocket() {
+    std::wcout << L"[Shutdown] Initiating websocket shutdown...\n";
+    g_shutdown_flag = true;
+    Encoder::SignalEncoderShutdown();
+    g_packetQueue.shutdown();
+
+    std::wcout << L"[Shutdown] Stopping websocket client...\n";
+    wsClient.stop();
+    wsClient.get_io_service().stop();
+
+    std::wcout << L"[Shutdown] Joining websocket thread...\n";
+    if (g_websocket_thread.joinable()) {
+        g_websocket_thread.join();
+    }
+    std::wcout << L"[Shutdown] Websocket thread joined.\n";
+
+    std::wcout << L"[Shutdown] Joining frame thread...\n";
+    if (g_frame_thread.joinable()) {
+        g_frame_thread.join();
+    }
+    std::wcout << L"[Shutdown] Frame thread joined.\n";
+
+    std::wcout << L"[Shutdown] Joining sender thread...\n";
+    if (g_sender_thread.joinable()) {
+        g_sender_thread.join();
+    }
+    std::wcout << L"[Shutdown] Sender thread joined.\n";
+
+    std::wcout << L"[Shutdown] Websocket shutdown complete.\n";
+}
+
+// Callback from Go to send ICE candidates
+extern "C" void onIceCandidate(const char* candidate) {
+    json iceMsg;
+    iceMsg["type"] = "ice-candidate";
+    iceMsg["candidate"] = std::string(candidate);
+    send_message(iceMsg);
+    std::cout << "[WebSocket] Sent ICE candidate: " << iceMsg.dump() << std::endl;
+}
+
+extern "C" char* getDataChannelMessage() {
+    // This function is called from Go to get a message from the data channel
+    // For now, it's just a placeholder
+    return nullptr;
+}
+
+extern "C" char* getMouseChannelMessage() {
+    // This function is called from Go to get a message from the data channel
+    // For now, it's just a placeholder
+    return nullptr;
 }
