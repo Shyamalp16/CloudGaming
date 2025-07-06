@@ -111,6 +111,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="Host\AudioHelper.h" />
     <ClInclude Include="Host\CaptureHelpers.h" />
     <ClInclude Include="Host\D3DHelpers.h" />
     <ClInclude Include="Host\Encoder.h" />
@@ -127,6 +128,7 @@
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Host\AudioHelper.cpp" />
     <ClCompile Include="Host\CaptureHelpers.cpp" />
     <ClCompile Include="Host\D3DHelpers.cpp" />
     <ClCompile Include="Host\Encoder.cpp" />
