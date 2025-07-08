@@ -522,6 +522,7 @@
     let dataChannel;
     let mouseChannel;
     let latencyChannel;
+    let videoFeedbackChannel;
     let animationId;
     let isFullscreen = false;
     let debugVisible = false;
@@ -931,6 +932,7 @@
                   const rtt = clientReceiveTime - originalPingTimestamp;
                   latency = Math.round(rtt); // Update global latency variable
                   log(`Client received pong ${message.sequence_number}. RTT: ${rtt.toFixed(2)} ms`);
+                  updatePerformanceDisplay(); // Update UI with new latency
                   sentPings.delete(message.sequence_number); // Clean up
               } else {
                   log(`Received pong for unknown sequence number: ${message.sequence_number}`, 'warn');
@@ -949,6 +951,42 @@
           // const error = event.error;
           // const errorMessage = error ? ${error.name}: ${error.message} : 'Unknown LatencyChannel Error';
           // log(Latency Channel "${latencyChannel.label}" error: ${errorMessage}, 'error');
+      };
+
+      videoFeedbackChannel = peerConnection.createDataChannel("videoFeedbackChannel", { ordered: true });
+      log(`Client attempting to create data channel "${videoFeedbackChannel.label}", initial state: ${videoFeedbackChannel.readyState}`);
+
+      videoFeedbackChannel.onopen = () => {
+          log(`Video Feedback Channel Opened: "${videoFeedbackChannel.label}", ReadyState: ${videoFeedbackChannel.readyState}`);
+      };
+
+      videoFeedbackChannel.onmessage = (event) => {
+          const message = JSON.parse(event.data);
+          if (message.type === "video_frame_ping") {
+              const clientReceiveTime = performance.now();
+              const pongMessage = {
+                  type: "video_frame_pong",
+                  frame_id: message.frame_id,
+                  host_send_time: message.host_send_time,
+                  client_receive_time: clientReceiveTime
+              };
+              videoFeedbackChannel.send(JSON.stringify(pongMessage));
+              const rtt = clientReceiveTime - message.host_send_time;
+              log(`Client received video_frame_ping for frame ${message.frame_id}. RTT: ${rtt.toFixed(2)} ms`);
+          }
+      };
+
+      videoFeedbackChannel.onclose = () => {
+          if (videoFeedbackChannel) {
+              log(`Video Feedback Channel Closed: "${videoFeedbackChannel.label}"`);
+          } else {
+              log(`Video Feedback Channel Closed (channel object was null).`);
+          }
+      };
+      videoFeedbackChannel.onerror = (event) => {
+          // const error = event.error;
+          // const errorMessage = error ? ${error.name}: ${error.message} : 'Unknown VideoFeedbackChannel Error';
+          // log(Video Feedback Channel "${videoFeedbackChannel.label}" error: ${errorMessage}, 'error');
       };
     }
 
@@ -1190,14 +1228,7 @@
     //   }
     // }, startDelay);
 
-    // Performance monitoring
-    setInterval(() => {
-      if (peerConnection && peerConnection.connectionState === 'connected') {
-        // Simulate latency calculation (you can implement actual RTT measurement)
-        latency = Math.floor(Math.random() * 20) + 15; // 15-35ms simulated
-        updatePerformanceDisplay();
-      }
-    }, 1000);
+    
   </script>
 </body>
 </html>

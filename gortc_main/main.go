@@ -7,8 +7,8 @@ package main
 */
 import "C"
 import (
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math/rand"
 	"sync"
@@ -28,12 +28,16 @@ var (
 	lastAnswerSDP         string // Store answer SDP for C++ retrieval
 	currentSequenceNumber uint16
 	currentTimestamp      uint32
+	videoFrameCounter     uint64 // New: for unique frame IDs
 	dataChannel           *webrtc.DataChannel
 	messageQueue          []string
 	mouseQueue            []string
 	queueMutex            sync.Mutex
 	mouseChannel          *webrtc.DataChannel
 	latencyChannel        *webrtc.DataChannel
+	videoFeedbackChannel  *webrtc.DataChannel
+	pingTimestamps        map[uint64]float64 // Stores host_send_time for video_frame_ping
+	pingTimestampsMutex   sync.Mutex         // Mutex for pingTimestamps
 )
 
 func init() {
@@ -44,13 +48,13 @@ func enqueueMessage(msg string) {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
 	log.Printf(
-		"[Go/Pion] --> Enqueueing message: '%s'. Queue size BEFORE: %d\n",
+		"[Go/Pion] --> Enqueueing message: '%s'. Queue size BEFORE: %d",
 		msg,
 		len(messageQueue),
 	)
 	messageQueue = append(messageQueue, msg)
 	log.Printf(
-		"[Go/Pion] --> Enqueued message: '%s'. Queue size AFTER: %d\n",
+		"[Go/Pion] --> Enqueued message: '%s'. Queue size AFTER: %d",
 		msg,
 		len(messageQueue),
 	)
@@ -60,13 +64,13 @@ func enqueueMouseEvent(msg string) {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
 	log.Printf(
-		"[Go/Pion] --> Enqueueing message: '%s'. Queue size BEFORE: %d\n",
+		"[Go/Pion] --> Enqueueing message: '%s'. Queue size BEFORE: %d",
 		msg,
 		len(mouseQueue),
 	)
 	mouseQueue = append(mouseQueue, msg)
 	log.Printf(
-		"[Go/Pion] --> Enqueued message: '%s'. Queue size AFTER: %d\n",
+		"[Go/Pion] --> Enqueued message: '%s'. Queue size AFTER: %d",
 		msg,
 		len(mouseQueue),
 	)
@@ -82,7 +86,7 @@ func getDataChannelMessage() *C.char {
 	msg := messageQueue[0]
 	messageQueue = messageQueue[1:]
 	log.Printf(
-		"[Go/Pion] <-- getDataChannelMessage: Dequeued: '%s'. Queue size AFTER: %d\n",
+		"[Go/Pion] <-- getDataChannelMessage: Dequeued: '%s'. Queue size AFTER: %d",
 		msg,
 		len(messageQueue),
 	)
@@ -99,7 +103,7 @@ func getMouseChannelMessage() *C.char {
 	msg := mouseQueue[0]
 	mouseQueue = mouseQueue[1:]
 	log.Printf(
-		"[Go/Pion] <-- getMouseChannelMessage: Dequeued: '%s'. Queue size AFTER: %d\n",
+		"[Go/Pion] <-- getMouseChannelMessage: Dequeued: '%s'. Queue size AFTER: %d",
 		msg,
 		len(mouseQueue),
 	)
@@ -143,6 +147,7 @@ func createPeerConnectionGo() C.int {
 		messageQueue = []string{}
 		mouseQueue = []string{}
 		lastAnswerSDP = ""
+		pingTimestamps = make(map[uint64]float64) // Initialize/clear the map
 		log.Println(
 			"[Go/Pion] createPeerConnectionGo: Closed previous PeerConnection and reset state.",
 		)
@@ -304,213 +309,304 @@ func createPeerConnectionGo() C.int {
 				)
 			})
 			log.Printf(
-                "[Go/Pion] OnDataChannel: All handlers (OnOpen, OnMessage, OnClose, OnError) attached for DC '%s'.\n",
-                actualLabel,
-            )
+				"[Go/Pion] OnDataChannel: All handlers (OnOpen, OnMessage, OnClose, OnError) attached for DC '%s'.\n",
+				actualLabel,
+			)
 
-        } else if actualLabel == "mouseChannel" {
-            log.Printf(
-                "[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global mouseChannel and attaching handlers.\n",
-                actualLabel,
-            )
-            // --- DEADLOCK FIX: REMOVED pcMutex.Lock() HERE ---
-            if mouseChannel != nil && mouseChannel != dc {
-                log.Printf(
-                    "[Go/Pion] OnDataChannel: Closing previous global mouse channel '%s' (ID: %s) before assigning new one.\n",
-                    mouseChannel.Label(),
-                    fmt.Sprintf("%d", *mouseChannel.ID()),
-                )
-                if errClose := mouseChannel.Close(); errClose != nil {
-                    log.Printf(
-                        "[Go/Pion] OnDataChannel: Error closing previous global mouseChannel: %v\n",
-                        errClose,
-                    )
-                }
-            }
-            mouseChannel = dc
-            // --- DEADLOCK FIX: REMOVED pcMutex.Unlock() HERE ---
+		} else if actualLabel == "mouseChannel" {
+			log.Printf(
+				"[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global mouseChannel and attaching handlers.\n",
+				actualLabel,
+			)
+			// --- DEADLOCK FIX: REMOVED pcMutex.Lock() HERE ---
+			if mouseChannel != nil && mouseChannel != dc {
+				log.Printf(
+					"[Go/Pion] OnDataChannel: Closing previous global mouse channel '%s' (ID: %s) before assigning new one.\n",
+					mouseChannel.Label(),
+					fmt.Sprintf("%d", *mouseChannel.ID()),
+				)
+				if errClose := mouseChannel.Close(); errClose != nil {
+					log.Printf(
+						"[Go/Pion] OnDataChannel: Error closing previous global mouseChannel: %v\n",
+						errClose,
+					)
+				}
+			}
+			mouseChannel = dc
+			// --- DEADLOCK FIX: REMOVED pcMutex.Unlock() HERE ---
 
-            dc.OnOpen(func() {
-                pcMutex.Lock()
-                gdcLabel := "nil (global)"
-                gdcID := "nil"
-                if mouseChannel != nil {
-                    gdcLabel = mouseChannel.Label()
-                    if mouseChannel.ID() != nil {
-                        gdcID = fmt.Sprintf("%d", *mouseChannel.ID())
-                    }
-                }
-                pcMutex.Unlock()
-                log.Printf(
-                    "[Go/Pion] Mouse channel '%s' (local, ID: %s) OnOpen event. Current Global DC: '%s' (ID: %s). Local DC ReadyState: %s\n",
-                    dc.Label(),
-                    idStr,
-                    gdcLabel,
-                    gdcID,
-                    dc.ReadyState().String(),
-                )
-            })
+			dc.OnOpen(func() {
+				pcMutex.Lock()
+				gdcLabel := "nil (global)"
+				gdcID := "nil"
+				if mouseChannel != nil {
+					gdcLabel = mouseChannel.Label()
+					if mouseChannel.ID() != nil {
+						gdcID = fmt.Sprintf("%d", *mouseChannel.ID())
+					}
+				}
+				pcMutex.Unlock()
+				log.Printf(
+					"[Go/Pion] Mouse channel '%s' (local, ID: %s) OnOpen event. Current Global DC: '%s' (ID: %s). Local DC ReadyState: %s\n",
+					dc.Label(),
+					idStr,
+					gdcLabel,
+					gdcID,
+					dc.ReadyState().String(),
+				)
+			})
 
-            dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-                log.Printf(
-                    "[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s\n",
-                    dc.Label(),
-                    idStr,
-                    string(msg.Data),
-                )
-                var messageData map[string]interface{}
-                if err := json.Unmarshal(msg.Data, &messageData); err == nil {
-                    if clientSendTime, ok := messageData["client_send_time"].(float64); ok {
-                        hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
-                        oneWayLatency := hostReceiveTime - clientSendTime
-                        log.Printf(
-                            "[Go/Pion] Mouse event one-way latency: %.2f ms (Client: %.2f, Host: %.2f)\n",
-                            oneWayLatency, clientSendTime, hostReceiveTime,
-                        )
-                    }
-                }
-                enqueueMouseEvent(string(msg.Data))
-            })
+			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+				log.Printf(
+					"[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s\n",
+					dc.Label(),
+					idStr,
+					string(msg.Data),
+				)
+				var messageData map[string]interface{}
+				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
+					if clientSendTime, ok := messageData["client_send_time"].(float64); ok {
+						hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
+						oneWayLatency := hostReceiveTime - clientSendTime
+						log.Printf(
+							"[Go/Pion] Mouse event one-way latency: %.2f ms (Client: %.2f, Host: %.2f)\n",
+							oneWayLatency, clientSendTime, hostReceiveTime,
+						)
+					}
+				}
+				enqueueMouseEvent(string(msg.Data))
+			})
 
-            dc.OnClose(func() {
-                log.Printf(
-                    "[Go/Pion] Mouse channel '%s' (ID: %s) OnClose event. ReadyState: %s\n",
-                    dc.Label(),
-                    idStr,
-                    dc.ReadyState().String(),
-                )
-                pcMutex.Lock()
-                if mouseChannel == dc {
-                    log.Printf(
-                        "[Go/Pion] OnClose: Global mouseChannel ('%s', ID: %s) is being closed. Setting global to nil.\n",
-                        dc.Label(),
-                        idStr,
-                    )
-                    mouseChannel = nil
-                }
-                pcMutex.Unlock()
-            })
+			dc.OnClose(func() {
+				log.Printf(
+					"[Go/Pion] Mouse channel '%s' (ID: %s) OnClose event. ReadyState: %s\n",
+					dc.Label(),
+					idStr,
+					dc.ReadyState().String(),
+				)
+				pcMutex.Lock()
+				if mouseChannel == dc {
+					log.Printf(
+						"[Go/Pion] OnClose: Global mouseChannel ('%s', ID: %s) is being closed. Setting global to nil.\n",
+						dc.Label(),
+						idStr,
+					)
+					mouseChannel = nil
+				}
+				pcMutex.Unlock()
+			})
 
-            dc.OnError(func(err error) {
-                log.Printf(
-                    "[Go/Pion] Data channel '%s' (ID: %s) OnError event: %v\n",
-                    dc.Label(),
-                    idStr,
-                    err,
-                )
-            })
-            log.Printf(
-                "[Go/Pion] OnDataChannel: All handlers attached for mouse DC '%s'.\n",
-                actualLabel,
-            )
-        } else if actualLabel == "latencyChannel" {
-            log.Printf(
-                "[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global latencyChannel and attaching handlers.\n",
-                actualLabel,
-            )
-            if latencyChannel != nil && latencyChannel != dc {
-                log.Printf(
-                    "[Go/Pion] OnDataChannel: Closing previous global latency channel '%s' (ID: %s) before assigning new one.\n",
-                    latencyChannel.Label(),
-                    fmt.Sprintf("%d", *latencyChannel.ID()),
-                )
-                if errClose := latencyChannel.Close(); errClose != nil {
-                    log.Printf(
-                        "[Go/Pion] OnDataChannel: Error closing previous global latencyChannel: %v\n",
-                        errClose,
-                    )
-                }
-            }
-            latencyChannel = dc
+			dc.OnError(func(err error) {
+				log.Printf(
+					"[Go/Pion] Data channel '%s' (ID: %s) OnError event: %v\n",
+					dc.Label(),
+					idStr,
+					err,
+				)
+			})
+			log.Printf(
+				"[Go/Pion] OnDataChannel: All handlers attached for mouse DC '%s'.\n",
+				actualLabel,
+			)
+		} else if actualLabel == "latencyChannel" {
+			log.Printf(
+				"[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global latencyChannel and attaching handlers.\n",
+				actualLabel,
+			)
+			if latencyChannel != nil && latencyChannel != dc {
+				log.Printf(
+					"[Go/Pion] OnDataChannel: Closing previous global latency channel '%s' (ID: %s) before assigning new one.\n",
+					latencyChannel.Label(),
+					fmt.Sprintf("%d", *latencyChannel.ID()),
+				)
+				if errClose := latencyChannel.Close(); errClose != nil {
+					log.Printf(
+						"[Go/Pion] OnDataChannel: Error closing previous global latencyChannel: %v\n",
+						errClose,
+					)
+				}
+			}
+			latencyChannel = dc
 
-            dc.OnOpen(func() {
-                log.Printf(
-                    "[Go/Pion] Latency channel '%s' (ID: %s) OnOpen event. ReadyState: %s\n",
-                    dc.Label(),
-                    idStr,
-                    dc.ReadyState().String(),
-                )
-            })
+			dc.OnOpen(func() {
+				log.Printf(
+					"[Go/Pion] Latency channel '%s' (ID: %s) OnOpen event. ReadyState: %s\n",
+					dc.Label(),
+					idStr,
+					dc.ReadyState().String(),
+				)
+			})
 
-            dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-                log.Printf(
-                    "[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s\n",
-                    dc.Label(),
-                    idStr,
-                    string(msg.Data),
-                )
-                var messageData map[string]interface{}
-                if err := json.Unmarshal(msg.Data, &messageData); err == nil {
-                    if msgType, ok := messageData["type"].(string); ok {
-                        if msgType == "ping" {
-                            if clientTimestamp, ok := messageData["timestamp"].(float64); ok {
-                                if sequenceNumber, ok := messageData["sequence_number"].(float64); ok {
-                                    hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
+			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+				log.Printf(
+					"[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s\n",
+					dc.Label(),
+					idStr,
+					string(msg.Data),
+				)
+				var messageData map[string]interface{}
+				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
+					if msgType, ok := messageData["type"].(string); ok {
+						if msgType == "ping" {
+							if clientTimestamp, ok := messageData["timestamp"].(float64); ok {
+								if sequenceNumber, ok := messageData["sequence_number"].(float64); ok {
+									hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
 
-                                    pongResponse := map[string]interface{}{
-                                        "type":              "pong",
-                                        "timestamp":         clientTimestamp,
-                                        "sequence_number":   sequenceNumber,
-                                        "host_receive_time": hostReceiveTime,
-                                    }
-                                    pongJSON, _ := json.Marshal(pongResponse)
-                                    if err := dc.SendText(string(pongJSON)); err != nil {
-                                        log.Printf("[Go/Pion] Error sending pong: %v\n", err)
-                                    } else {
-                                        log.Printf(
-                                            "[Go/Pion] Sent pong for sequence %d (Client: %.2f, Host: %.2f)\n",
-                                            int(sequenceNumber), clientTimestamp, hostReceiveTime,
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            })
+									pongResponse := map[string]interface{}{
+										"type":              "pong",
+										"timestamp":         clientTimestamp,
+										"sequence_number":   sequenceNumber,
+										"host_receive_time": hostReceiveTime,
+									}
+									pongJSON, _ := json.Marshal(pongResponse)
+									if err := dc.SendText(string(pongJSON)); err != nil {
+										log.Printf("[Go/Pion] Error sending pong: %v\n", err)
+									} else {
+										log.Printf(
+											"[Go/Pion] Sent pong for sequence %d (Client: %.2f, Host: %.2f)\n",
+											int(sequenceNumber), clientTimestamp, hostReceiveTime,
+										)
+									}
+								}
+							}
+						}
+					}
+				}
+			})
 
-            dc.OnClose(func() {
-                log.Printf(
-                    "[Go/Pion] Latency channel '%s' (ID: %s) OnClose event. ReadyState: %s\n",
-                    dc.Label(),
-                    idStr,
-                    dc.ReadyState().String(),
-                )
-                pcMutex.Lock()
-                if latencyChannel == dc {
-                    log.Printf(
-                        "[Go/Pion] OnClose: Global latencyChannel ('%s', ID: %s) is being closed. Setting global to nil.\n",
-                        dc.Label(),
-                        idStr,
-                    )
-                    latencyChannel = nil
-                }
-                pcMutex.Unlock()
-            })
+			dc.OnClose(func() {
+				log.Printf(
+					"[Go/Pion] Latency channel '%s' (ID: %s) OnClose event. ReadyState: %s\n",
+					dc.Label(),
+					idStr,
+					dc.ReadyState().String(),
+				)
+				pcMutex.Lock()
+				if latencyChannel == dc {
+					log.Printf(
+						"[Go/Pion] OnClose: Global latencyChannel ('%s', ID: %s) is being closed. Setting global to nil.\n",
+						dc.Label(),
+						idStr,
+					)
+					latencyChannel = nil
+				}
+				pcMutex.Unlock()
+			})
 
-            dc.OnError(func(err error) {
-                log.Printf(
-                    "[Go/Pion] Data channel '%s' (ID: %s) OnError event: %v\n",
-                    dc.Label(),
-                    idStr,
-                    err,
-                )
-            })
-            log.Printf(
-                "[Go/Pion] OnDataChannel: All handlers attached for latency DC '%s'.\n",
-                actualLabel,
-            )
-        } else {
-            log.Printf(
-                "[Go/Pion] OnDataChannel: Label MISMATCH. Expected 'keyPressChannel', 'mouseChannel' or 'latencyChannel' but received '%s' (ID: %s). Handlers NOT attached for this DC.\n",
-                actualLabel,
-                idStr,
-            )
-        }
-    })
-    log.Println(
-        "[Go/Pion] createPeerConnectionGo: OnDataChannel handler has been set up on the PeerConnection.",
-    )
+			dc.OnError(func(err error) {
+				log.Printf(
+					"[Go/Pion] Data channel '%s' (ID: %s) OnError event: %v\n",
+					dc.Label(),
+					idStr,
+					err,
+				)
+			})
+			log.Printf(
+				"[Go/Pion] OnDataChannel: All handlers attached for latency DC '%s'.",
+				actualLabel,
+			)
+		} else if actualLabel == "videoFeedbackChannel" {
+			log.Printf(
+				"[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global videoFeedbackChannel and attaching handlers.",
+				actualLabel,
+			)
+			if videoFeedbackChannel != nil && videoFeedbackChannel != dc {
+				log.Printf(
+					"[Go/Pion] OnDataChannel: Closing previous global videoFeedbackChannel '%s' (ID: %s) before assigning new one.",
+					videoFeedbackChannel.Label(),
+					fmt.Sprintf("%d", *videoFeedbackChannel.ID()),
+				)
+				if errClose := videoFeedbackChannel.Close(); errClose != nil {
+					log.Printf(
+						"[Go/Pion] OnDataChannel: Error closing previous global videoFeedbackChannel: %v",
+						errClose,
+					)
+				}
+			}
+			videoFeedbackChannel = dc
+
+			dc.OnOpen(func() {
+				log.Printf(
+					"[Go/Pion] Video Feedback channel '%s' (ID: %s) OnOpen event. ReadyState: %s",
+					dc.Label(),
+					idStr,
+					dc.ReadyState().String(),
+				)
+			})
+
+			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+				log.Printf(
+					"[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s",
+					dc.Label(),
+					idStr,
+					string(msg.Data),
+				)
+				// Host doesn't need to process pong for RTT, just log for now
+				var messageData map[string]interface{}
+				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
+					if msgType, ok := messageData["type"].(string); ok {
+						if msgType == "video_frame_pong" {
+							if frameID, ok := messageData["frame_id"].(float64); ok {
+								pingTimestampsMutex.Lock()
+								hostSendTime, found := pingTimestamps[uint64(frameID)]
+								delete(pingTimestamps, uint64(frameID))
+								pingTimestampsMutex.Unlock()
+
+								if found {
+									hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
+									rtt := hostReceiveTime - hostSendTime
+									log.Printf("[Go/Pion] Received video_frame_pong for frame %d. RTT: %.2f ms", uint64(frameID), rtt)
+								} else {
+									log.Printf("[Go/Pion] Received video_frame_pong for unknown frame %d", uint64(frameID))
+								}
+							}
+						}
+					}
+				}
+			})
+
+			dc.OnClose(func() {
+				log.Printf(
+					"[Go/Pion] Video Feedback channel '%s' (ID: %s) OnClose event. ReadyState: %s",
+					dc.Label(),
+					idStr,
+					dc.ReadyState().String(),
+				)
+				pcMutex.Lock()
+				if videoFeedbackChannel == dc {
+					log.Printf(
+						"[Go/Pion] OnClose: Global videoFeedbackChannel ('%s', ID: %s) is being closed. Setting global to nil.",
+						dc.Label(),
+						idStr,
+					)
+					videoFeedbackChannel = nil
+				}
+				pcMutex.Unlock()
+			})
+
+			dc.OnError(func(err error) {
+				log.Printf(
+					"[Go/Pion] Data channel '%s' (ID: %s) OnError event: %v",
+					dc.Label(),
+					idStr,
+					err,
+				)
+			})
+			log.Printf(
+				"[Go/Pion] OnDataChannel: All handlers attached for video feedback DC '%s'.",
+				actualLabel,
+			)
+		} else {
+			log.Printf(
+				"[Go/Pion] OnDataChannel: Label MISMATCH. Expected 'keyPressChannel', 'mouseChannel', 'latencyChannel' or 'videoFeedbackChannel' but received '%s' (ID: %s). Handlers NOT attached for this DC.",
+				actualLabel,
+				idStr,
+			)
+		}
+	})
+	log.Println(
+		"[Go/Pion] createPeerConnectionGo: OnDataChannel handler has been set up on the PeerConnection.",
+	)
 
 	videoTrack, err = webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{
@@ -759,6 +855,26 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 			if err != nil {
 				return -1
 			}
+		}
+	}
+
+	// After sending all RTP packets for the frame, send a video_frame_ping
+	if videoFeedbackChannel != nil && videoFeedbackChannel.ReadyState() == webrtc.DataChannelStateOpen {
+		videoFrameCounter++
+		hostSendTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
+		pingTimestampsMutex.Lock()
+		pingTimestamps[videoFrameCounter] = hostSendTime
+		pingTimestampsMutex.Unlock()
+		pingMessage := map[string]interface{}{
+			"type":           "video_frame_ping",
+			"frame_id":       videoFrameCounter,
+			"host_send_time": hostSendTime,
+		}
+		pingJSON, _ := json.Marshal(pingMessage)
+		if err := videoFeedbackChannel.SendText(string(pingJSON)); err != nil {
+			log.Printf("[Go/Pion] Error sending video_frame_ping: %v\n", err)
+		} else {
+			log.Printf("[Go/Pion] Sent video_frame_ping for frame %d at %.2f\n", videoFrameCounter, hostSendTime)
 		}
 	}
 
