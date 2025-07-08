@@ -6,6 +6,7 @@
 #include <atomic>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <audiopolicy.h>
 
 class AudioCapturer
 {
@@ -13,11 +14,11 @@ public:
     AudioCapturer();
     ~AudioCapturer();
 
-    bool StartCapture(const std::wstring& outputFilePath);
+    bool StartCapture(const std::wstring& outputFilePath, DWORD processId);
     void StopCapture();
 
 private:
-    void CaptureThread();
+    void CaptureThread(DWORD processId);
     bool WriteWavHeader(HANDLE hFile, WAVEFORMATEX* pwfx, DWORD dataSize);
     bool FixWavHeader(HANDLE hFile, DWORD dataSize, WORD cbSize);
 
@@ -30,4 +31,5 @@ private:
     IMMDevice* m_pDevice = nullptr;
     IAudioClient* m_pAudioClient = nullptr;
     IAudioCaptureClient* m_pCaptureClient = nullptr;
+    IAudioSessionControl2* m_pSessionControl2 = nullptr;
 };

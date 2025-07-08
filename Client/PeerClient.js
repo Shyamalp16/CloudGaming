@@ -1,19 +1,35 @@
 const { RTCPeerConnection, RTCSessionDescription, RTCRtpReceiver } = require('wrtc');
 const WebSocket = require('ws');
 
-const serverUrl = 'ws://localhost:3000';
+const serverUrlBase = 'ws://localhost:3002';
 let ws;
 let peerConnection;
+
+document.getElementById('joinButton').addEventListener('click', () => {
+    const roomId = document.getElementById('roomIdInput').value;
+    if (!roomId) {
+        alert('Please enter a Room ID.');
+        return;
+    }
+
+    document.getElementById('roomSetup').classList.add('hidden');
+    document.getElementById('gameHeader').classList.remove('hidden');
+    document.getElementById('gameContainer').classList.remove('hidden');
+
+    connectToSignalingServer(roomId);
+});
 
 const config = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
 };
 
-function connectToSignalingServer() {
+function connectToSignalingServer(roomId) {
+  const serverUrl = `${serverUrlBase}?roomId=${roomId}`;
   ws = new WebSocket(serverUrl);
 
   ws.onopen = () => {
     console.log('Connected to signaling server');
+    startConnection(); // Start the WebRTC connection process
   };
 
   ws.onmessage = async (event) => {
@@ -208,8 +224,3 @@ async function startConnection() {
   }
 }
 
-connectToSignalingServer();
-
-setTimeout(() => {
-  startConnection();
-}, 3000);

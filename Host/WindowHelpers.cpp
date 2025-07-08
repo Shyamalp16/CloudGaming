@@ -139,6 +139,9 @@ static BOOL CALLBACK EnumWindowProc(HWND hwnd, LPARAM lParam) {
     info.hwnd = hwnd;
     info.title = GetWindowTitle(hwnd);
     info.processName = GetProcessNameFromHWND(hwnd);
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hwnd, &processId);
+    info.processId = processId;
 	data->results.push_back(info);
     return TRUE;
 }

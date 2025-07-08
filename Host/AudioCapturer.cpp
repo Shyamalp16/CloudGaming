@@ -24,12 +24,16 @@ AudioCapturer::~AudioCapturer()
     StopCapture();
 }
 
-bool AudioCapturer::StartCapture(const std::wstring& outputFilePath)
+bool AudioCapturer::StartCapture(const std::wstring& outputFilePath, DWORD processId)
 {
     m_outputFilePath = outputFilePath;
     m_stopCapture = false;
-
-    m_captureThread = std::thread(&AudioCapturer::CaptureThread, this);
+    // Store the process ID for the capture thread to use
+    // You'll need to add a member variable for this in AudioCapturer.h
+    // For now, let's assume you have a member `m_targetProcessId`
+    // m_targetProcessId = processId; 
+    // For now, I'll pass it as an argument to the thread function
+    m_captureThread = std::thread(&AudioCapturer::CaptureThread, this, processId);
 
     return true;
 }
@@ -43,11 +47,10 @@ void AudioCapturer::StopCapture()
     }
 }
 
-void AudioCapturer::CaptureThread()
+void AudioCapturer::CaptureThread(DWORD targetProcessId)
 {
     HRESULT hr;
     REFERENCE_TIME hnsRequestedDuration = REFTIMES_PER_SEC;
-    REFERENCE_TIME hnsActualDuration;
     UINT32 bufferFrameCount;
     UINT32 numFramesAvailable;
     BYTE* pData;
@@ -57,12 +60,19 @@ void AudioCapturer::CaptureThread()
     DWORD dataSize = 0;
 
     hr = CoInitialize(NULL);
-
     if (FAILED(hr))
     {
         std::wcerr << L"Unable to initialize COM in render thread: " << _com_error(hr).ErrorMessage() << std::endl;
         return;
     }
+
+    IMMDeviceCollection* pCollection = NULL;
+    IAudioSessionManager2* pSessionManager = NULL;
+    IAudioSessionEnumerator* pSessionEnumerator = NULL;
+    IAudioSessionControl* pSessionControl = NULL;
+    IAudioSessionControl2* pSessionControl2 = NULL;
+
+    std::wcout << L"[AudioCapturer] Target Process ID: " << targetProcessId << std::endl;
 
     const CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
     const IID IID_IMMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
@@ -73,69 +83,199 @@ void AudioCapturer::CaptureThread()
 
     if (FAILED(hr))
     {
-        std::wcerr << L"Unable to instantiate device enumerator: " << _com_error(hr).ErrorMessage() << std::endl;
+        std::wcerr << L"[AudioCapturer] Unable to instantiate device enumerator: " << _com_error(hr).ErrorMessage() << std::endl;
         goto Exit;
     }
 
-    hr = m_pEnumerator->GetDefaultAudioEndpoint(
-        eRender, eConsole, &m_pDevice);
-
+    hr = m_pEnumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pCollection);
     if (FAILED(hr))
     {
-        std::wcerr << L"Unable to get default audio endpoint: " << _com_error(hr).ErrorMessage() << std::endl;
+        std::wcerr << L"[AudioCapturer] Unable to enumerate audio endpoints: " << _com_error(hr).ErrorMessage() << std::endl;
         goto Exit;
     }
 
-    hr = m_pDevice->Activate(
-        __uuidof(IAudioClient), CLSCTX_ALL,
-        NULL, (void**)&m_pAudioClient);
-
+    UINT deviceCount;
+    hr = pCollection->GetCount(&deviceCount);
     if (FAILED(hr))
     {
-        std::wcerr << L"Unable to activate audio client: " << _com_error(hr).ErrorMessage() << std::endl;
+        std::wcerr << L"[AudioCapturer] Unable to get device count: " << _com_error(hr).ErrorMessage() << std::endl;
         goto Exit;
     }
 
-    hr = m_pAudioClient->GetMixFormat(&pwfx);
+    std::wcout << L"[AudioCapturer] Found " << deviceCount << L" audio devices." << std::endl;
 
-    if (FAILED(hr))
+    for (UINT i = 0; i < deviceCount; ++i)
     {
-        std::wcerr << L"Unable to get mix format: " << _com_error(hr).ErrorMessage() << std::endl;
-        goto Exit;
+        IMMDevice* pDevice = NULL;
+        hr = pCollection->Item(i, &pDevice);
+        if (FAILED(hr))
+        {
+            std::wcerr << L"[AudioCapturer] Failed to get device item " << i << L": " << _com_error(hr).ErrorMessage() << std::endl;
+            continue;
+        }
+
+        LPWSTR deviceId = NULL;
+        hr = pDevice->GetId(&deviceId);
+        if (SUCCEEDED(hr))
+        {
+            std::wcout << L"[AudioCapturer] Device " << i << L" ID: " << deviceId << std::endl;
+            CoTaskMemFree(deviceId);
+        }
+
+        hr = pDevice->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, NULL, (void**)&pSessionManager);
+        if (FAILED(hr))
+        {
+            std::wcerr << L"[AudioCapturer] Failed to activate IAudioSessionManager2 for device " << i << L": " << _com_error(hr).ErrorMessage() << std::endl;
+            pDevice->Release();
+            continue;
+        }
+
+        hr = pSessionManager->GetSessionEnumerator(&pSessionEnumerator);
+        if (FAILED(hr))
+        {
+            std::wcerr << L"[AudioCapturer] Failed to get session enumerator for device " << i << L": " << _com_error(hr).ErrorMessage() << std::endl;
+            pSessionManager->Release();
+            pDevice->Release();
+            continue;
+        }
+
+        int sessionCount;
+        hr = pSessionEnumerator->GetCount(&sessionCount);
+        if (FAILED(hr))
+        {
+            std::wcerr << L"[AudioCapturer] Failed to get session count for device " << i << L": " << _com_error(hr).ErrorMessage() << std::endl;
+            pSessionEnumerator->Release();
+            pSessionManager->Release();
+            pDevice->Release();
+            continue;
+        }
+
+        std::wcout << L"[AudioCapturer] Device " << i << L" has " << sessionCount << L" sessions." << std::endl;
+
+        for (int j = 0; j < sessionCount; ++j)
+        {
+            hr = pSessionEnumerator->GetSession(j, &pSessionControl);
+            if (FAILED(hr))
+            {
+                std::wcerr << L"[AudioCapturer] Failed to get session " << j << L" for device " << i << L": " << _com_error(hr).ErrorMessage() << std::endl;
+                continue;
+            }
+
+            hr = pSessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&pSessionControl2);
+            if (FAILED(hr))
+            {
+                std::wcerr << L"[AudioCapturer] Failed to query IAudioSessionControl2 for session " << j << L": " << _com_error(hr).ErrorMessage() << std::endl;
+                pSessionControl->Release();
+                continue;
+            }
+
+            DWORD currentProcessId = 0;
+            hr = pSessionControl2->GetProcessId(&currentProcessId);
+            if (FAILED(hr))
+            {
+                std::wcerr << L"[AudioCapturer] Failed to get process ID for session " << j << L": " << _com_error(hr).ErrorMessage() << std::endl;
+                pSessionControl2->Release();
+                pSessionControl->Release();
+                continue;
+            }
+
+            std::wcout << L"[AudioCapturer] Session " << j << L" Process ID: " << currentProcessId << std::endl;
+
+            if (currentProcessId == targetProcessId)
+            {
+                std::wcout << L"[AudioCapturer] Found matching session for target process ID: " << targetProcessId << std::endl;
+                // Found the session for the target process
+                m_pDevice = pDevice; // Keep a reference to the device
+                m_pDevice->AddRef(); // Increment ref count as we're keeping it
+                m_pSessionControl2 = pSessionControl2; // Keep a reference to the session control
+                m_pSessionControl2->AddRef(); // Increment ref count as we're keeping it
+                
+                hr = m_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&m_pAudioClient);
+                if (FAILED(hr))
+                {
+                    std::wcerr << L"[AudioCapturer] Unable to activate audio client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
+                    goto Exit;
+                }
+
+                hr = m_pAudioClient->GetMixFormat(&pwfx);
+                if (FAILED(hr))
+                {
+                    std::wcerr << L"[AudioCapturer] Unable to get mix format for target process: " << _com_error(hr).ErrorMessage() << std::endl;
+                    goto Exit;
+                }
+
+                std::wcout << L"[AudioCapturer] Mix Format: wFormatTag=" << pwfx->wFormatTag
+                    << L", nChannels=" << pwfx->nChannels
+                    << L", nSamplesPerSec=" << pwfx->nSamplesPerSec
+                    << L", nAvgBytesPerSec=" << pwfx->nAvgBytesPerSec
+                    << L", nBlockAlign=" << pwfx->nBlockAlign
+                    << L", wBitsPerSample=" << pwfx->wBitsPerSample
+                    << L", cbSize=" << pwfx->cbSize << std::endl;
+
+                hr = m_pAudioClient->Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    0,
+                    hnsRequestedDuration,
+                    0,
+                    pwfx,
+                    NULL);
+
+                if (FAILED(hr))
+                {
+                    std::wcerr << L"[AudioCapturer] Unable to initialize audio client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
+                    goto Exit;
+                }
+
+                hr = m_pAudioClient->GetBufferSize(&bufferFrameCount);
+                if (FAILED(hr))
+                {
+                    std::wcerr << L"[AudioCapturer] Unable to get buffer size for target process: " << _com_error(hr).ErrorMessage() << std::endl;
+                    goto Exit;
+                }
+
+                std::wcout << L"[AudioCapturer] Buffer Frame Count: " << bufferFrameCount << std::endl;
+
+                hr = m_pAudioClient->GetService(__uuidof(IAudioCaptureClient), (void**)&m_pCaptureClient);
+                if (FAILED(hr))
+                {
+                    std::wcerr << L"[AudioCapturer] Unable to get capture client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
+                    goto Exit;
+                }
+                
+                // Found and initialized, break out of loops
+                break; 
+            }
+            pSessionControl2->Release();
+            pSessionControl->Release();
+        }
+        if (m_pAudioClient) break; // If client found, break outer loop too
+
+        if (pSessionEnumerator) {
+            pSessionEnumerator->Release();
+            pSessionEnumerator = NULL;
+        }
+        if (pSessionManager) {
+            pSessionManager->Release();
+            pSessionManager = NULL;
+        }
+        if (pDevice) {
+            pDevice->Release();
+            pDevice = NULL;
+        }
     }
 
-    hr = m_pAudioClient->Initialize(
-        AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_LOOPBACK,
-        hnsRequestedDuration,
-        0,
-        pwfx,
-        NULL);
-
-    if (FAILED(hr))
+    if (!m_pAudioClient)
     {
-        std::wcerr << L"Unable to initialize audio client: " << _com_error(hr).ErrorMessage() << std::endl;
+        std::wcerr << L"[AudioCapturer] Could not find audio session for process ID: " << targetProcessId << std::endl;
         goto Exit;
     }
 
-    // Get the size of the allocated buffer.
-    hr = m_pAudioClient->GetBufferSize(&bufferFrameCount);
-
-    if (FAILED(hr))
-    {
-        std::wcerr << L"Unable to get buffer size: " << _com_error(hr).ErrorMessage() << std::endl;
-        goto Exit;
-    }
-
-    hr = m_pAudioClient->GetService(
-        __uuidof(IAudioCaptureClient),
-        (void**)&m_pCaptureClient);
-
-    if (FAILED(hr))
-    {
-        std::wcerr << L"Unable to get capture client: " << _com_error(hr).ErrorMessage() << std::endl;
-        goto Exit;
-    }
+    // Release local COM objects that are no longer needed
+    if (pSessionEnumerator) pSessionEnumerator->Release();
+    if (pSessionManager) pSessionManager->Release();
+    if (pCollection) pCollection->Release();
+    // pDevice is released when m_pDevice is released, or if not found, it's released in the loop.
+    // pSessionControl and pSessionControl2 are released in the loop or assigned to member variable.
 
     hFile = CreateFile(m_outputFilePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE)
@@ -150,10 +290,7 @@ void AudioCapturer::CaptureThread()
         goto Exit;
     }
 
-    hnsActualDuration = (double)REFTIMES_PER_SEC * bufferFrameCount / pwfx->nSamplesPerSec;
-
     hr = m_pAudioClient->Start();  // Start recording.
-
     if (FAILED(hr))
     {
         std::wcerr << L"Unable to start recording: " << _com_error(hr).ErrorMessage() << std::endl;
@@ -162,9 +299,14 @@ void AudioCapturer::CaptureThread()
 
     while (m_stopCapture == false)
     {
-        Sleep(hnsActualDuration / REFTIMES_PER_MILLISEC / 2);
+        Sleep(hnsRequestedDuration / REFTIMES_PER_MILLISEC / 2); // Adjust sleep based on buffer size
 
         hr = m_pCaptureClient->GetNextPacketSize(&numFramesAvailable);
+        if (FAILED(hr))
+        {
+            std::wcerr << L"Failed to get next packet size: " << _com_error(hr).ErrorMessage() << std::endl;
+            goto Exit;
+        }
 
         while (numFramesAvailable != 0)
         {
@@ -184,9 +326,12 @@ void AudioCapturer::CaptureThread()
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT)
             {
                 pData = NULL;  // Tell CopyData to write silence.
+                std::wcout << L"[AudioCapturer] Buffer is silent." << std::endl;
             }
 
             DWORD bytesToWrite = numFramesAvailable * pwfx->nBlockAlign;
+            std::wcout << L"[AudioCapturer] numFramesAvailable: " << numFramesAvailable << L", bytesToWrite: " << bytesToWrite << std::endl;
+
             DWORD bytesWritten;
             if (!WriteFile(hFile, pData, bytesToWrite, &bytesWritten, NULL))
             {
@@ -203,6 +348,11 @@ void AudioCapturer::CaptureThread()
             }
 
             hr = m_pCaptureClient->GetNextPacketSize(&numFramesAvailable);
+            if (FAILED(hr))
+            {
+                std::wcerr << L"Failed to get next packet size after release: " << _com_error(hr).ErrorMessage() << std::endl;
+                goto Exit;
+            }
         }
     }
 
@@ -218,10 +368,16 @@ Exit:
     }
 
     CoTaskMemFree(pwfx);
+    if (pSessionControl2) pSessionControl2->Release();
+    if (pSessionControl) pSessionControl->Release();
+    if (pSessionEnumerator) pSessionEnumerator->Release();
+    if (pSessionManager) pSessionManager->Release();
+    if (pCollection) pCollection->Release();
     if (m_pEnumerator) m_pEnumerator->Release();
     if (m_pDevice) m_pDevice->Release();
     if (m_pAudioClient) m_pAudioClient->Release();
     if (m_pCaptureClient) m_pCaptureClient->Release();
+    if (m_pSessionControl2) m_pSessionControl2->Release();
 
     CoUninitialize();
 }

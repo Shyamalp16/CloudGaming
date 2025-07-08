@@ -10,12 +10,14 @@ using json = nlohmann::json;
 
 client wsClient;
 websocketpp::connection_hdl g_connectionHandle;
-std::string uri = "ws://localhost:3000";
+std::string base_uri = "ws://localhost:3002/";
 std::thread g_websocket_thread;
 std::thread g_frame_thread;
 std::thread g_sender_thread;
 
 void on_open(client* c, websocketpp::connection_hdl hdl);
+void on_fail(client* c, websocketpp::connection_hdl hdl);
+void on_close(client* c, websocketpp::connection_hdl hdl);
 void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg);
 void send_message(const json& message);
 
@@ -89,13 +91,28 @@ void handleRemoteIceCandidate(const json& candidateJson) {
 }
 
 void on_open(client* c, websocketpp::connection_hdl hdl) {
-    std::cout << "[WebSocket] Connected opened to " << uri << std::endl;
+    std::cout << "[WebSocket] Connected opened" << std::endl;
     g_connectionHandle = hdl;
+}
+
+void on_fail(client* c, websocketpp::connection_hdl hdl) {
+    client::connection_ptr con = c->get_con_from_hdl(hdl);
+    std::cerr << "[WebSocket] Connection failed: " << con->get_ec().message() << std::endl;
+}
+
+void on_close(client* c, websocketpp::connection_hdl hdl) {
+    std::cout << "[WebSocket] Connection closed" << std::endl;
 }
 
 void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
     try {
         json message = json::parse(msg->get_payload());
+
+        if (!message.contains("type") || !message["type"].is_string()) {
+            std::cerr << "[WebSocket] Received message without a valid 'type' field: " << message.dump() << std::endl;
+            return; // Skip processing this message
+        }
+
         std::string type = message["type"];
 
         if (type == "offer") {
@@ -132,19 +149,23 @@ void send_message(const json& message) {
     }
 }
 
-void initWebsocket() {
+void initWebsocket(const std::string& roomId) {
     wsClient.init_asio();
     wsClient.set_open_handler(std::bind(&on_open, &wsClient, std::placeholders::_1));
     wsClient.set_message_handler(&on_message);
+    wsClient.set_fail_handler(std::bind(&on_fail, &wsClient, std::placeholders::_1));
+    wsClient.set_close_handler(std::bind(&on_close, &wsClient, std::placeholders::_1));
+
+    std::string full_uri = base_uri + "?roomId=" + roomId;
+    std::cout << "[WebSocket] Connecting to " << full_uri << std::endl;
 
     websocketpp::lib::error_code ec;
-    client::connection_ptr con = wsClient.get_connection(uri, ec);
+    client::connection_ptr con = wsClient.get_connection(full_uri, ec);
     if (ec) {
-        std::cerr << "[WebSocket] Error connecting to " << uri << ": " << ec.message() << std::endl;
+        std::cerr << "[WebSocket] Error getting connection: " << ec.message() << std::endl;
         return;
     }
     wsClient.connect(con);
-    std::wcout << L"[WebSocket] Connection made\n";
 
     g_websocket_thread = std::thread([&]() {
         try {

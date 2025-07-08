@@ -25,6 +25,7 @@ struct WindowInfo {
 	HWND hwnd;
 	std::wstring title;
 	std::wstring processName;
+	DWORD processId;
 };
 
 //following function enumerates all windows and returns vector

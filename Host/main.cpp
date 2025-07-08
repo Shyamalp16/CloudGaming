@@ -12,13 +12,24 @@
 #include "AudioCapturer.h"
 #include "ShutdownManager.h"
 
+#include "IdGenerator.h"
+
 int main()
 {
-    //Initialize C++/WinRT apartment
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     std::wcout << L"[main] Apartment initialized.\n";
-    //Create D3D device + context
+
+    // --- Room ID Generation ---
+    std::string roomId = generateRoomId();
+    std::wcout << L"\n----------------------------------------\n";
+    std::wcout << L"  Cloud Gaming Host Initialized\n";
+    std::wcout << L"  Your Room ID is: " << winrt::to_hstring(roomId).c_str() << L"\n";
+    std::wcout << L"  Please copy this ID into the web client.\n";
+    std::wcout << L"----------------------------------------\n\n";
+    // --------------------------
+
     winrt::com_ptr<ID3D11Device> d3dDevice;
+
     winrt::com_ptr<ID3D11DeviceContext> d3dContext;
     winrt::com_ptr<IDXGIDevice> dxgiDevice;
     D3D_FEATURE_LEVEL selectedFeatureLevel = D3D_FEATURE_LEVEL_11_1;
@@ -31,7 +42,6 @@ int main()
         return -1;
     }
 
-    //Convert to WinRT IDirect3DDevice
     auto winrtDevice = createIDirect3DDevice(dxgiDevice);
     if (!winrtDevice)
     {
@@ -39,7 +49,7 @@ int main()
         return -1;
     }
 
-    Sleep(2000); // Give time to see the console output
+    Sleep(2000);
     //Get the window handle     //HWND hwnd = fetchForegroundWindow();
     //std::wcout << L"[main] Found " << windows.size() << L" windows.\n";
   
@@ -52,7 +62,6 @@ int main()
         std::wcout << L"[main] HWND = " << w.hwnd << L"\n Title = " << w.title << L"\n Process = " << w.processName << L"\n";
     }
 
-	//Set Cs2.exe window as the window to capture
 	HWND hwnd = msedge[0].hwnd;
     if (!hwnd)
     {
@@ -61,7 +70,6 @@ int main()
     }
     std::wcout << L"[main] Got hwnd: " << hwnd << std::endl;
 
-    //Create capture item from that hwnd
     auto item = CreateCaptureItemForWindow(hwnd);
     if (!item)
     {
@@ -69,7 +77,6 @@ int main()
         return -1;
     }
 
-    //Create a free-threaded frame pool
     auto size = item.Size();
     auto framePool = createFreeThreadedFramePool(winrtDevice, size);
     if (!framePool)
@@ -78,7 +85,6 @@ int main()
         return -1;
     }
 
-    //Create a session from the frame pool & item
     auto session = createCaptureSession(item, framePool);
     if (!session)
     {
@@ -86,21 +92,17 @@ int main()
         return -1;
     }
 
-    //Register for FrameArrived
     auto token = FrameArrivedEventRegistration(framePool);
 
-    //Start windows graphics capture
     session.StartCapture();
-
-	//Start worker threads to process frames
     StartCapture();
-    initWebsocket();
+    initWebsocket(roomId);
     AudioCapturer audioCapturer;
-    audioCapturer.StartCapture(L"D:\\output.wav");
+    audioCapturer.StartCapture(L"D:\\output.wav", msedge[0].processId);
     std::wcout << L"[main] Capture started!\n";
 
     // Keep the app alive for 10 seconds to see frame events
-    for (int i = 0; i < 10; i++)
+    for (int i = 0; i < 1000; i++)
     {
         Sleep(1000);
         std::wcout << L"[main] Still capturing...\n";
@@ -125,7 +127,6 @@ int main()
     session.Close();
     Encoder::FlushEncoder();
 
-    //Optionally unsubscribe from the event
      framePool.FrameArrived(token);
 
     /*for (auto& w : windows) {

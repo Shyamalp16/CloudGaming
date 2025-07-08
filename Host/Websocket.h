@@ -22,5 +22,5 @@
 
 using json = nlohmann::json;
 void send_message(const json& message);
-void initWebsocket();
+void initWebsocket(const std::string& roomId);
 void stopWebsocket();

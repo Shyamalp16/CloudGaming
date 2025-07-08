@@ -117,6 +117,7 @@
     <ClInclude Include="Host\Encoder.h" />
     <ClInclude Include="Host\FrameCaptureThread.h" />
     <ClInclude Include="Host\GlobalTime.h" />
+    <ClInclude Include="Host\IdGenerator.h" />
     <ClInclude Include="Host\KeyInputHandler.h" />
     <ClInclude Include="Host\MouseInputHandler.h" />
     <ClInclude Include="Host\MyCreateSdpObserver.h" />
