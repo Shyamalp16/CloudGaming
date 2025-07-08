@@ -1,5 +1,6 @@
 #include "Websocket.h"
 #include "Encoder.h"
+#include <chrono> // For high_resolution_clock
 #include "KeyInputHandler.h"
 #include "MouseInputHandler.h"
 #include "ShutdownManager.h"
@@ -114,8 +115,46 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
         }
 
         std::string type = message["type"];
+        std::cout << "[Host] Received message type: " << type << std::endl;
 
-        if (type == "offer") {
+        if (type == "ping") {
+            long long client_timestamp = message["timestamp"].get<long long>();
+            int sequence_number = message["sequence_number"].get<int>();
+            auto host_receive_time_point = std::chrono::high_resolution_clock::now();
+            long long host_receive_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(host_receive_time_point.time_since_epoch()).count();
+
+            json pong_response;
+            pong_response["type"] = "pong";
+            pong_response["timestamp"] = client_timestamp; // Original client timestamp
+            pong_response["sequence_number"] = sequence_number;
+            pong_response["host_receive_time"] = host_receive_time_ms; // Host's receive time
+
+            send_message(pong_response);
+
+            std::cout << "[Host] Received ping " << sequence_number
+                      << " from client at " << client_timestamp
+                      << ", host receive time: " << host_receive_time_ms << std::endl;
+        }
+        else if (type == "keydown" || type == "keyup" || type == "mousemove" || type == "mousedown" || type == "mouseup") {
+            // Handle input events with timestamps
+            long long client_send_time = message["client_send_time"].get<long long>();
+            auto host_receive_time_point = std::chrono::high_resolution_clock::now();
+            long long host_receive_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(host_receive_time_point.time_since_epoch()).count();
+
+            long long one_way_latency = host_receive_time_ms - client_send_time;
+
+            std::cout << "[Host] Received " << type << " event."
+                      << " Client send time: " << client_send_time
+                      << ", Host receive time: " << host_receive_time_ms
+                      << ", One-way latency: " << one_way_latency << " ms" << std::endl;
+
+            // Continue with your existing input handling logic
+            // For keyboard events, you might call your KeyInputHandler
+            // For mouse events, you might call your MouseInputHandler
+            // Note: The actual handling of key/mouse events (e.g., calling handleKeyInput, handleMouseInput)
+            // is outside the scope of this latency measurement task, but this is where you'd integrate it.
+        }
+        else if (type == "offer") {
             std::cout << "[WebSocket] Received offer from server: \n" << message.dump() << std::endl;
             std::string sdp = message.value("sdp", "");
             handleOffer(sdp);

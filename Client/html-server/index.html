@@ -521,6 +521,7 @@
     const streamViewport = document.getElementById('streamViewport');
     let dataChannel;
     let mouseChannel;
+    let latencyChannel;
     let animationId;
     let isFullscreen = false;
     let debugVisible = false;
@@ -715,7 +716,7 @@
         type: "mousemove",
         x: Math.round((event.clientX - rect.left) * scaleX),
         y: Math.round((event.clientY - rect.top) * scaleY),
-        timestamp: Date.now(),
+        client_send_time: performance.now(),
       };
 
       sendMouseEvent(mouseData);
@@ -860,6 +861,9 @@
       log(`Client attempting to create data channel "${dataChannel.label}", initial state: ${dataChannel.readyState}`);
       log(`Client attempting to create data channel "${mouseChannel.label}", initial state: ${mouseChannel.readyState}`);
 
+      latencyChannel = peerConnection.createDataChannel("latencyChannel", { ordered: true });
+      log(`Client attempting to create data channel "${latencyChannel.label}", initial state: ${latencyChannel.readyState}`);
+
       dataChannel.onopen = () => {
         log(`Data Channel Opened: "${dataChannel.label}", ReadyState: ${dataChannel.readyState}`);
       };
@@ -893,6 +897,58 @@
         // const error = event.error;
         // const errorMessage = error ? ${error.name}: ${error.message} : 'Unknown MouseChannel Error';
         // log(Mouse Channel "${mouseChannel.label}" error: ${errorMessage}, 'error');
+      };
+
+      let sequenceNumber = 0;
+      const sentPings = new Map(); // To store {sequence_number: timestamp}
+
+      function sendPing() {
+          if (latencyChannel && latencyChannel.readyState === 'open') {
+              const pingMessage = {
+                  type: "ping",
+                  timestamp: performance.now(),
+                  sequence_number: sequenceNumber++
+              };
+              latencyChannel.send(JSON.stringify(pingMessage));
+              sentPings.set(pingMessage.sequence_number, pingMessage.timestamp);
+              log(`Client sent ping ${pingMessage.sequence_number} at ${pingMessage.timestamp.toFixed(2)}`);
+          }
+      }
+
+      latencyChannel.onopen = () => {
+          log(`Latency Channel Opened: "${latencyChannel.label}", ReadyState: ${latencyChannel.readyState}`);
+          // Start sending pings only after the channel is confirmed open
+          setInterval(sendPing, 1000); // Send ping every 1 second
+      };
+
+      latencyChannel.onmessage = (event) => {
+          const message = JSON.parse(event.data);
+          if (message.type === "pong") {
+              const clientReceiveTime = performance.now();
+              const originalPingTimestamp = sentPings.get(message.sequence_number);
+
+              if (originalPingTimestamp) {
+                  const rtt = clientReceiveTime - originalPingTimestamp;
+                  latency = Math.round(rtt); // Update global latency variable
+                  log(`Client received pong ${message.sequence_number}. RTT: ${rtt.toFixed(2)} ms`);
+                  sentPings.delete(message.sequence_number); // Clean up
+              } else {
+                  log(`Received pong for unknown sequence number: ${message.sequence_number}`, 'warn');
+              }
+          }
+      };
+
+      latencyChannel.onclose = () => {
+          if (latencyChannel) {
+              log(`Latency Channel Closed: "${latencyChannel.label}"`);
+          } else {
+              log(`Latency Channel Closed (channel object was null).`);
+          }
+      };
+      latencyChannel.onerror = (event) => {
+          // const error = event.error;
+          // const errorMessage = error ? ${error.name}: ${error.message} : 'Unknown LatencyChannel Error';
+          // log(Latency Channel "${latencyChannel.label}" error: ${errorMessage}, 'error');
       };
     }
 
@@ -974,7 +1030,7 @@
       
       event.preventDefault();
       keyState.add(event.code);
-      const keyData = { key: event.key, code: event.code, type: 'keydown', timestamp: Date.now() };
+      const keyData = { key: event.key, code: event.code, type: 'keydown', client_send_time: performance.now() };
       sendKeyPress(keyData);
     }
 
@@ -983,7 +1039,7 @@
       if (!keyState.has(event.code)) return;
       event.preventDefault();
       keyState.delete(event.code);
-      const keyData = { key: event.key, code: event.code, type: 'keyup', timestamp: Date.now() };
+      const keyData = { key: event.key, code: event.code, type: 'keyup', client_send_time: performance.now() };
       sendKeyPress(keyData);
     }
 
