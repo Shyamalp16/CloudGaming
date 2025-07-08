@@ -41,6 +41,12 @@ async function main() {
             const roomKey = `room:${roomId}`;
             const roomSize = await redisClient.sCard(roomKey);
 
+            // If a client joins a room that was previously empty and had a TTL set, persist the key
+            if (roomSize === 0) {
+                await redisClient.persist(roomKey);
+                console.log(`Room ${roomId} was empty, removed TTL.`);
+            }
+
             if (roomSize >= 2) {
                 console.log(`Room ${roomId} is full. Rejecting new connection.`);
                 ws.close(1000, 'Room is full');
@@ -91,11 +97,10 @@ async function main() {
                 // Unsubscribe from the channel to prevent memory leaks
                 await subscriber.unsubscribe(roomKey);
 
-                // Optional: Check if room is empty and clean up if necessary
                 const remainingClients = await redisClient.sCard(roomKey);
                 if (remainingClients === 0) {
-                    console.log(`Room ${roomId} is now empty.`);
-                    // The key will expire automatically if you set a TTL, or you can DEL it.
+                    console.log(`Room ${roomId} is now empty. Setting TTL.`);
+                    await redisClient.expire(roomKey, 120); // Set TTL to 120 seconds
                 }
             });
 
