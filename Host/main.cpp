@@ -62,6 +62,12 @@ int main()
         std::wcout << L"[main] HWND = " << w.hwnd << L"\n Title = " << w.title << L"\n Process = " << w.processName << L"\n";
     }
 
+    if (msedge.empty())
+    {
+        std::wcerr << L"[main] No window with the specified process name found.\n";
+        return -1;
+    }
+
 	HWND hwnd = msedge[0].hwnd;
     if (!hwnd)
     {
@@ -102,32 +108,20 @@ int main()
     std::wcout << L"[main] Capture started!\n";
 
     // Keep the app alive for 10 seconds to see frame events
-    for (int i = 0; i < 1000; i++)
+    for (int i = 0; i < 10; i++)
     {
         Sleep(1000);
         std::wcout << L"[main] Still capturing...\n";
     } 
 
-    /*std::wcout << L"[main] Press '0' to stop capturing";
-    while (true) {
-        if (_kbhit()) {
-			char key = _getch();
-			if (key == '0') {
-				break;
-			}
-        }
-        Sleep(100);
-		std::wcout << L"[main] Still capturing...\n";
-    }*/
     std::wcout << L"[main] Stopping capture...\n";
+    g_shutdown_flag.store(true);
     audioCapturer.StopCapture();
     stopWebsocket();
     StopCapture(token, framePool);
-    //framePool.Close();
     session.Close();
+    framePool.Close();
     Encoder::FlushEncoder();
-
-     framePool.FrameArrived(token);
 
     /*for (auto& w : windows) {
 		std::wcout << L"[main] HWND = " << w.hwnd << L"\n Title = " << w.title << L"\n Process = " << w.processName << L".\n";

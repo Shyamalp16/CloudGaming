@@ -731,7 +731,14 @@
       const serverUrl = `${serverUrlBase}?roomId=${roomId}`;
       log(`Attempting to connect to WebSocket server at ${serverUrl}...`);
       updateConnectionStatus('connecting', 'Connecting...');
-      ws = new WebSocket(serverUrl);
+      try {
+        ws = new WebSocket(serverUrl);
+      } catch (error) {
+        log(`WebSocket creation failed: ${error.message}`, 'error');
+        showLoadingOverlay('Connection Failed', 'Could not connect to the signaling server.');
+        updateConnectionStatus('disconnected', 'Error');
+        return;
+      }
 
       ws.onopen = () => {
         log('Connected to signaling server');
@@ -803,7 +810,14 @@
       const config = {
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
       };
-      peerConnection = new RTCPeerConnection(config);
+      try {
+        peerConnection = new RTCPeerConnection(config);
+      } catch (error) {
+        log(`RTCPeerConnection creation failed: ${error.message}`, 'error');
+        showLoadingOverlay('Connection Failed', 'WebRTC setup failed.');
+        updateConnectionStatus('disconnected', 'Error');
+        return;
+      }
 
       peerConnection.ontrack = (event) => {
         log(`Received remote track: Kind=${event.track.kind}, ID=${event.track.id}`);
