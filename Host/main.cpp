@@ -3,6 +3,8 @@
 #include <winrt/Windows.Graphics.Capture.h>
 #include <iostream>
 #include <conio.h>
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 #include "D3DHelpers.h"
 #include "WindowHelpers.h"
@@ -18,6 +20,21 @@ int main()
 {
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     std::wcout << L"[main] Apartment initialized.\n";
+
+    // --- Load Configuration ---
+    nlohmann::json config;
+    try {
+        std::ifstream configFile("config.json");
+        configFile >> config;
+    } catch (const std::exception& e) {
+        std::wcerr << L"[main] Error reading config.json: " << e.what() << std::endl;
+        return -1;
+    }
+
+    std::string targetProcessName = config["host"]["targetProcessName"].get<std::string>();
+    std::string outputAudioFile = config["host"]["outputAudioFile"].get<std::string>();
+    std::wstring wideTargetProcessName(targetProcessName.begin(), targetProcessName.end());
+    std::wstring wideOutputAudioFile(outputAudioFile.begin(), outputAudioFile.end());
 
     // --- Room ID Generation ---
     std::string roomId = generateRoomId();
@@ -56,7 +73,7 @@ int main()
 	//Enumerate All Windows, Then From The Enumerated Windows Find The Windows With The Process Name "cs2.exe"
     auto windows = EnumerateAllWindows();
     //auto msedge = FindWindowsByProcessName(L"vlc.exe");
-    auto msedge = FindWindowsByProcessName(L"vlc.exe");
+    auto msedge = FindWindowsByProcessName(wideTargetProcessName.c_str());
     std::wcout << L"[main] Found " << msedge.size() << L" CS2 windows.\n";
     for (auto& w : msedge) {
         std::wcout << L"[main] HWND = " << w.hwnd << L"\n Title = " << w.title << L"\n Process = " << w.processName << L"\n";
@@ -104,11 +121,11 @@ int main()
     StartCapture();
     initWebsocket(roomId);
     AudioCapturer audioCapturer;
-    audioCapturer.StartCapture(L"D:\\output.wav", msedge[0].processId);
+    audioCapturer.StartCapture(wideOutputAudioFile, msedge[0].processId);
     std::wcout << L"[main] Capture started!\n";
 
     // Keep the app alive for 10 seconds to see frame events
-    for (int i = 0; i < 10; i++)
+    for (int i = 0; i < 100; i++)
     {
         Sleep(1000);
         std::wcout << L"[main] Still capturing...\n";

@@ -280,12 +280,10 @@
     .log-level-warn { color: #ffaa00; }
     .log-level-error { color: #ff4444; }
 
-    /* Hidden video element */
     #hiddenVideo {
       display: none;
     }
 
-    /* Fullscreen mode */
     .fullscreen-mode {
       position: fixed !important;
       top: 0 !important;
@@ -321,7 +319,6 @@
         box-shadow: none !important;
     }
 
-    /* Responsive design */
     @media (max-width: 768px) {
       .game-header {
         height: 40px;
@@ -348,12 +345,10 @@
       }
     }
 
-    /* Gaming cursor styles */
     .gaming-cursor {
       cursor: crosshair !important;
     }
 
-    /* Connection quality indicator */
     .quality-indicator {
       display: flex;
       align-items: center;
@@ -370,9 +365,7 @@
     .quality-bar.active { background: #00ff88; }
     .quality-bar.medium { background: #ffaa00; }
     .quality-bar.poor { background: #ff4444; }
-  </style>
-<style>
-    /* ... existing styles ... */
+
     #roomSetup {
       position: absolute;
       top: 50%;
@@ -387,10 +380,12 @@
       text-align: center;
       backdrop-filter: blur(10px);
     }
+
     #roomSetup h2 {
       margin-bottom: 20px;
       color: #00ff88;
     }
+
     #roomIdInput {
       width: 100%;
       padding: 12px;
@@ -402,6 +397,7 @@
       margin-bottom: 20px;
       text-align: center;
     }
+
     #joinButton {
       padding: 12px 30px;
       font-size: 16px;
@@ -413,24 +409,24 @@
       cursor: pointer;
       transition: all 0.3s ease;
     }
+
     #joinButton:hover {
       background: #fff;
       box-shadow: 0 0 15px #00ff88;
     }
+
     .hidden {
       display: none !important;
     }
   </style>
 </head>
 <body>
-  <!-- Room Setup UI -->
   <div id="roomSetup">
     <h2>Enter Room ID</h2>
     <input type="text" id="roomIdInput" placeholder="Paste Room ID from Host...">
     <button id="joinButton">Join Session</button>
   </div>
 
-  <!-- Game Header -->
   <div class="game-header hidden" id="gameHeader">
     <div class="game-title">🎮 CloudGaming Client</div>
     <div class="connection-status">
@@ -445,10 +441,8 @@
     </div>
   </div>
 
-  <!-- Main Game Container -->
   <div class="game-container hidden" id="gameContainer">
     <div class="stream-viewport" id="streamViewport">
-      <!-- Performance Overlay -->
       <div class="performance-overlay" id="perfOverlay">
         <div class="perf-item">
           <span>Latency:</span>
@@ -468,30 +462,25 @@
         </div>
       </div>
 
-      <!-- Game Controls -->
       <div class="game-controls">
         <button class="control-btn" id="debugBtn" onclick="toggleDebug()" title="Toggle Debug">🐛</button>
         <button class="control-btn" id="perfBtn" onclick="togglePerf()" title="Toggle Performance">📊</button>
         <button class="control-btn" id="fullscreenBtn" onclick="toggleFullscreen()" title="Fullscreen">⛶</button>
       </div>
 
-      <!-- Loading Overlay -->
       <div class="loading-overlay" id="loadingOverlay">
         <div class="loading-spinner"></div>
         <div class="loading-text" id="loadingText">Connecting to Game Server</div>
         <div class="loading-subtext" id="loadingSubtext">Establishing WebRTC connection...</div>
       </div>
 
-      <!-- Game Canvas -->
       <canvas id="gameCanvas"></canvas>
       <div id="input-overlay"></div>
     </div>
   </div>
 
-  <!-- Debug Log -->
   <div class="debug-log" id="debugLog"></div>
 
-  <!-- Hidden video element for receiving stream -->
   <video id="hiddenVideo" autoplay playsinline muted></video>
 
   <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
@@ -507,10 +496,9 @@
         document.getElementById('gameHeader').classList.remove('hidden');
         document.getElementById('gameContainer').classList.remove('hidden');
 
-        // Now connect to signaling server with the roomId
         connectToSignalingServer(roomId);
     });
-    // const serverUrlBase = "ws://10.0.0.134:3000";
+
     const serverUrlBase = "ws://localhost:3002";
     let ws;
     let peerConnection;
@@ -533,45 +521,39 @@
     const mouseButtonState = new Set();
     const mousePosition = {x: 0, y: 0};
 
-    // Performance tracking
     let frameCount = 0;
     let lastFrameTime = Date.now();
     let fps = 0;
     let latency = 0;
 
-    // Set canvas resolution to match stream
     canvas.width = 1920;
     canvas.height = 1080;
 
-    // UI Control Functions
     async function toggleFullscreen() {
       try {
-            if (!document.fullscreenElement) {
-            // Enter fullscreen
+        if (!document.fullscreenElement) {
             await document.documentElement.requestFullscreen();
             document.getElementById('fullscreenBtn').textContent = '🗗';
             isFullscreen = true;
             updateConnectionStatus('connected', 'Fullscreen Mode');
-            } else {
-            // Exit fullscreen
+        } else {
             await document.exitFullscreen();
             document.getElementById('fullscreenBtn').textContent = '⛶';
             isFullscreen = false;
             updateConnectionStatus('connected', 'Connected');
-            }
-        } catch (err) {
-            console.error('Fullscreen error:', err);
-            // Fallback to CSS-only fullscreen if browser doesn't support it
-            if (!isFullscreen) {
+        }
+      } catch (err) {
+        console.error('Fullscreen error:', err);
+        if (!isFullscreen) {
             streamViewport.classList.add('fullscreen-mode');
             document.getElementById('fullscreenBtn').textContent = '🗗';
             isFullscreen = true;
-            } else {
+        } else {
             streamViewport.classList.remove('fullscreen-mode');
             document.getElementById('fullscreenBtn').textContent = '⛶';
             isFullscreen = false;
-            }
         }
+      }
     }
 
     function toggleDebug() {
@@ -614,7 +596,6 @@
       document.getElementById('latencyValue').textContent = `${latency} ms`;
       document.getElementById('qualityValue').textContent = fps > 50 ? 'Excellent' : fps > 30 ? 'Good' : 'Poor';
       
-      // Update quality indicator
       const qualityLevel = fps > 50 ? 4 : fps > 30 ? 3 : fps > 15 ? 2 : 1;
       updateQualityIndicator(qualityLevel);
     }
@@ -630,7 +611,6 @@
       document.getElementById('loadingSubtext').textContent = subtext;
     }
 
-    // Render video stream to canvas
     function renderVideoToCanvas() {
       if (hiddenVideoElement.videoWidth > 0 && hiddenVideoElement.videoHeight > 0) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -644,7 +624,6 @@
           canvas.height
         );
 
-        // Calculate FPS
         frameCount++;
         const currentTime = Date.now();
         if (currentTime - lastFrameTime >= 1000) {
@@ -657,7 +636,6 @@
       animationId = requestAnimationFrame(renderVideoToCanvas);
     }
 
-    // Enhanced logging function
     function log(message, level = 'info') {
       console.log(message);
       
@@ -672,12 +650,10 @@
       debugLog.appendChild(logEntry);
       debugLog.scrollTop = debugLog.scrollHeight;
       
-      // Limit log entries
       if (debugLog.children.length > 200) {
         debugLog.removeChild(debugLog.firstChild);
       }
 
-      // Update loading text based on log messages
       if (message.includes('Connected to signaling server')) {
         showLoadingOverlay('Connected to Server', 'Initializing WebRTC connection...');
       } else if (message.includes('Video started playing')) {
@@ -686,7 +662,6 @@
       }
     }
 
-    // Throttle utility for mouse events
     function throttle(func, wait) {
       let inThrottle, lastFn, lastTime;
       return function() {
@@ -725,7 +700,6 @@
       mousePosition.y = mouseData.y;
     }, 15);
 
-    // WebSocket connection logic
     function connectToSignalingServer(roomId) {
       currentRoomId = roomId;
       const serverUrl = `${serverUrlBase}?roomId=${roomId}`;
@@ -743,7 +717,7 @@
       ws.onopen = () => {
         log('Connected to signaling server');
         updateConnectionStatus('connected', 'Server Connected');
-        startConnection(); // Start WebRTC connection after WebSocket is open
+        startConnection();
       };
 
       ws.onmessage = async (event) => {
@@ -775,7 +749,7 @@
               log('Unknown Message Type: ' + msg.type);
           }
         } catch (err) {
-          log(`Error processing WebSocket message: ${err.message}. Data: ${event.data}, 'error'`);
+          log(`Error processing WebSocket message: ${err.message}. Data: ${event.data}`, 'error');
         }
       };
 
@@ -786,7 +760,7 @@
       };
 
       ws.onclose = (event) => {
-        log(`WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason || 'N/A'}, 'warn'`);
+        log(`WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason || 'N/A'}`, 'warn');
         updateConnectionStatus('disconnected', 'Disconnected');
         if (animationId) {
           cancelAnimationFrame(animationId);
@@ -798,7 +772,6 @@
       };
     }
 
-    // PeerConnection setup
     function createPeerConnection() {
       if (peerConnection) {
         log("PeerConnection already exists, not creating again.");
@@ -830,7 +803,7 @@
             hideLoadingOverlay();
             updateConnectionStatus('connected', 'Streaming');
           }).catch(e => {
-            log(`Video play() failed: ${e}. User interaction might be required., 'error'`);
+            log(`Video play() failed: ${e}. User interaction might be required.`, 'error');
           });
         }
       };
@@ -876,8 +849,7 @@
       log(`Client attempting to create data channel "${dataChannel.label}", initial state: ${dataChannel.readyState}`);
       log(`Client attempting to create data channel "${mouseChannel.label}", initial state: ${mouseChannel.readyState}`);
 
-      latencyChannel = peerConnection.createDataChannel("latencyChannel", { ordered: true });
-      log(`Client attempting to create data channel "${latencyChannel.label}", initial state: ${latencyChannel.readyState}`);
+      
 
       dataChannel.onopen = () => {
         log(`Data Channel Opened: "${dataChannel.label}", ReadyState: ${dataChannel.readyState}`);
@@ -893,9 +865,7 @@
         }
       };
       dataChannel.onerror = (event) => {
-        // const error = event.error;
-        // const errorMessage = error ? ${error.name}: ${error.message} : 'Unknown DataChannel Error';
-        // log(Data Channel "${dataChannel.label}" error: ${errorMessage}, 'error');
+        // Handle error
       };
 
       mouseChannel.onopen = () => {
@@ -909,63 +879,10 @@
         }
       };
       mouseChannel.onerror = (event) => {
-        // const error = event.error;
-        // const errorMessage = error ? ${error.name}: ${error.message} : 'Unknown MouseChannel Error';
-        // log(Mouse Channel "${mouseChannel.label}" error: ${errorMessage}, 'error');
+        // Handle error
       };
 
-      let sequenceNumber = 0;
-      const sentPings = new Map(); // To store {sequence_number: timestamp}
-
-      function sendPing() {
-          if (latencyChannel && latencyChannel.readyState === 'open') {
-              const pingMessage = {
-                  type: "ping",
-                  timestamp: performance.now(),
-                  sequence_number: sequenceNumber++
-              };
-              latencyChannel.send(JSON.stringify(pingMessage));
-              sentPings.set(pingMessage.sequence_number, pingMessage.timestamp);
-              log(`Client sent ping ${pingMessage.sequence_number} at ${pingMessage.timestamp.toFixed(2)}`);
-          }
-      }
-
-      latencyChannel.onopen = () => {
-          log(`Latency Channel Opened: "${latencyChannel.label}", ReadyState: ${latencyChannel.readyState}`);
-          // Start sending pings only after the channel is confirmed open
-          setInterval(sendPing, 1000); // Send ping every 1 second
-      };
-
-      latencyChannel.onmessage = (event) => {
-          const message = JSON.parse(event.data);
-          if (message.type === "pong") {
-              const clientReceiveTime = performance.now();
-              const originalPingTimestamp = sentPings.get(message.sequence_number);
-
-              if (originalPingTimestamp) {
-                  const rtt = clientReceiveTime - originalPingTimestamp;
-                  latency = Math.round(rtt); // Update global latency variable
-                  log(`Client received pong ${message.sequence_number}. RTT: ${rtt.toFixed(2)} ms`);
-                  updatePerformanceDisplay(); // Update UI with new latency
-                  sentPings.delete(message.sequence_number); // Clean up
-              } else {
-                  log(`Received pong for unknown sequence number: ${message.sequence_number}`, 'warn');
-              }
-          }
-      };
-
-      latencyChannel.onclose = () => {
-          if (latencyChannel) {
-              log(`Latency Channel Closed: "${latencyChannel.label}"`);
-          } else {
-              log(`Latency Channel Closed (channel object was null).`);
-          }
-      };
-      latencyChannel.onerror = (event) => {
-          // const error = event.error;
-          // const errorMessage = error ? ${error.name}: ${error.message} : 'Unknown LatencyChannel Error';
-          // log(Latency Channel "${latencyChannel.label}" error: ${errorMessage}, 'error');
-      };
+      
 
       videoFeedbackChannel = peerConnection.createDataChannel("videoFeedbackChannel", { ordered: true });
       log(`Client attempting to create data channel "${videoFeedbackChannel.label}", initial state: ${videoFeedbackChannel.readyState}`);
@@ -975,19 +892,27 @@
       };
 
       videoFeedbackChannel.onmessage = (event) => {
-          const message = JSON.parse(event.data);
-          if (message.type === "video_frame_ping") {
-              const clientReceiveTime = performance.now();
-              const pongMessage = {
-                  type: "video_frame_pong",
-                  frame_id: message.frame_id,
-                  host_send_time: message.host_send_time,
-                  client_receive_time: clientReceiveTime
-              };
-              videoFeedbackChannel.send(JSON.stringify(pongMessage));
-              const rtt = clientReceiveTime - message.host_send_time;
-              log(`Client received video_frame_ping for frame ${message.frame_id}. RTT: ${rtt.toFixed(2)} ms`);
+        const message = JSON.parse(event.data);
+
+        if (message.type === "video_frame_ping") {
+          log(`[CLIENT] [PING] Received video_frame_ping for frame ${message.frame_id}`);
+
+          const pongMessage = {
+            type: "video_frame_pong",
+            frame_id: message.frame_id,
+            host_send_time: message.host_send_time,
+          };
+
+          if (videoFeedbackChannel && videoFeedbackChannel.readyState === 'open') {
+            videoFeedbackChannel.send(JSON.stringify(pongMessage));
+            log(`[CLIENT] [PONG] Sent video_frame_pong for frame ${message.frame_id}`);
+          } else {
+            log("[CLIENT] videoFeedbackChannel not open, cannot send pong.", 'warn');
           }
+        } else if (message.type === "rtt_update") {
+          latency = message.rtt.toFixed(1); // Update global latency variable
+          updatePerformanceDisplay(); // Update UI with new latency
+        }
       };
 
       videoFeedbackChannel.onclose = () => {
@@ -998,9 +923,7 @@
           }
       };
       videoFeedbackChannel.onerror = (event) => {
-          // const error = event.error;
-          // const errorMessage = error ? ${error.name}: ${error.message} : 'Unknown VideoFeedbackChannel Error';
-          // log(Video Feedback Channel "${videoFeedbackChannel.label}" error: ${errorMessage}, 'error');
+        // Handle error
       };
     }
 
@@ -1059,11 +982,9 @@
       }
     }
 
-    // Event handlers
     function handleKeyDown(event) {
       if (!event.code || event.repeat) return;
       
-      // Handle escape key for fullscreen
       if (event.key === 'Escape' && (isFullscreen || document.fullscreenElement)) {
         if(document.fullscreenElement){
             document.exitFullscreen()
@@ -1073,7 +994,6 @@
         return
       }
       
-      // Handle F12 for debug toggle
       if (event.key === 'F12') {
         event.preventDefault();
         toggleDebug();
@@ -1179,7 +1099,6 @@
       }
     }
 
-    // Event listeners
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
 
@@ -1193,56 +1112,13 @@
 
     document.addEventListener('fullscreenchange', () => {
         if (!document.fullscreenElement && isFullscreen) {
-            // User exited fullscreen (probably with Esc key)
             document.getElementById('fullscreenBtn').textContent = '⛶';
             isFullscreen = false;
             updateConnectionStatus('connected', 'Connected');
         }
     });
 
-    // Initialize
     showLoadingOverlay('Initializing', 'Starting CloudGaming client...');
-    // connectToSignalingServer(); // This will now be called by the join button
-    
-    // The following block is now part of connectToSignalingServer's onopen callback
-    // let connectionStarted = false;
-    // const startDelay = 2000;
-    // log(`Will attempt to start WebRTC connection in ${startDelay / 1000} seconds...`);
-
-    // setTimeout(() => {
-    //   if (connectionStarted) return;
-
-    //   if (ws && ws.readyState === WebSocket.OPEN) {
-    //     log("WebSocket connected on first check. Starting WebRTC connection.");
-    //     connectionStarted = true;
-    //     startConnection();
-    //   } else {
-    //     log("WebSocket not connected after timeout. Waiting for connection via interval check...");
-    //     let checkCounter = 0;
-    //     const maxChecks = 10;
-    //     const wsOpenCheck = setInterval(() => {
-    //       checkCounter++;
-    //       log(`WebSocket connection check #${checkCounter}... State: ${ws?.readyState}`);
-    //       if (connectionStarted) {
-    //         clearInterval(wsOpenCheck);
-    //         return;
-    //       }
-
-    //       if (ws && ws.readyState === WebSocket.OPEN) {
-    //         log("WebSocket connected after delay. Starting WebRTC connection.");
-    //         clearInterval(wsOpenCheck);
-    //         connectionStarted = true;
-    //         startConnection();
-    //       } else if (checkCounter >= maxChecks) {
-    //         log("WebSocket did not connect after multiple checks. Aborting WebRTC start.", 'error');
-    //         clearInterval(wsOpenCheck);
-    //         showLoadingOverlay('Connection Failed', 'Unable to connect to game server');
-    //       }
-    //     }, 500);
-    //   }
-    // }, startDelay);
-
-    
   </script>
 </body>
 </html>

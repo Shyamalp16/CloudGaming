@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"strconv"
 	"sync"
 	"time"
 	"unsafe"
@@ -36,8 +37,8 @@ var (
 	mouseChannel          *webrtc.DataChannel
 	latencyChannel        *webrtc.DataChannel
 	videoFeedbackChannel  *webrtc.DataChannel
-	pingTimestamps        map[uint64]float64 // Stores host_send_time for video_frame_ping
-	pingTimestampsMutex   sync.Mutex         // Mutex for pingTimestamps
+	pingTimestamps        map[uint64]int64 // Stores host_send_time for video_frame_ping
+	pingTimestampsMutex   sync.Mutex       // Mutex for pingTimestamps
 )
 
 func init() {
@@ -147,10 +148,14 @@ func createPeerConnectionGo() C.int {
 		messageQueue = []string{}
 		mouseQueue = []string{}
 		lastAnswerSDP = ""
-		pingTimestamps = make(map[uint64]float64) // Initialize/clear the map
+		pingTimestamps = make(map[uint64]int64) // Initialize/clear the map
 		log.Println(
 			"[Go/Pion] createPeerConnectionGo: Closed previous PeerConnection and reset state.",
 		)
+	} else {
+		// This is the first run, initialize the map.
+		pingTimestamps = make(map[uint64]int64)
+		log.Println("[Go/Pion] createPeerConnectionGo: Initializing pingTimestamps for new PeerConnection.")
 	}
 
 	mediaEngine := &webrtc.MediaEngine{}
@@ -546,19 +551,48 @@ func createPeerConnectionGo() C.int {
 				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
 					if msgType, ok := messageData["type"].(string); ok {
 						if msgType == "video_frame_pong" {
-							if frameID, ok := messageData["frame_id"].(float64); ok {
-								pingTimestampsMutex.Lock()
-								hostSendTime, found := pingTimestamps[uint64(frameID)]
-								delete(pingTimestamps, uint64(frameID))
-								pingTimestampsMutex.Unlock()
+							if frameIDFloat, ok := messageData["frame_id"].(float64); ok {
+								frameID := uint64(frameIDFloat)
+								if hostSendTimeString, ok := messageData["host_send_time"].(string); ok {
+									hostSendTime, err := strconv.ParseInt(hostSendTimeString, 10, 64)
+									if err != nil {
+										log.Printf("[Go/Pion] Error parsing host_send_time from pong: %v", err)
+										return
+									}
 
-								if found {
-									hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
-									rtt := hostReceiveTime - hostSendTime
-									log.Printf("[Go/Pion] Received video_frame_pong for frame %d. RTT: %.2f ms", uint64(frameID), rtt)
+									pingTimestampsMutex.Lock()
+									originalHostSendTime, found := pingTimestamps[frameID]
+									delete(pingTimestamps, frameID) // Clean up the map
+									pingTimestampsMutex.Unlock()
+
+									if found {
+										// Optional: Verify the timestamp hasn't been tampered with
+										if hostSendTime != originalHostSendTime {
+											log.Printf("[Go/Pion] [PONG] Timestamp mismatch for frame %d. Original: %d, Received: %d", frameID, originalHostSendTime, hostSendTime)
+											return
+										}
+										hostReceiveTime := time.Now().UnixNano()
+										rttNano := hostReceiveTime - hostSendTime
+										rttMilli := float64(rttNano) / float64(time.Millisecond)
+										log.Printf("[Go/Pion] [PONG] RTT for frame %d: %.2f ms", frameID, rttMilli)
+
+										// Send RTT update back to the client
+										rttUpdateMsg := map[string]interface{}{
+											"type": "rtt_update",
+											"rtt":  rttMilli,
+										}
+										rttJSON, _ := json.Marshal(rttUpdateMsg)
+										if err := dc.SendText(string(rttJSON)); err != nil {
+											log.Printf("[Go/Pion] Error sending RTT update: %v", err)
+										}
+									} else {
+										log.Printf("[Go/Pion] [PONG] Received pong for unknown or expired frame_id: %d", frameID)
+									}
 								} else {
-									log.Printf("[Go/Pion] Received video_frame_pong for unknown frame %d", uint64(frameID))
+									log.Printf("[Go/Pion] [PONG] Invalid 'host_send_time' in pong message: %v", messageData["host_send_time"])
 								}
+							} else {
+								log.Printf("[Go/Pion] [PONG] Invalid 'frame_id' in pong message: %v", messageData["frame_id"])
 							}
 						}
 					}
@@ -861,20 +895,28 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	// After sending all RTP packets for the frame, send a video_frame_ping
 	if videoFeedbackChannel != nil && videoFeedbackChannel.ReadyState() == webrtc.DataChannelStateOpen {
 		videoFrameCounter++
-		hostSendTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
+		hostSendTime := time.Now().UnixNano()
+
 		pingTimestampsMutex.Lock()
 		pingTimestamps[videoFrameCounter] = hostSendTime
 		pingTimestampsMutex.Unlock()
+
 		pingMessage := map[string]interface{}{
 			"type":           "video_frame_ping",
 			"frame_id":       videoFrameCounter,
-			"host_send_time": hostSendTime,
+			"host_send_time": fmt.Sprintf("%d", hostSendTime), // Send as a string to avoid JS precision loss
 		}
-		pingJSON, _ := json.Marshal(pingMessage)
+
+		pingJSON, err := json.Marshal(pingMessage)
+		if err != nil {
+			log.Printf("[Go/Pion] Error marshalling video_frame_ping: %v\n", err)
+			return 0 // Keep as C.int return
+		}
+
 		if err := videoFeedbackChannel.SendText(string(pingJSON)); err != nil {
 			log.Printf("[Go/Pion] Error sending video_frame_ping: %v\n", err)
 		} else {
-			log.Printf("[Go/Pion] Sent video_frame_ping for frame %d at %.2f\n", videoFrameCounter, hostSendTime)
+			log.Printf("[Go/Pion] [PING] Sent video_frame_ping for frame %d.", videoFrameCounter)
 		}
 	}
 
