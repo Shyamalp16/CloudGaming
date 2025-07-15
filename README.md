@@ -88,28 +88,3 @@ The Client is a simple web page that allows a user to connect to a Host and star
 8.  Once they have exchanged the offer/answer and enough ICE candidates, a direct **P2P connection** is established between the Client and Host.
 9.  The **Host** begins capturing, encoding, and streaming H.264 video frames directly to the **Client**.
 10. The **Client** begins receiving the video stream and sending user input back to the Host. The Signaling Server is no longer needed for this session.
-
-## Getting Started
-
-*(This section is a template. You will need to fill in the specific build steps for your environment.)*
-
-### Prerequisites
-- **Host**: Windows 10/11, Visual Studio with C++ workload, Go, vcpkg (for dependencies like FFmpeg).
-- **Server**: Node.js, npm.
-- **Client**: A modern web browser.
-
-### Running the Application
-1.  **Start the Server**:
-    ```bash
-    cd Server
-    npm install
-    node PureSignalingServer.js
-    ```
-2.  **Build and Run the Host**:
-    - Open `DisplayCaptureProject.sln` in Visual Studio.
-    - Ensure all dependencies (FFmpeg, etc.) are correctly linked.
-    - Build and run the project. It will connect to the server.
-3.  **Open the Client**:
-    - Open `Client/html-server/index.html` in a web browser.
-    - Enter the Room ID that the Host is using.
-    - Click "Join" to start the stream.
