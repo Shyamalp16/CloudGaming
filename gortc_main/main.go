@@ -1083,6 +1083,21 @@ func getPeerConnectionState() C.int {
 	}
 }
 
+//export initGo
+func initGo() C.int {
+	log.Println("[Go/Pion] initGo: Initializing Go WebRTC module.")
+	return createPeerConnectionGo()
+}
+
+//export closeGo
+func closeGo() {
+	log.Println("[Go/Pion] closeGo: Closing Go WebRTC module.")
+	closePeerConnection()
+}
+
 func main() {
-	log.Println("[Go/Pion] main() in DLL. Doing nothing.")
+	// This main function is required for building as a C shared library,
+	// but its contents are not directly executed when loaded as a DLL.
+	// Initialization and cleanup are handled by initGo and closeGo.
+	log.Println("[Go/Pion] main() in DLL. Not directly executed.")
 }
