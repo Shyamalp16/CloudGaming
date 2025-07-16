@@ -40,6 +40,8 @@ namespace Encoder {
 
     void SignalEncoderShutdown();
 
+    void AdjustBitrate(int new_bitrate);
+
     // External declaration for WebRTC interaction
     extern "C" int sendVideoPacket(uint8_t* data, int size, int64_t pts);
 

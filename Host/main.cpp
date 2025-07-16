@@ -32,6 +32,25 @@
 #include "ShutdownManager.h"
 #include "IdGenerator.h"
 #include "pion_webrtc.h" 
+#include "Encoder.h"
+
+// RTCP Callback Function
+void onRTCP(double packetLoss, double rtt, double jitter) {
+    std::wcout << L"[main] RTCP Stats - Packet Loss: " << packetLoss 
+               << L", RTT: " << rtt 
+               << L", Jitter: " << jitter << std::endl;
+
+    // Simple bitrate adjustment logic
+    // This is a basic example. A more sophisticated algorithm would be needed for production.
+    static int currentBitrate = 30000000; // Initial bitrate
+    if (packetLoss > 0.05 && currentBitrate > 1000000) {
+        currentBitrate *= 0.8; // Decrease bitrate by 20%
+        Encoder::AdjustBitrate(currentBitrate);
+    } else if (packetLoss < 0.02 && currentBitrate < 50000000) {
+        currentBitrate *= 1.1; // Increase bitrate by 10%
+        Encoder::AdjustBitrate(currentBitrate);
+    }
+}
 
 // Function to monitor the WebRTC connection state
 void monitorConnection() {
@@ -48,6 +67,7 @@ int main()
     std::wcout << L"[main] Apartment initialized.\n";
 
     initGo(); 
+    SetRTCPCallback(onRTCP); 
 
     // --- Load Configuration ---
     nlohmann::json config;

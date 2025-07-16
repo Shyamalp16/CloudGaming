@@ -97,3 +97,47 @@ The system now properly handles peer disconnection. When a client closes their b
 2.  It sends a `peer-disconnected` message to the other peer in the room (the **Host**).
 3.  The **Host** receives this message and initiates a graceful shutdown, closing the PeerConnection, stopping the capture and encoding threads, and releasing all resources.
 4.  On the **Client** side, if the connection is lost, it will display a "Connection Lost" message and attempt to reconnect. If the host disconnects, the client will be notified and will not attempt to reconnect.
+
+---
+
+## Dynamic Bitrate for Adaptive Streaming
+
+To provide a smooth experience even under changing network conditions, the Host implements a dynamic bitrate system that adapts the video quality in real-time. This prevents stream stuttering and freezing on weaker or unstable networks.
+
+### Technical Implementation: The Feedback Loop
+
+The system works by creating a continuous feedback loop between the Client and the Host.
+
+1.  **Client Sends Feedback (RTCP):**
+    *   The user's web browser, while receiving the video, automatically sends **RTCP (RTP Control Protocol) Receiver Reports** back to the Host. This is a standard part of the WebRTC protocol.
+    *   These reports contain crucial statistics, most importantly **Packet Loss** (the percentage of video packets that never arrived) and **Jitter** (the variation in packet arrival times).
+
+2.  **Go/Pion Intercepts the Feedback:**
+    *   In `gortc_main/main.go`, an **RTCP Interceptor** (`rtcpReaderInterceptor`) is registered with the Pion WebRTC stack.
+    *   This interceptor's job is to "catch" these incoming RTCP reports, open them, and extract the packet loss and jitter values.
+
+3.  **Go Calls the C++ Callback:**
+    *   The Go interceptor then calls a C function pointer that was registered by the C++ application.
+    *   This call crosses the language boundary from Go to C++, passing the network statistics as arguments.
+
+4.  **C++ Logic Makes a Decision:**
+    *   The call arrives in `main.cpp` at the `onRTCP` function, which contains the control logic:
+        ```cpp
+        // If packet loss is high, reduce bitrate.
+        if (packetLoss > 0.05) {
+            currentBitrate *= 0.8; // Decrease bitrate by 20%
+            Encoder::AdjustBitrate(currentBitrate);
+        } 
+        // If packet loss is low, increase bitrate for better quality.
+        else if (packetLoss < 0.02) {
+            currentBitrate *= 1.1; // Increase bitrate by 10%
+            Encoder::AdjustBitrate(currentBitrate);
+        }
+        ```
+
+5.  **The Encoder Adjusts its Target:**
+    *   The `onRTCP` function calls `Encoder::AdjustBitrate()`, passing the newly calculated target bitrate.
+    *   Inside `Encoder.cpp`, this function safely updates the `bit_rate` property of the FFmpeg `AVCodecContext`.
+    *   From this point forward, the NVENC hardware encoder will compress the video stream to match this new, adjusted bitrate.
+
+This entire process runs continuously, allowing the stream to adapt to changing network conditions in near real-time, ensuring the best possible quality and smoothness.

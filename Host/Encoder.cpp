@@ -578,4 +578,12 @@ namespace Encoder {
         av_buffer_unref(&hwDeviceCtx);
         std::wcout << L"[Encoder] NVENC Encoder finalized.\n";
     }
+
+    void AdjustBitrate(int new_bitrate) {
+        std::lock_guard<std::mutex> lock(g_encoderMutex);
+        if (codecCtx) {
+            std::wcout << L"[Encoder] Adjusting bitrate to " << new_bitrate << L" bps\n";
+            codecCtx->bit_rate = new_bitrate;
+        }
+    }
 }

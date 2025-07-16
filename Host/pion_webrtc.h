@@ -73,6 +73,13 @@ extern "C" {
      */
     void onIceCandidate(const char* candidate);
 
+    /**
+     * @brief Sets the callback function for RTCP statistics.
+     * @param callback A function pointer to handle RTCP data (packet loss, RTT, jitter).
+     */
+    typedef void (*RTCPCallback)(double, double, double);
+    void SetRTCPCallback(RTCPCallback callback);
+
     char* getDataChannelMessage();
 
     char* getMouseChannelMessage();

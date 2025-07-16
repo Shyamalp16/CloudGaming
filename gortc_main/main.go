@@ -4,6 +4,15 @@ package main
 #cgo CFLAGS: -I.
 #include <stdlib.h>
 #include <string.h>
+
+typedef void (*RTCPCallback)(double packetLoss, double rtt, double jitter);
+
+// Helper function to call the C function pointer
+static inline void callRTCPCallback(RTCPCallback f, double p, double r, double j) {
+    if (f) {
+        f(p, r, j);
+    }
+}
 */
 import "C"
 import (
@@ -16,9 +25,13 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/pion/interceptor"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v3"
 )
+
+var rtcpCallback C.RTCPCallback
 
 // Global variables
 var (
@@ -160,6 +173,15 @@ func createPeerConnectionGo() C.int {
 	}
 
 	mediaEngine := &webrtc.MediaEngine{}
+	i := &interceptor.Registry{}
+
+	// Use the factory to add the interceptor
+	i.Add(&rtcpReaderFactory{})
+
+	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, i); err != nil {
+		log.Printf("[Go/Pion] Error registering default interceptors: %v\n", err)
+		return 0
+	}
 	codec := webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:    "video/h264",
@@ -181,7 +203,7 @@ func createPeerConnectionGo() C.int {
 	}
 	log.Println("[Go/Pion] createPeerConnectionGo: MediaEngine configured.")
 
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine))
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithInterceptorRegistry(i))
 
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
@@ -1095,9 +1117,55 @@ func closeGo() {
 	closePeerConnection()
 }
 
+//export SetRTCPCallback
+func SetRTCPCallback(callback C.RTCPCallback) {
+	rtcpCallback = callback
+}
+
 func main() {
 	// This main function is required for building as a C shared library,
 	// but its contents are not directly executed when loaded as a DLL.
 	// Initialization and cleanup are handled by initGo and closeGo.
 	log.Println("[Go/Pion] main() in DLL. Not directly executed.")
+}
+
+// rtcpReaderFactory implements the interceptor.Factory interface
+type rtcpReaderFactory struct{}
+
+// NewInterceptor creates a new rtcpReaderInterceptor
+func (f *rtcpReaderFactory) NewInterceptor(id string) (interceptor.Interceptor, error) {
+	return &rtcpReaderInterceptor{}, nil
+}
+
+// rtcpReaderInterceptor implements the interceptor.Interceptor interface
+type rtcpReaderInterceptor struct {
+	interceptor.Interceptor
+}
+
+// BindRTCPReader wraps the RTCPReader to intercept incoming RTCP packets
+func (r *rtcpReaderInterceptor) BindRTCPReader(reader interceptor.RTCPReader) interceptor.RTCPReader {
+	return interceptor.RTCPReaderFunc(func(in []byte, a interceptor.Attributes) (n int, attr interceptor.Attributes, err error) {
+		pkts, err := rtcp.Unmarshal(in)
+		if err != nil {
+			return reader.Read(in, a)
+		}
+
+		if a == nil {
+			a = make(interceptor.Attributes)
+		}
+
+		for _, pkt := range pkts {
+			switch p := pkt.(type) {
+			case *rtcp.ReceiverReport:
+				for _, report := range p.Reports {
+					if rtcpCallback != nil {
+						packetLoss := float64(report.FractionLost) / 256.0
+						jitterSeconds := float64(report.Jitter) / 90000.0
+						C.callRTCPCallback(rtcpCallback, C.double(packetLoss), C.double(0), C.double(jitterSeconds))
+					}
+				}
+			}
+		}
+		return reader.Read(in, a)
+	})
 }
