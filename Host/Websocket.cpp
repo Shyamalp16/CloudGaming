@@ -154,6 +154,10 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
             // Note: The actual handling of key/mouse events (e.g., calling handleKeyInput, handleMouseInput)
             // is outside the scope of this latency measurement task, but this is where you'd integrate it.
         }
+        else if (type == "peer-disconnected") {
+            std::cout << "[WebSocket] Peer has disconnected. Initiating shutdown." << std::endl;
+            g_shutdown_flag.store(true);
+        }
         else if (type == "offer") {
             std::cout << "[WebSocket] Received offer from server: \n" << message.dump() << std::endl;
             std::string sdp = message.value("sdp", "");

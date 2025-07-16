@@ -34,8 +34,21 @@ server.on('connection', (ws) => {
     })
 
     ws.on('close', () => {
-        console.log('Client Disconnected')
-        connections = connections.filter((client) => client != ws)
+        console.log('Client Disconnected');
+        const otherPeer = connections.find(client => client !== ws);
+        connections = connections.filter(client => client !== ws);
+
+        if (otherPeer && otherPeer.readyState === WebSocket.OPEN) {
+            try {
+                otherPeer.send(JSON.stringify({ type: 'peer-disconnected' }), (error) => {
+                    if (error) {
+                        console.error('Error notifying peer of disconnection:', error);
+                    }
+                });
+            } catch (error) {
+                console.error('Exception while notifying peer of disconnection:', error);
+            }
+        }
     })
 })
 

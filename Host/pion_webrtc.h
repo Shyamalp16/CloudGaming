@@ -7,6 +7,16 @@ extern "C" {
 #endif
 
     /**
+     * @brief Initializes the Go runtime.
+     */
+    void initGo();
+
+    /**
+     * @brief Closes the Go runtime.
+     */
+    void closeGo();
+
+    /**
      * @brief Creates a new WebRTC PeerConnection with H.264 support.
      * @return 1 on success, 0 on failure.
      */
@@ -45,6 +55,12 @@ extern "C" {
      *         See webrtc::ICEConnectionState enum for values (e.g., 4 = Connected).
      */
     int getIceConnectionState();
+
+    /**
+     * @brief Gets the current PeerConnection state.
+     * @return The PeerConnection state as an integer.
+     */
+    int getPeerConnectionState();
 
     /**
      * @brief Closes the PeerConnection and cleans up resources.

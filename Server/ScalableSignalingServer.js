@@ -13,10 +13,41 @@ const subscriber = redisClient.duplicate();
 
 const server = new WebSocket.Server({ port: WEBSOCKET_PORT });
 
+// In-memory map for clients connected to THIS server instance.
+// Map<roomId, Set<WebSocket>>
+const localRooms = new Map();
+
+// Shared handler for all messages from Redis Pub/Sub.
+function handleRedisMessage(message, channel) {
+    try {
+        // Extract roomId from the channel name (e.g., 'room:123' -> '123')
+        const roomId = channel.replace(/^room:/, '');
+        const { senderId, data } = JSON.parse(message);
+
+        const clientsInRoom = localRooms.get(roomId);
+        if (clientsInRoom) {
+            clientsInRoom.forEach(client => {
+                // Forward the message to all clients in the room on this instance,
+                // except for the original sender.
+                if (client.clientId !== senderId && client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify(data));
+                }
+            });
+        }
+    } catch (error) {
+        console.error(`Error handling Redis message on channel ${channel}:`, error);
+    }
+}
+
 async function main() {
     await redisClient.connect();
     await subscriber.connect();
     console.log('Connected to Redis.');
+
+    // Subscribe to all room channels using a single pattern subscription.
+    // This is highly scalable as we don't create a new subscription for each client or room.
+    await subscriber.pSubscribe('room:*', handleRedisMessage);
+    console.log('Subscribed to Redis channel pattern room:*');
 
     server.on('connection', async (ws, request) => {
         try {
@@ -25,7 +56,6 @@ async function main() {
                 ws.close(1008, 'Malformed request');
                 return;
             }
-            console.log(`[WebSocket Server] Received connection request URL: ${request.url}`);
             const parameters = new url.URL(request.url, `ws://${request.headers.host}`).searchParams;
             const roomId = parameters.get('roomId');
 
@@ -35,25 +65,20 @@ async function main() {
                 return;
             }
 
-            // Use a Redis Set to manage clients in a room.
-            // SADD returns the number of elements added (1 if new, 0 if exists).
-            // SCARD gives the total size of the set.
             const roomKey = `room:${roomId}`;
             const roomSize = await redisClient.sCard(roomKey);
-
-            // If a client joins a room that was previously empty and had a TTL set, persist the key
-            if (roomSize === 0) {
-                await redisClient.persist(roomKey);
-                console.log(`Room ${roomId} was empty, removed TTL.`);
-            }
 
             if (roomSize >= 2) {
                 console.log(`Room ${roomId} is full. Rejecting new connection.`);
                 ws.close(1000, 'Room is full');
                 return;
             }
+            
+            if (roomSize === 0) {
+                await redisClient.persist(roomKey);
+                console.log(`Room ${roomId} was empty, removed TTL.`);
+            }
 
-            // Store a unique ID for this client in the room's set
             const clientId = `client:${Date.now()}:${Math.random()}`;
             await redisClient.sAdd(roomKey, clientId);
 
@@ -61,25 +86,19 @@ async function main() {
             ws.roomId = roomId;
             ws.clientId = clientId;
 
-            console.log(`Client ${clientId} joined room ${roomId}.`);
+            // Add the client to the in-memory map for this server instance.
+            if (!localRooms.has(roomId)) {
+                localRooms.set(roomId, new Set());
+            }
+            localRooms.get(roomId).add(ws);
 
-            // --- Subscribe to the Redis channel for this room ---
-            // The channel name is the same as the room key
-            await subscriber.subscribe(roomKey, (message) => {
-                // This callback receives messages published to the channel.
-                const { senderId, data } = JSON.parse(message);
-
-                // Don't send the message back to the original sender
-                if (ws.clientId !== senderId && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify(data));
-                }
-            });
+            console.log(`Client ${clientId} joined room ${roomId}. This instance now has ${localRooms.get(roomId).size} client(s) in this room.`);
 
             ws.on('message', async (message) => {
                 try {
                     const parsedMessage = JSON.parse(message);
                     // Publish the message to the Redis channel for this room.
-                    // All subscribed servers (including this one) will receive it.
+                    // All subscribed server instances will receive it.
                     await redisClient.publish(roomKey, JSON.stringify({
                         senderId: ws.clientId,
                         data: parsedMessage
@@ -91,15 +110,30 @@ async function main() {
 
             ws.on('close', async () => {
                 console.log(`Client ${ws.clientId} disconnected from room ${ws.roomId}.`);
-                // Remove the client from the Redis set
-                await redisClient.sRem(roomKey, ws.clientId);
                 
-                // Unsubscribe from the channel to prevent memory leaks
-                await subscriber.unsubscribe(roomKey);
+                // Remove the client from the global room set in Redis.
+                await redisClient.sRem(roomKey, ws.clientId);
 
+                // Notify the other peer about the disconnection by publishing to the room channel.
+                await redisClient.publish(roomKey, JSON.stringify({
+                    senderId: ws.clientId,
+                    data: { type: 'peer-disconnected' }
+                }));
+
+                // Remove the client from this instance's in-memory map.
+                const roomClients = localRooms.get(ws.roomId);
+                if (roomClients) {
+                    roomClients.delete(ws);
+                    if (roomClients.size === 0) {
+                        localRooms.delete(ws.roomId);
+                        console.log(`Room ${ws.roomId} is now empty on this instance.`);
+                    }
+                }
+
+                // If the room is now empty globally, set it to expire.
                 const remainingClients = await redisClient.sCard(roomKey);
                 if (remainingClients === 0) {
-                    console.log(`Room ${roomId} is now empty. Setting TTL.`);
+                    console.log(`Room ${roomId} is now empty globally. Setting TTL.`);
                     await redisClient.expire(roomKey, 120); // Set TTL to 120 seconds
                 }
             });

@@ -38,6 +38,11 @@ function connectToSignalingServer(roomId) {
       console.log('Received from server:', JSON.stringify(msg, null, 2));
 
       switch (msg.type) {
+        case 'peer-disconnected':
+          console.log('Peer has disconnected.');
+          peerConnection.close();
+          alert('The other user has disconnected.');
+          break;
         case 'answer':
           await handleAnswer(msg);
           break;

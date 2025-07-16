@@ -39,6 +39,7 @@ var (
 	videoFeedbackChannel  *webrtc.DataChannel
 	pingTimestamps        map[uint64]int64 // Stores host_send_time for video_frame_ping
 	pingTimestampsMutex   sync.Mutex       // Mutex for pingTimestamps
+	connectionState       webrtc.PeerConnectionState
 )
 
 func init() {
@@ -707,6 +708,9 @@ func createPeerConnectionGo() C.int {
 		log.Printf("[Go/Pion] ICE Connection State: %s\n", state.String())
 	})
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		pcMutex.Lock()
+		connectionState = state
+		pcMutex.Unlock()
 		log.Printf("[Go/Pion] PeerConnection State: %s\n", state.String())
 	})
 
@@ -1042,6 +1046,13 @@ func closePeerConnection() {
 	}
 }
 
+//export getConnectionState
+func getConnectionState() C.int {
+	pcMutex.Lock()
+	defer pcMutex.Unlock()
+	return C.int(connectionState)
+}
+
 //export getPeerConnectionState
 func getPeerConnectionState() C.int {
 	pcMutex.Lock()
@@ -1051,7 +1062,7 @@ func getPeerConnectionState() C.int {
 		return C.int(0)
 	}
 
-	state := peerConnection.ConnectionState()
+	state := connectionState
 	log.Printf("[Go/Pion] PeerConnection state: %s\n", state.String())
 
 	switch state {

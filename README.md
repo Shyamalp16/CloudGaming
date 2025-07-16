@@ -52,12 +52,12 @@ The Host is the core of the streaming solution. It runs on the machine with the 
 
 ### 2. Signaling Server (`/Server`)
 
-This is a lightweight but essential component for establishing the P2P connection.
+This is a lightweight but essential component for establishing the P2P connection. The server is designed to be stateless, allowing multiple instances to run behind a load balancer for high availability and scalability.
 
 **Key Components:**
 *   **`PureSignalingServer.js`**: A simple implementation that allows two peers (one Host, one Client) to find each other and exchange the necessary information to connect.
-*   **`ScalableSignalingServer.js`**: (Presumed) A more advanced implementation for handling multiple rooms and concurrent sessions.
-*   **Logic**: The server listens for WebSocket connections. When it receives a message from one peer (e.g., an "offer" from the Client), it forwards it to the other peer. This relaying of session descriptions and ICE candidates is its only job.
+*   **`ScalableSignalingServer.js`**: A more advanced, stateless implementation that uses **Redis** to store all room and session state. It uses a single, pattern-based Redis subscription (`psubscribe`) to efficiently handle messaging for all rooms, eliminating the need for per-client subscriptions and allowing for seamless scaling.
+*   **Logic**: The server listens for WebSocket connections. When a client connects, it is added to a room in Redis. When it sends a message, the message is published to the room's Redis channel. All server instances subscribed to the channel pattern will receive the message and forward it to the appropriate clients connected to their instance.
 
 ### 3. Client (`/Client`)
 
@@ -88,3 +88,12 @@ The Client is a simple web page that allows a user to connect to a Host and star
 8.  Once they have exchanged the offer/answer and enough ICE candidates, a direct **P2P connection** is established between the Client and Host.
 9.  The **Host** begins capturing, encoding, and streaming H.264 video frames directly to the **Client**.
 10. The **Client** begins receiving the video stream and sending user input back to the Host. The Signaling Server is no longer needed for this session.
+
+## Peer Disconnection Handling
+
+The system now properly handles peer disconnection. When a client closes their browser or the connection is otherwise interrupted, the following occurs:
+
+1.  The **Signaling Server** detects the closed WebSocket connection.
+2.  It sends a `peer-disconnected` message to the other peer in the room (the **Host**).
+3.  The **Host** receives this message and initiates a graceful shutdown, closing the PeerConnection, stopping the capture and encoding threads, and releasing all resources.
+4.  On the **Client** side, if the connection is lost, it will display a "Connection Lost" message and attempt to reconnect. If the host disconnects, the client will be notified and will not attempt to reconnect.

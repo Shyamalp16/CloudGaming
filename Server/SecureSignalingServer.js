@@ -55,9 +55,26 @@ server.on('connection', (ws, req) => {
         ws.on('close', () => {
             const room = rooms.get(ws.roomId);
             if (room) {
-                room.delete(ws);
+                room.delete(ws); // Remove the disconnected client
                 console.log(`Client left room ${ws.roomId}. Total clients in room: ${room.size}`);
 
+                // Notify the remaining peer, if any
+                if (room.size > 0) {
+                    const otherPeer = [...room][0]; // The only one left
+                    if (otherPeer && otherPeer.readyState === WebSocket.OPEN) {
+                        try {
+                            otherPeer.send(JSON.stringify({ type: 'peer-disconnected' }), (error) => {
+                                if (error) {
+                                    console.error('Error notifying peer of disconnection:', error);
+                                }
+                            });
+                        } catch (error) {
+                            console.error('Exception while notifying peer of disconnection:', error);
+                        }
+                    }
+                }
+
+                // If the room is now empty, delete it from the map
                 if (room.size === 0) {
                     console.log(`Room ${ws.roomId} is empty. Deleting room.`);
                     rooms.delete(ws.roomId);

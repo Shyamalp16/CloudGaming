@@ -1,4 +1,5 @@
 #include "MouseInputHandler.h"
+#include "ShutdownManager.h"
 #include <Windows.h>
 
 using json = nlohmann::json;
@@ -68,7 +69,7 @@ namespace MouseInputHandler {
 
 	void mouseMessagePollingLoop() {
 		std::cout << "[MouseInputHandler] Starting mouse message polling loop..." << std::endl;
-		while (isRunning) {
+		while (isRunning && !g_shutdown_flag) {
 			char* cMsg = getMouseChannelMessage();
 			if (cMsg != nullptr) {
 				std::string message;

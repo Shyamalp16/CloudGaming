@@ -730,6 +730,18 @@
           }
 
           switch (msg.type) {
+            case 'peer-disconnected':
+              log('Peer has disconnected. Closing connection.', 'warn');
+              if (peerConnection) {
+                peerConnection.close();
+              }
+              showLoadingOverlay('Host Disconnected', 'The host has ended the session.');
+              updateConnectionStatus('disconnected', 'Host Left');
+              if (ws) {
+                ws.onclose = null; // Prevent the default onclose handler from trying to reconnect
+                ws.close();
+              }
+              break;
             case 'answer':
               await handleAnswer(msg);
               break;

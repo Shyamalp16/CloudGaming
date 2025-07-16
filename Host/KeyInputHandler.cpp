@@ -1,4 +1,5 @@
 #include "KeyInputHandler.h"
+#include "ShutdownManager.h" 
 
 using json = nlohmann::json;
 
@@ -182,7 +183,7 @@ namespace KeyInputHandler {
 
 	void messagePollingLoop() {
 		std::cout << "[KeyInputHandler] Starting message polling loop..." << std::endl;
-		while (isRunning) {
+		while (isRunning && !g_shutdown_flag) {
 			char* cMsg = getDataChannelMessage();
 
 			if (cMsg != nullptr) {

@@ -16,10 +16,38 @@
 
 #include "IdGenerator.h"
 
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <iostream>
+#include <conio.h>
+#include <fstream>
+#include <nlohmann/json.hpp>
+
+#include "D3DHelpers.h"
+#include "WindowHelpers.h"
+#include "CaptureHelpers.h"
+#include "FrameCaptureThread.h"
+#include "Websocket.h"
+#include "AudioCapturer.h"
+#include "ShutdownManager.h"
+#include "IdGenerator.h"
+#include "pion_webrtc.h" 
+
+// Function to monitor the WebRTC connection state
+void monitorConnection() {
+    int state = getPeerConnectionState();
+    if (state == 4 || state == 5 || state == 6) { // Disconnected, Failed, Closed
+        std::wcout << L"[main] Peer has disconnected. Shutting down." << std::endl;
+        g_shutdown_flag.store(true);
+    }
+}
+
 int main()
 {
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     std::wcout << L"[main] Apartment initialized.\n";
+
+    initGo(); 
 
     // --- Load Configuration ---
     nlohmann::json config;
@@ -122,28 +150,26 @@ int main()
     initWebsocket(roomId);
     AudioCapturer audioCapturer;
     audioCapturer.StartCapture(wideOutputAudioFile, msedge[0].processId);
-    std::wcout << L"[main] Capture started!\n";
+    std::wcout << L"[main] Capture started! Press any key to stop.\n";
 
-    // Keep the app alive for 10 seconds to see frame events
-    for (int i = 0; i < 100; i++)
-    {
-        Sleep(1000);
-        std::wcout << L"[main] Still capturing...\n";
-    } 
+    // Main loop
+    while (!g_shutdown_flag.load()) {
+        monitorConnection();
+        if (_kbhit()) { // Check for keyboard input
+            std::wcout << L"[main] Key pressed. Shutting down." << std::endl;
+            g_shutdown_flag.store(true);
+        }
+        Sleep(100); // Sleep to avoid busy-waiting
+    }
 
     std::wcout << L"[main] Stopping capture...\n";
-    g_shutdown_flag.store(true);
     audioCapturer.StopCapture();
     stopWebsocket();
     StopCapture(token, framePool);
     session.Close();
     framePool.Close();
     Encoder::FlushEncoder();
+    closeGo(); 
 
-    /*for (auto& w : windows) {
-		std::wcout << L"[main] HWND = " << w.hwnd << L"\n Title = " << w.title << L"\n Process = " << w.processName << L".\n";
-    }*/
-
-	
     return 0;
 }
