@@ -207,7 +207,14 @@ func createPeerConnectionGo() C.int {
 
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.l.google.com:19302"}},
+			{
+				URLs: []string{"stun:stun.l.google.com:19302"},
+			},
+			{
+				URLs:       []string{"turn:openrelay.metered.ca:80"},
+				Username:   "openrelayproject",
+				Credential: "openrelayproject",
+			},
 		},
 		SDPSemantics: webrtc.SDPSemanticsUnifiedPlan,
 	}
