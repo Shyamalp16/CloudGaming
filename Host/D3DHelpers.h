@@ -6,6 +6,7 @@
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 
 winrt::com_ptr<ID3D11Device> GetD3DDevice();
+UINT GetGpuVendorId();
 
 bool SetupD3D(
     winrt::com_ptr<ID3D11Device>& d3dDevice,

@@ -4,6 +4,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/hwcontext.h>
 }
 #include <cstdint>
 #include <iostream>
@@ -11,6 +12,7 @@ extern "C" {
 #include <vector>
 #include <condition_variable>
 #include <functional>
+#include <d3d11.h>
 
 namespace Encoder {
     // Function declarations
@@ -21,7 +23,9 @@ namespace Encoder {
         int height
     );
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps);
-    void EncodeFrame(); // Updated to remove AVFrame* parameter since it's managed internally
+    void EncodeSoftwareFrame();
+    void EncodeHardwareFrame(ID3D11Texture2D* texture);
+    bool IsHardwareEncoder();
     void FinalizeEncoder();
 
     // New function to retrieve encoded frame data and PTS

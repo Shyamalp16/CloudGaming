@@ -9,10 +9,31 @@
 #pragma comment(lib, "dxgi.lib")
 
 winrt::com_ptr<ID3D11Device> myD3DDevice;
+UINT g_vendorId = 0; // Default to unknown
 
 winrt::com_ptr<ID3D11Device> GetD3DDevice()
 {
 	return myD3DDevice;
+}
+
+UINT GetGpuVendorId()
+{
+    return g_vendorId;
+}
+
+std::wstring GetVendorName(UINT vendorId)
+{
+    switch (vendorId)
+    {
+        case 0x10DE:
+            return L"NVIDIA";
+        case 0x8086:
+            return L"Intel";
+        case 0x1002:
+            return L"AMD";
+        default:
+            return L"Unknown";
+    }
 }
 
 bool SetupD3D(
@@ -22,6 +43,48 @@ bool SetupD3D(
 {
     try
     {
+        // Create a DXGI factory
+        winrt::com_ptr<IDXGIFactory1> dxgiFactory;
+        winrt::check_hresult(CreateDXGIFactory1(__uuidof(IDXGIFactory1), dxgiFactory.put_void()));
+
+        // Enumerate adapters
+        winrt::com_ptr<IDXGIAdapter1> bestAdapter;
+        SIZE_T maxDedicatedVideoMemory = 0;
+
+        winrt::com_ptr<IDXGIAdapter1> currentAdapter;
+        for (UINT i = 0; dxgiFactory->EnumAdapters1(i, currentAdapter.put()) != DXGI_ERROR_NOT_FOUND; ++i)
+        {
+            DXGI_ADAPTER_DESC1 desc;
+            winrt::check_hresult(currentAdapter->GetDesc1(&desc));
+
+            // Print adapter information
+            std::wcout << L"[SetupD3D] Adapter " << i << L": " << desc.Description << std::endl;
+            std::wcout << L"  Vendor: " << GetVendorName(desc.VendorId) << L" (ID: 0x" << std::hex << desc.VendorId << L")" << std::endl;
+            std::wcout << L"  Dedicated Video Memory: " << desc.DedicatedVideoMemory / 1024 / 1024 << L" MB" << std::endl;
+
+            // Choose the adapter with the most dedicated video memory
+            if (desc.DedicatedVideoMemory > maxDedicatedVideoMemory)
+            {
+                maxDedicatedVideoMemory = desc.DedicatedVideoMemory;
+                bestAdapter = currentAdapter;
+            }
+
+            currentAdapter = nullptr;
+        }
+
+        if (!bestAdapter)
+        {
+            std::wcerr << L"[SetupD3D] No suitable adapter found." << std::endl;
+            return false;
+        }
+
+        DXGI_ADAPTER_DESC1 bestDesc;
+        winrt::check_hresult(bestAdapter->GetDesc1(&bestDesc));
+        g_vendorId = bestDesc.VendorId; // Store the vendor ID
+        std::wcout << L"[SetupD3D] Selected Adapter: " << bestDesc.Description << std::endl;
+        std::wcout << L"  Vendor: " << GetVendorName(bestDesc.VendorId) << std::endl;
+
+
         D3D_FEATURE_LEVEL featureLevels[] = {
             D3D_FEATURE_LEVEL_11_1,
             D3D_FEATURE_LEVEL_11_0,
@@ -30,8 +93,8 @@ bool SetupD3D(
         };
 
         HRESULT hr = D3D11CreateDevice(
-            nullptr,                        // default adapter
-            D3D_DRIVER_TYPE_HARDWARE,
+            bestAdapter.get(),              // selected adapter
+            D3D_DRIVER_TYPE_UNKNOWN,
             nullptr,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             featureLevels,
