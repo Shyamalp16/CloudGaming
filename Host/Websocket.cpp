@@ -23,7 +23,7 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg);
 void send_message(const json& message);
 
 void senderThread() {
-    while (!g_shutdown_flag) {
+    while (!ShutdownManager::IsShutdown()) {
         Packet packet;
         if (g_packetQueue.pop(packet)) {
             if (getIceConnectionState() >= 0) {
@@ -42,7 +42,7 @@ void senderThread() {
 }
 
 void sendFrames() {
-    while (!g_shutdown_flag) {
+    while (!ShutdownManager::IsShutdown()) {
         std::vector<uint8_t> frameData;
         int64_t pts = 0;
 
@@ -156,7 +156,7 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
         }
         else if (type == "peer-disconnected") {
             std::cout << "[WebSocket] Peer has disconnected. Initiating shutdown." << std::endl;
-            g_shutdown_flag.store(true);
+            ShutdownManager::SetShutdown(true);
         }
         else if (type == "offer") {
             std::cout << "[WebSocket] Received offer from server: \n" << message.dump() << std::endl;
@@ -225,7 +225,7 @@ void initWebsocket(const std::string& roomId) {
 
 void stopWebsocket() {
     std::wcout << L"[Shutdown] Initiating websocket shutdown...\n";
-    g_shutdown_flag = true;
+    ShutdownManager::SetShutdown(true);
     Encoder::SignalEncoderShutdown();
     g_packetQueue.shutdown();
 

@@ -8,7 +8,7 @@
 #include <chrono>
 #include "PacketQueue.h"
 #include "D3DHelpers.h" // For GetGpuVendorId
-#include <libavutil/hwcontext_d3d11va.h> // For D3D11VA
+#include <libavutil/hwcontext_d3d11va.h>
 
 SwsContext* Encoder::swsCtx = nullptr;
 AVFrame* Encoder::nv12Frame = nullptr;
@@ -42,6 +42,8 @@ static std::chrono::steady_clock::time_point encoderStartTime;
 static bool isFirstFrame = true;
 
 namespace Encoder {
+    void ConvertFrame(const uint8_t* bgraData, int bgraPitch, int width, int height);
+
     void setEncodedFrameCallback(EncodedFrameCallback callback) {
         g_onEncodedFrameCallback = callback;
     }
@@ -121,222 +123,228 @@ namespace Encoder {
     }
 
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps) {
-        std::lock_guard<std::mutex> lock(g_encoderMutex);
+    std::lock_guard<std::mutex> lock(g_encoderMutex);
 
-        UINT vendorId = GetGpuVendorId();
-        std::string encoderName;
-        bool isHardware = true;
-        AVHWDeviceType hwDeviceType = AV_HWDEVICE_TYPE_NONE;
-        AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE;
+    UINT vendorId = GetGpuVendorId();
+    std::string encoderName;
+    bool isHardware = true;
+    AVHWDeviceType hwDeviceType;
+    AVPixelFormat hwPixFmt;
 
-        switch (vendorId) {
-        case 0x10DE: // NVIDIA
-            encoderName = "h264_nvenc";
-            hwDeviceType = AV_HWDEVICE_TYPE_CUDA;
-            hwPixFmt = AV_PIX_FMT_CUDA;
-            break;
-        case 0x8086: // Intel
-            encoderName = "h264_qsv";
-            hwDeviceType = AV_HWDEVICE_TYPE_D3D11VA;
-            hwPixFmt = AV_PIX_FMT_D3D11;
-            break;
-        case 0x1002: // AMD
-            encoderName = "h264_amf";
-            hwDeviceType = AV_HWDEVICE_TYPE_D3D11VA;
-            hwPixFmt = AV_PIX_FMT_D3D11;
-            break;
-        default:
-            encoderName = "libx264";
-            isHardware = false;
-            break;
-        }
+    switch (vendorId) {
+    case 0x10DE: // NVIDIA
+        encoderName = "h264_nvenc";
+        hwDeviceType = AV_HWDEVICE_TYPE_CUDA;
+        hwPixFmt = AV_PIX_FMT_CUDA;
+        break;
+    case 0x8086: // Intel
+        encoderName = "h264_qsv";
+        hwDeviceType = AV_HWDEVICE_TYPE_D3D11VA;
+        hwPixFmt = AV_PIX_FMT_D3D11;
+        break;
+    case 0x1002: // AMD
+        encoderName = "h264_amf";
+        hwDeviceType = AV_HWDEVICE_TYPE_D3D11VA;
+        hwPixFmt = AV_PIX_FMT_D3D11;
+        break;
+    default:
+        encoderName = "libx264";
+        isHardware = false;
+        break;
+    }
 
-        std::wcout << L"[Encoder] Using " << (isHardware ? L"Hardware" : L"Software") << L" encoder: " << std::wstring(encoderName.begin(), encoderName.end()) << std::endl;
-        std::wcout << L"[Encoder] Initializing with width=" << width << L", height=" << height << L", fps=" << fps << std::endl;
+    std::wcout << L"[Encoder] Using " << (isHardware ? L"Hardware" : L"Software") << L" encoder: " << std::wstring(encoderName.begin(), encoderName.end()) << std::endl;
+    std::wcout << L"[Encoder] Initializing with width=" << width << L", height=" << height << L", fps=" << fps << std::endl;
 
-        const AVCodec* codec = avcodec_find_encoder_by_name(encoderName.c_str());
-        if (!codec) {
-            std::cerr << "[Encoder] Failed to find encoder: " << encoderName << std::endl;
+    const AVCodec* codec = avcodec_find_encoder_by_name(encoderName.c_str());
+    if (!codec) {
+        std::cerr << "[Encoder] Failed to find encoder: " << encoderName << std::endl;
+        return;
+    }
+
+    codecCtx = avcodec_alloc_context3(codec);
+    if (!codecCtx) {
+        std::cerr << "[Encoder] Failed to allocate codec context." << std::endl;
+        return;
+    }
+
+    codecCtx->width = width;
+    codecCtx->height = height;
+    codecCtx->time_base = AVRational{ 1, fps };
+    codecCtx->framerate = { fps, 1 };
+    codecCtx->gop_size = 10;
+    codecCtx->max_b_frames = 0;
+    codecCtx->bit_rate = 30000000;
+
+    if (isHardware) {
+        codecCtx->pix_fmt = hwPixFmt;
+
+        if (av_hwdevice_ctx_create(&hwDeviceCtx, hwDeviceType, nullptr, nullptr, 0) < 0) {
+            std::cerr << "[Encoder] Failed to create HW device context." << std::endl;
             return;
         }
 
-        codecCtx = avcodec_alloc_context3(codec);
-        if (!codecCtx) {
-            std::cerr << "[Encoder] Failed to allocate codec context." << std::endl;
+        if (hwDeviceType == AV_HWDEVICE_TYPE_D3D11VA) {
+            AVHWDeviceContext* deviceCtx = (AVHWDeviceContext*)hwDeviceCtx->data;
+            AVD3D11VADeviceContext* d3d11vaDeviceCtx = (AVD3D11VADeviceContext*)deviceCtx->hwctx;
+            d3d11vaDeviceCtx->device = (ID3D11Device*)GetD3DDevice().get();
+            std::wcout << L"[Encoder] Passed existing D3D11 device to FFmpeg." << std::endl;
+        }
+
+        codecCtx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
+
+        hwFramesCtx = av_hwframe_ctx_alloc(hwDeviceCtx);
+        if (!hwFramesCtx) {
+            std::cerr << "[Encoder] Failed to allocate hardware frames context." << std::endl;
             return;
         }
 
-        codecCtx->width = width;
-        codecCtx->height = height;
-        codecCtx->time_base = AVRational{ 1, fps };
-        codecCtx->framerate = { fps, 1 };
-        codecCtx->gop_size = 10;
-        codecCtx->max_b_frames = 0;
-        codecCtx->bit_rate = 30000000;
+        AVHWFramesContext* framesCtx = (AVHWFramesContext*)hwFramesCtx->data;
+        framesCtx->format = hwPixFmt;
+        framesCtx->sw_format = AV_PIX_FMT_YUV420P;
+        framesCtx->width = width;
+        framesCtx->height = height;
+        framesCtx->initial_pool_size = 20;
 
-        if (isHardware) {
-            codecCtx->pix_fmt = hwPixFmt;
-
-            if (hwDeviceType == AV_HWDEVICE_TYPE_D3D11VA) {
-                hwDeviceCtx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
-                if (!hwDeviceCtx) {
-                    std::cerr << "[Encoder] Failed to allocate D3D11VA device context." << std::endl;
-                    return;
-                }
-                AVHWDeviceContext* device_ctx = (AVHWDeviceContext*)hwDeviceCtx->data;
-                AVD3D11VADeviceContext* d3d11_ctx = (AVD3D11VADeviceContext*)av_mallocz(sizeof(AVD3D11VADeviceContext));
-                if (!d3d11_ctx) {
-                    std::cerr << "[Encoder] Failed to allocate D3D11VA specific context." << std::endl;
-                    av_buffer_unref(&hwDeviceCtx);
-                    return;
-                }
-                d3d11_ctx->device = GetD3DDevice().get();
-                device_ctx->hwctx = (void*)d3d11_ctx;
-
-                if (av_hwdevice_ctx_init(hwDeviceCtx) < 0) {
-                    std::cerr << "[Encoder] Failed to initialize D3D11VA device context." << std::endl;
-                    av_free(d3d11_ctx);
-                    av_buffer_unref(&hwDeviceCtx);
-                    return;
-                }
-                 std::wcout << L"[Encoder] Passed existing D3D11 device to FFmpeg." << std::endl;
-            }
-            else if (hwDeviceType == AV_HWDEVICE_TYPE_CUDA) {
-                if (av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0) < 0) {
-                    std::cerr << "[Encoder] Failed to create CUDA device context." << std::endl;
-                    return;
-                }
-            }
-
-            codecCtx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
-
-            hwFramesCtx = av_hwframe_ctx_alloc(hwDeviceCtx);
-            if (!hwFramesCtx) {
-                std::cerr << "[Encoder] Failed to allocate hardware frames context." << std::endl;
-                return;
-            }
-
-            AVHWFramesContext* framesCtx = (AVHWFramesContext*)hwFramesCtx->data;
-            framesCtx->format = hwPixFmt;
-            framesCtx->sw_format = AV_PIX_FMT_YUV420P;
-            framesCtx->width = width;
-            framesCtx->height = height;
-            framesCtx->initial_pool_size = 20;
-
-            if (av_hwframe_ctx_init(hwFramesCtx) < 0) {
-                std::cerr << "[Encoder] Failed to initialize hardware frames context." << std::endl;
-                return;
-            }
-
-            codecCtx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
-
-            hwFrame = av_frame_alloc();
-            hwFrame->format = hwPixFmt;
-            hwFrame->width = width;
-            hwFrame->height = height;
-            if (av_hwframe_get_buffer(codecCtx->hw_frames_ctx, hwFrame, 0) < 0) {
-                std::cerr << "[Encoder] Failed to allocate hardware frame buffer." << std::endl;
-                return;
-            }
-        }
-        else { // Software encoder
-            codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
-        }
-
-        AVDictionary* opts = nullptr;
-        if (encoderName == "h264_nvenc") {
-            av_dict_set(&opts, "preset", "p7", 0);
-            av_dict_set(&opts, "rc", "vbr", 0);
-        }
-        else if (encoderName == "libx264") {
-            av_dict_set(&opts, "preset", "ultrafast", 0);
-            av_dict_set(&opts, "tune", "zerolatency", 0);
-        }
-        av_dict_set(&opts, "zerolatency", "1", 0);
-
-
-        if (avcodec_open2(codecCtx, codec, &opts) < 0) {
-            std::cerr << "[Encoder] Failed to open codec." << std::endl;
-            av_dict_free(&opts);
+        if (av_hwframe_ctx_init(hwFramesCtx) < 0) {
+            std::cerr << "[Encoder] Failed to initialize hardware frames context." << std::endl;
             return;
         }
+
+        codecCtx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
+
+        hwFrame = av_frame_alloc();
+        hwFrame->format = hwPixFmt;
+        hwFrame->width = width;
+        hwFrame->height = height;
+        if (av_hwframe_get_buffer(codecCtx->hw_frames_ctx, hwFrame, 0) < 0) {
+            std::cerr << "[Encoder] Failed to allocate hardware frame buffer." << std::endl;
+            return;
+        }
+    }
+    else { // Software encoder
+        codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
+    }
+
+    AVDictionary* opts = nullptr;
+    if (encoderName == "h264_nvenc") {
+        av_dict_set(&opts, "preset", "p7", 0);
+        av_dict_set(&opts, "rc", "vbr", 0);
+    }
+    else if (encoderName == "libx264") {
+        av_dict_set(&opts, "preset", "ultrafast", 0);
+        av_dict_set(&opts, "tune", "zerolatency", 0);
+    }
+    av_dict_set(&opts, "zerolatency", "1", 0);
+
+
+    if (avcodec_open2(codecCtx, codec, &opts) < 0) {
+        std::cerr << "[Encoder] Failed to open codec." << std::endl;
         av_dict_free(&opts);
-
-        videoStream = avformat_new_stream(formatCtx, codec);
-        avcodec_parameters_from_context(videoStream->codecpar, codecCtx);
-
-        packet = av_packet_alloc();
-
-        std::wcout << L"[Encoder] " << std::wstring(encoderName.begin(), encoderName.end()) << " encoder initialized successfully." << std::endl;
+        return;
     }
+    av_dict_free(&opts);
 
-    void EncodeFrame() {
-        try {
-            if (!nv12Frame) {
-                std::cerr << "[Encoder] Invalid frame (nv12Frame is NULL).\n";
+    videoStream = avformat_new_stream(formatCtx, codec);
+    avcodec_parameters_from_context(videoStream->codecpar, codecCtx);
+
+    packet = av_packet_alloc();
+
+    std::wcout << L"[Encoder] " << std::wstring(encoderName.begin(), encoderName.end()) << " encoder initialized successfully." << std::endl;
+}
+
+void EncodeAndPushFrame() {
+    try {
+        if (!nv12Frame) {
+            std::cerr << "[Encoder] Invalid frame (nv12Frame is NULL).\n";
+            return;
+        }
+
+        if (!codecCtx) {
+            std::cerr << "[Encoder] Codec context not initialized.\n";
+            return;
+        }
+
+        if (isFirstFrame) {
+            encoderStartTime = std::chrono::steady_clock::now();
+            isFirstFrame = false;
+        }
+
+        auto currentTime = std::chrono::steady_clock::now();
+        auto elapsedTimeUS = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - encoderStartTime).count();
+        int64_t frameDurationUS = 1000000 / codecCtx->framerate.num;
+        nv12Frame->pts = (elapsedTimeUS / frameDurationUS);
+
+        AVFrame* frameToSend = nv12Frame;
+
+        // If using hardware encoding, upload the frame to the GPU
+        if (hwDeviceCtx) {
+            if (av_hwframe_transfer_data(hwFrame, nv12Frame, 0) < 0) {
+                std::cerr << "[Encoder] Failed to transfer frame to GPU." << std::endl;
                 return;
             }
-
-            if (!codecCtx) {
-                std::cerr << "[Encoder] Codec context not initialized.\n";
-                return;
-            }
-
-            if (isFirstFrame) {
-                encoderStartTime = std::chrono::steady_clock::now();
-                isFirstFrame = false;
-            }
-
-            auto currentTime = std::chrono::steady_clock::now();
-            auto elapsedTimeUS = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - encoderStartTime).count();
-            int64_t frameDurationUS = 1000000 / codecCtx->framerate.num;
-            nv12Frame->pts = (elapsedTimeUS / frameDurationUS);
-
-            AVFrame* frameToSend = nv12Frame;
-
-            // If using hardware encoding, upload the frame to the GPU
-            if (hwDeviceCtx) {
-                if (av_hwframe_transfer_data(hwFrame, nv12Frame, 0) < 0) {
-                    std::cerr << "[Encoder] Failed to transfer frame to GPU." << std::endl;
-                    return;
-                }
-                hwFrame->pts = nv12Frame->pts;
-                frameToSend = hwFrame;
-            }
-
-            int ret = avcodec_send_frame(codecCtx, frameToSend);
-            if (ret < 0) {
-                char errBuf[128];
-                av_make_error_string(errBuf, 128, ret);
-                std::cerr << "[Encoder] Failed to send frame to encoder: " << errBuf << "\n";
-                return;
-            }
-
-            while (avcodec_receive_packet(codecCtx, packet) == 0) {
-                packet->stream_index = videoStream->index;
-                av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);
-
-                if (packet->dts < last_dts) {
-                    packet->dts = last_dts + 1;
-                }
-                last_dts = packet->dts;
-
-                Packet p;
-                p.data.assign(packet->data, packet->data + packet->size);
-                p.pts = packet->pts;
-                g_packetQueue.push(p);
-
-                av_packet_unref(packet);
-            }
-            frameCounter++;
+            hwFrame->pts = nv12Frame->pts;
+            frameToSend = hwFrame;
         }
-        catch (const std::exception& e) {
-            std::cerr << "[EXCEPTION] EncodeFrame() - Exception caught: " << e.what() << "\n";
+
+        int ret = avcodec_send_frame(codecCtx, frameToSend);
+        if (ret < 0) {
+            char errBuf[128];
+            av_make_error_string(errBuf, 128, ret);
+            std::cerr << "[Encoder] Failed to send frame to encoder: " << errBuf << "\n";
+            return;
         }
-        catch (...) {
-            std::cerr << "[EXCEPTION] EncodeFrame() - Unknown exception caught!\n";
+
+        while (avcodec_receive_packet(codecCtx, packet) == 0) {
+            packet->stream_index = videoStream->index;
+            av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);
+
+            if (packet->dts < last_dts) {
+                packet->dts = last_dts + 1;
+            }
+            last_dts = packet->dts;
+
+            Packet p;
+            p.data.assign(packet->data, packet->data + packet->size);
+            p.pts = packet->pts;
+            g_packetQueue.push(p);
+
+            av_packet_unref(packet);
         }
+        frameCounter++;
     }
+    catch (const std::exception& e) {
+        std::cerr << "[EXCEPTION] EncodeAndPushFrame() - Exception caught: " << e.what() << "\n";
+    }
+    catch (...) {
+        std::cerr << "[EXCEPTION] EncodeAndPushFrame() - Unknown exception caught!\n";
+    }
+}
+
+void EncodeFrame(ID3D11Texture2D* texture, ID3D11DeviceContext* context, int width, int height) {
+    D3D11_TEXTURE2D_DESC desc;
+    texture->GetDesc(&desc);
+
+    winrt::com_ptr<ID3D11Texture2D> stagingTexture;
+    D3D11_TEXTURE2D_DESC stagingDesc = desc;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.MiscFlags = 0;
+
+    winrt::com_ptr<ID3D11Device> device;
+    context->GetDevice(device.put());
+    device->CreateTexture2D(&stagingDesc, nullptr, stagingTexture.put());
+
+    context->CopyResource(stagingTexture.get(), texture);
+
+    D3D11_MAPPED_SUBRESOURCE mappedResource;
+    context->Map(stagingTexture.get(), 0, D3D11_MAP_READ, 0, &mappedResource);
+
+    ConvertFrame(static_cast<const uint8_t*>(mappedResource.pData), mappedResource.RowPitch, width, height);
+
+    context->Unmap(stagingTexture.get(), 0);
+}
 
     void FlushEncoder() {
         std::wcout << L"[DEBUG] Flushing encoder\n";
@@ -466,49 +474,34 @@ namespace Encoder {
         }
 
         sws_scale(swsCtx, inData, inLineSize, 0, height, nv12Frame->data, nv12Frame->linesize);
-        EncodeFrame();
+        EncodeAndPushFrame();
     }
 
     void FinalizeEncoder() {
-    std::lock_guard<std::mutex> lock(g_encoderMutex);
-    std::wcout << L"[Encoder] Finalizing encoder..." << std::endl;
+        std::lock_guard<std::mutex> lock(g_encoderMutex);
+        std::wcout << L"[DEBUG] Finalizing encoder...\n";
 
-    if (codecCtx) {
         avcodec_send_frame(codecCtx, nullptr);
         while (avcodec_receive_packet(codecCtx, packet) == 0) {
-            // Optional: handle remaining packets, e.g., write to file
+            packet->stream_index = videoStream->index;
+            av_packet_rescale_ts(packet, codecCtx->time_base, videoStream->time_base);
+
+            if (packet->dts < packet->pts) {
+                packet->dts = packet->pts;
+            }
+
+            av_interleaved_write_frame(formatCtx, packet);
             av_packet_unref(packet);
         }
-        avcodec_free_context(&codecCtx);
-    }
 
-    if (formatCtx) {
-        avformat_free_context(formatCtx);
-        formatCtx = nullptr;
-    }
-
-    if (packet) {
-        av_packet_free(&packet);
-    }
-
-    // Safely release hardware-specific resources
-    if (hwFrame) {
         av_frame_free(&hwFrame);
-    }
-    if (hwFramesCtx) {
+        avcodec_free_context(&codecCtx);
+        avformat_free_context(formatCtx);
+        av_packet_free(&packet);
         av_buffer_unref(&hwFramesCtx);
-    }
-    if (hwDeviceCtx) {
-        // For D3D11VA, we manually allocated the hwctx, so we need to free it.
-        AVHWDeviceContext* device_ctx = (AVHWDeviceContext*)hwDeviceCtx->data;
-        if (device_ctx->hwctx) {
-            av_free(device_ctx->hwctx);
-        }
         av_buffer_unref(&hwDeviceCtx);
+        std::wcout << L"[Encoder] Encoder finalized.\n";
     }
-
-    std::wcout << L"[Encoder] Encoder finalized." << std::endl;
-}
 
     void AdjustBitrate(int new_bitrate) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);

@@ -57,7 +57,7 @@ void monitorConnection() {
     int state = getPeerConnectionState();
     if (state == 4 || state == 5 || state == 6) { // Disconnected, Failed, Closed
         std::wcout << L"[main] Peer has disconnected. Shutting down." << std::endl;
-        g_shutdown_flag.store(true);
+        ShutdownManager::SetShutdown(true);
     }
 }
 
@@ -173,11 +173,11 @@ int main()
     std::wcout << L"[main] Capture started! Press any key to stop.\n";
 
     // Main loop
-    while (!g_shutdown_flag.load()) {
+    while (!ShutdownManager::IsShutdown()) {
         monitorConnection();
         if (_kbhit()) { // Check for keyboard input
             std::wcout << L"[main] Key pressed. Shutting down." << std::endl;
-            g_shutdown_flag.store(true);
+            ShutdownManager::SetShutdown(true);
         }
         Sleep(100); // Sleep to avoid busy-waiting
     }

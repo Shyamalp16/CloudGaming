@@ -69,7 +69,7 @@ namespace MouseInputHandler {
 
 	void mouseMessagePollingLoop() {
 		std::cout << "[MouseInputHandler] Starting mouse message polling loop..." << std::endl;
-		while (isRunning && !g_shutdown_flag) {
+		while (isRunning && !ShutdownManager::IsShutdown()) {
 			char* cMsg = getMouseChannelMessage();
 			if (cMsg != nullptr) {
 				std::string message;

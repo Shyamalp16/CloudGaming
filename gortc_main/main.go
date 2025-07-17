@@ -1146,7 +1146,12 @@ func (f *rtcpReaderFactory) NewInterceptor(id string) (interceptor.Interceptor, 
 
 // rtcpReaderInterceptor implements the interceptor.Interceptor interface
 type rtcpReaderInterceptor struct {
-	interceptor.Interceptor
+	// No embedded interface here. Implement all methods directly.
+}
+
+// BindRTCPWriter implements the interceptor.Interceptor interface.
+func (r *rtcpReaderInterceptor) BindRTCPWriter(writer interceptor.RTCPWriter) interceptor.RTCPWriter {
+	return writer
 }
 
 // BindRTCPReader wraps the RTCPReader to intercept incoming RTCP packets
@@ -1176,3 +1181,29 @@ func (r *rtcpReaderInterceptor) BindRTCPReader(reader interceptor.RTCPReader) in
 		return reader.Read(in, a)
 	})
 }
+
+// BindLocalStream implements the Interceptor interface.
+func (r *rtcpReaderInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
+	return writer
+}
+
+// UnbindLocalStream implements the Interceptor interface.
+func (r *rtcpReaderInterceptor) UnbindLocalStream(info *interceptor.StreamInfo) {
+	// No-op
+}
+
+// BindRemoteStream implements the Interceptor interface.
+func (r *rtcpReaderInterceptor) BindRemoteStream(info *interceptor.StreamInfo, reader interceptor.RTPReader) interceptor.RTPReader {
+	return reader
+}
+
+// UnbindRemoteStream implements the Interceptor interface.
+func (r *rtcpReaderInterceptor) UnbindRemoteStream(info *interceptor.StreamInfo) {
+	// No-op
+}
+
+// Close implements the Interceptor interface.
+func (r *rtcpReaderInterceptor) Close() error {
+	return nil
+}
+

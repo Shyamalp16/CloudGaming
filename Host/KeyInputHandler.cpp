@@ -183,7 +183,7 @@ namespace KeyInputHandler {
 
 	void messagePollingLoop() {
 		std::cout << "[KeyInputHandler] Starting message polling loop..." << std::endl;
-		while (isRunning && !g_shutdown_flag) {
+		while (isRunning && !ShutdownManager::IsShutdown()) {
 			char* cMsg = getDataChannelMessage();
 
 			if (cMsg != nullptr) {

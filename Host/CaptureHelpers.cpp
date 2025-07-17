@@ -1,6 +1,5 @@
 #include "CaptureHelpers.h"
 #include "GlobalTime.h"
-#include "Encoder.h"
 #include <chrono>
 #include <iostream>
 #include <wincodec.h>
@@ -12,6 +11,7 @@
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <d3d11.h>
 #include <winrt/base.h>
+#include "Encoder.h"
 
 using namespace std::chrono;
 using namespace winrt;
@@ -337,14 +337,7 @@ void PreProcessFrameConversion(winrt::com_ptr<ID3D11Device> device, winrt::com_p
 		std::wcerr << L"[ProcessFrames] Failed to map texture. HRESULT=0x";
 	}
 	
-	auto bgraData = static_cast<uint8_t*>(mapped.pData);
-	int bgraPitch = mapped.RowPitch;
-
-    /*std::wcout << L"[DEBUG] desc.Width=" << desc.Width << L", desc.Height=" << desc.Height
-        << L", bgraPitch=" << bgraPitch << L", expected stride=" << (desc.Width * 4) << L"\n";*/
-
-
-	Encoder::ConvertFrame(bgraData, bgraPitch, desc.Width, desc.Height);
+	Encoder::EncodeFrame(stagingTexture.get(), context.get(), desc.Width, desc.Height);
 	context->Unmap(stagingTexture.get(), 0);
     /*std::wcout << L"[ProcessFrames] Processed frame with sequence number: "
         << sequenceNumber << std::endl;*/

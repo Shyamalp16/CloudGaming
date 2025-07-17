@@ -1,10 +1,14 @@
 #pragma once
+
+#include <d3d11.h>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_d3d11va.h>
 }
 #include <cstdint>
 #include <iostream>
@@ -12,20 +16,11 @@ extern "C" {
 #include <vector>
 #include <condition_variable>
 #include <functional>
-#include <d3d11.h>
 
 namespace Encoder {
     // Function declarations
-    void ConvertFrame(
-        const uint8_t* bgraData,
-        int bgraPitch,
-        int width,
-        int height
-    );
+    void EncodeFrame(ID3D11Texture2D* texture, ID3D11DeviceContext* context, int width, int height);
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps);
-    void EncodeSoftwareFrame();
-    void EncodeHardwareFrame(ID3D11Texture2D* texture);
-    bool IsHardwareEncoder();
     void FinalizeEncoder();
 
     // New function to retrieve encoded frame data and PTS

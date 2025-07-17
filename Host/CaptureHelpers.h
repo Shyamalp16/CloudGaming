@@ -1,5 +1,6 @@
 #pragma once
 
+#include <d3d11.h>
 #include "D3DHelpers.h"
 #include "FrameCaptureThread.h"
 #include <winrt/Windows.Graphics.Capture.h>
