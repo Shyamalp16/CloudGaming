@@ -20,7 +20,7 @@ The system is composed of three main components that work together to establish 
 
 ```
 
-1.  **Host (C++ & Go)**: A native Windows application that captures the screen, audio, and encodes them into a video stream. It also receives and simulates keyboard/mouse input from the client.
+1.  **Host (C++)**: A native Windows application that captures the screen, audio, and encodes them into a video stream. It also receives and simulates keyboard/mouse input from the client.
 2.  **Signaling Server (Node.js)**: A lightweight server that acts as a matchmaker. It introduces the Host and Client to each other so they can negotiate a direct WebRTC connection. It does not handle any video or audio data itself.
 3.  **Client (HTML/JS)**: A web-based application that connects to the Host, receives the video/audio stream, and sends user input back.
 
@@ -30,8 +30,8 @@ The system is composed of three main components that work together to establish 
 
 | Module | Language(s) | Key Libraries & Frameworks | Purpose |
 | :--- | :--- | :--- | :--- |
-| **Host** | C++, Go | **FFmpeg** (Encoding), **Pion WebRTC** (Go), **Windows Graphics Capture**, **D3D11** | Screen/audio capture, H.264 encoding, WebRTC session management. |
-| **Server** | JavaScript | **Node.js**, **ws** (WebSocket library) | Signaling, matchmaking, and ICE candidate exchange. |
+| **Host** | C++ | **FFmpeg** (Encoding), **Pion WebRTC** (Go), **WinRT/C++**, **DirectX 11** | Screen/audio capture, H.264 encoding, WebRTC session management. |
+| **Server** | JavaScript | **Node.js**, **ws** (WebSocket library), **Redis** | Signaling, matchmaking, and ICE candidate exchange. |
 | **Client** | JavaScript | **HTML5**, **wrtc** (Node WebRTC, for client-side JS) | Renders video, captures user input, and manages the WebRTC connection. |
 
 ---
@@ -44,9 +44,9 @@ The Host is the core of the streaming solution. It runs on the machine with the 
 
 **Key Components:**
 *   **`main.cpp`**: Entry point of the application. Initializes all components.
-*   **Capture (`FrameCaptureThread`, `AudioCapturer`)**: Uses the modern `Windows.Graphics.Capture` API for high-performance, low-latency screen capture and `IAudioCaptureClient` for audio.
-*   **Encoding (`Encoder.cpp`)**: Takes raw captured frames and uses the FFmpeg library (`libavcodec`) to encode them into the efficient **H.264** video format.
-*   **WebRTC (`gortc_main/main.go`)**: A Go module, compiled into a C-shared library, that handles all the complexities of the WebRTC protocol using the excellent **Pion** library. It manages the peer connection, data channels, and ICE negotiation. C++ communicates with this Go layer via CGO.
+*   **Capture (`CaptureHelpers.cpp`, `AudioHelper.cpp`)**: Uses the modern `Windows.Graphics.Capture` API for high-performance, low-latency screen capture and `winrt::Windows::Media::Audio::AudioGraph` for audio.
+*   **Encoding (`Encoder.cpp`)**: Takes raw captured frames and uses the FFmpeg library (`libavcodec`) to encode them into the efficient **H.264** video format. It dynamically selects the best available hardware encoder (NVIDIA's NVENC, AMD's AMF, or Intel's QSV).
+*   **WebRTC (`gortc_main/main.go`)**: A Go module, compiled into a C-shared library, that handles all the complexities of the WebRTC protocol using the excellent **Pion** library. It manages the peer connection, data channels, and ICE negotiation. C++ communicates with this Go layer via CGO, using the functions defined in `pion_webrtc.h`.
 *   **Input Handling (`KeyInputHandler`, `MouseInputHandler`)**: Receives keyboard and mouse events from the Client via WebRTC data channels and simulates them locally on the Host machine using `SendInput`.
 *   **Signaling (`Websocket.cpp`)**: Connects to the Node.js Signaling Server to announce its availability and negotiate with a client.
 
@@ -57,7 +57,8 @@ This is a lightweight but essential component for establishing the P2P connectio
 **Key Components:**
 *   **`PureSignalingServer.js`**: A simple implementation that allows two peers (one Host, one Client) to find each other and exchange the necessary information to connect.
 *   **`ScalableSignalingServer.js`**: A more advanced, stateless implementation that uses **Redis** to store all room and session state. It uses a single, pattern-based Redis subscription (`psubscribe`) to efficiently handle messaging for all rooms, eliminating the need for per-client subscriptions and allowing for seamless scaling.
-*   **Logic**: The server listens for WebSocket connections. When a client connects, it is added to a room in Redis. When it sends a message, the message is published to the room's Redis channel. All server instances subscribed to the channel pattern will receive the message and forward it to the appropriate clients connected to their instance.
+*   **`SecureSignalingServer.js`**: A room-based signaling server that provides more robust session management.
+*   **Logic**: The server listens for WebSocket connections. When a client connects, it is added to a room. When it sends a message, the message is forwarded to the other peer in the room.
 
 ### 3. Client (`/Client`)
 
@@ -138,6 +139,6 @@ The system works by creating a continuous feedback loop between the Client and t
 5.  **The Encoder Adjusts its Target:**
     *   The `onRTCP` function calls `Encoder::AdjustBitrate()`, passing the newly calculated target bitrate.
     *   Inside `Encoder.cpp`, this function safely updates the `bit_rate` property of the FFmpeg `AVCodecContext`.
-    *   From this point forward, the NVENC hardware encoder will compress the video stream to match this new, adjusted bitrate.
+    *   From this point forward, the hardware encoder will compress the video stream to match this new, adjusted bitrate.
 
 This entire process runs continuously, allowing the stream to adapt to changing network conditions in near real-time, ensuring the best possible quality and smoothness.
