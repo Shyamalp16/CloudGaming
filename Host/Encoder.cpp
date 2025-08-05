@@ -1,4 +1,4 @@
-﻿#include "Encoder.h"
+#include "Encoder.h"
 #include "GlobalTime.h"
 #include "pion_webrtc.h"
 #include <functional>
@@ -245,7 +245,23 @@ namespace Encoder {
     }
     av_dict_free(&opts);
 
-    videoStream = avformat_new_stream(formatCtx, codec);
+    // Ensure format context is allocated before creating a stream
+    if (!formatCtx) {
+        if (avformat_alloc_output_context2(&formatCtx, nullptr, nullptr, nullptr) < 0) {
+            std::cerr << "[Encoder] Failed to allocate format context." << std::endl;
+            return;
+        }
+    }
+    // Create a new video stream in the format context
+    videoStream = avformat_new_stream(formatCtx, nullptr);
+    if (!videoStream) {
+        std::cerr << "[Encoder] Failed to create new video stream." << std::endl;
+        return;
+    }
+    videoStream->id = formatCtx->nb_streams - 1;
+    // Set the stream time base to match codec time base
+    videoStream->time_base = codecCtx->time_base;
+
     avcodec_parameters_from_context(videoStream->codecpar, codecCtx);
 
     packet = av_packet_alloc();
@@ -308,6 +324,9 @@ void EncodeAndPushFrame() {
             p.data.assign(packet->data, packet->data + packet->size);
             p.pts = packet->pts;
             g_packetQueue.push(p);
+
+            // Also push the packet to WebRTC for real-time streaming
+            pushPacketToWebRTC(packet);
 
             av_packet_unref(packet);
         }
@@ -490,7 +509,9 @@ void EncodeFrame(ID3D11Texture2D* texture, ID3D11DeviceContext* context, int wid
                 packet->dts = packet->pts;
             }
 
+        if (formatCtx) {
             av_interleaved_write_frame(formatCtx, packet);
+        }
             av_packet_unref(packet);
         }
 
