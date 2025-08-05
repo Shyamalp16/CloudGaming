@@ -247,12 +247,12 @@ namespace Encoder {
 
     // Ensure format context is allocated before creating a stream
     if (!formatCtx) {
-        if (avformat_alloc_output_context2(&formatCtx, nullptr, nullptr, nullptr) < 0) {
+        // Use the null muxer since we are not writing to a file; we only need packets for WebRTC
+        if (avformat_alloc_output_context2(&formatCtx, nullptr, "null", nullptr) < 0) {
             std::cerr << "[Encoder] Failed to allocate format context." << std::endl;
             return;
         }
-    }
-    // Create a new video stream in the format context
+    }    // Create a new video stream in the format context
     videoStream = avformat_new_stream(formatCtx, nullptr);
     if (!videoStream) {
         std::cerr << "[Encoder] Failed to create new video stream." << std::endl;
