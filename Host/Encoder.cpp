@@ -125,6 +125,26 @@ namespace Encoder {
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps) {
     std::lock_guard<std::mutex> lock(g_encoderMutex);
 
+    if (codecCtx) {
+        avcodec_free_context(&codecCtx);
+    }
+    if (hwFrame) {
+        av_frame_free(&hwFrame);
+    }
+    if (hwFramesCtx) {
+        av_buffer_unref(&hwFramesCtx);
+    }
+    if (hwDeviceCtx) {
+        av_buffer_unref(&hwDeviceCtx);
+    }
+    if (formatCtx) {
+        avformat_free_context(formatCtx);
+        formatCtx = nullptr;
+    }
+    if (packet) {
+        av_packet_free(&packet);
+    }
+
     UINT vendorId = GetGpuVendorId();
     std::string encoderName;
     bool isHardware = true;

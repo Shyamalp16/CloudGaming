@@ -94,6 +94,15 @@ void CaptureAndEncodeLoop() {
         if (SUCCEEDED(hr) && desktopResource) {
             desktopResource.As(&acquiredDesktopImage);
 
+            D3D11_TEXTURE2D_DESC desc;
+            acquiredDesktopImage->GetDesc(&desc);
+
+            if (desc.Width != frameWidth || desc.Height != frameHeight) {
+                frameWidth = desc.Width;
+                frameHeight = desc.Height;
+                Encoder::InitializeEncoder("output.mp4", frameWidth, frameHeight, 60);
+            }
+
             Encoder::EncodeFrame(acquiredDesktopImage.Get(), d3d11DeviceContext.Get(), frameWidth, frameHeight);
 
             deskDupl->ReleaseFrame();
