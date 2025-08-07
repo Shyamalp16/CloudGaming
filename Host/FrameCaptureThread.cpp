@@ -103,7 +103,7 @@ void CaptureAndEncodeLoop() {
                 Encoder::InitializeEncoder("output.mp4", frameWidth, frameHeight, 60);
             }
 
-            Encoder::EncodeFrame(acquiredDesktopImage.Get(), d3d11DeviceContext.Get(), frameWidth, frameHeight);
+            Encoder::EncodeFrame(acquiredDesktopImage.Get(), d3d11DeviceContext.Get(), desc.Width, desc.Height, frameInfo.LastPresentTime.QuadPart);
 
             deskDupl->ReleaseFrame();
         }

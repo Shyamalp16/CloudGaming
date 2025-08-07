@@ -18,33 +18,24 @@ extern "C" {
 #include <functional>
 
 namespace Encoder {
-    // Function declarations
-    void EncodeFrame(ID3D11Texture2D* texture, ID3D11DeviceContext* context, int width, int height);
+    // Updated EncodeFrame signature to include PTS
+    void EncodeFrame(ID3D11Texture2D* texture, ID3D11DeviceContext* context, int width, int height, int64_t pts);
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps);
     void FinalizeEncoder();
 
-    // New function to retrieve encoded frame data and PTS
     bool getEncodedFrame(std::vector<uint8_t>& frameData, int64_t& pts);
 
-    // Callback type for encoded frame handling
     typedef std::function<void(AVPacket* packet)> EncodedFrameCallback;
-
-    // Function to set the callback for encoded frames
     void setEncodedFrameCallback(EncodedFrameCallback callback);
 
-    // Push packet to WebRTC (declare here since it's used in Encoder.cpp)
     void pushPacketToWebRTC(AVPacket* packet);
-
     void FlushEncoder();
-
     void SignalEncoderShutdown();
-
     void AdjustBitrate(int new_bitrate);
 
-    // External declaration for WebRTC interaction
     extern "C" int sendVideoPacket(uint8_t* data, int size, int64_t pts);
 
-    // Internal state (declared here for visibility to other files if needed)
+    // Remove declarations for unused software conversion components
     extern SwsContext* swsCtx;
     extern AVFrame* nv12Frame;
     extern int currentWidth;
