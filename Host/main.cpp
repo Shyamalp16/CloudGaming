@@ -144,6 +144,24 @@ int main()
         return -1;
     }
     std::wcout << L"[main] Got hwnd: " << hwnd << std::endl;
+    // Log current client size and optionally enforce target client area
+    int cW = 0, cH = 0;
+    if (GetClientAreaSize(hwnd, cW, cH)) {
+        std::wcout << L"[main] Initial client area: " << cW << L"x" << cH << std::endl;
+    }
+    // If requested resolution is 1920x1080 and client is smaller, resize client area
+    int targetW = 1920, targetH = 1080;
+    if (cW < targetW || cH < targetH) {
+        if (SetWindowClientAreaSize(hwnd, targetW, targetH)) {
+            std::wcout << L"[main] Resized window client area to " << targetW << L"x" << targetH << std::endl;
+            // Re-read client rect
+            if (GetClientAreaSize(hwnd, cW, cH)) {
+                std::wcout << L"[main] New client area: " << cW << L"x" << cH << std::endl;
+            }
+        } else {
+            std::wcout << L"[main] Failed to resize window client area." << std::endl;
+        }
+    }
 
     auto item = CreateCaptureItemForWindow(hwnd);
     if (!item)

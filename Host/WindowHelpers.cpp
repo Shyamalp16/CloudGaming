@@ -4,6 +4,8 @@
 #include <winrt/Windows.Foundation.h>
 #include <windows.graphics.capture.interop.h>
 #include <winrt/Windows.Graphics.Display.h>
+#include <ShellScalingAPI.h>
+#pragma comment(lib, "Shcore.lib")
 
 HWND fetchForegroundWindow()
 {
@@ -84,6 +86,57 @@ CreateCaptureItemForMonitor(HMONITOR hmon)
         return nullptr;
     }
     return item;
+}
+
+bool GetClientAreaSize(HWND hwnd, int& outWidth, int& outHeight)
+{
+    outWidth = outHeight = 0;
+    if (!hwnd || !::IsWindow(hwnd)) return false;
+    RECT rc{};
+    if (!::GetClientRect(hwnd, &rc)) return false;
+    outWidth = rc.right - rc.left;
+    outHeight = rc.bottom - rc.top;
+    return true;
+}
+
+static BOOL GetWindowDpi(HWND hwnd, UINT& dpiOut)
+{
+    dpiOut = 96;
+    // Try Per-Monitor V2
+    if (auto pGetDpiForWindow = (UINT (WINAPI*)(HWND))GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow")) {
+        dpiOut = pGetDpiForWindow(hwnd);
+        return TRUE;
+    }
+    // Fallback to system DPI
+    UINT dpiX = 96, dpiY = 96;
+    if (SUCCEEDED(GetDpiForMonitor(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), MDT_EFFECTIVE_DPI, &dpiX, &dpiY))) {
+        dpiOut = dpiX;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+bool SetWindowClientAreaSize(HWND hwnd, int targetWidth, int targetHeight)
+{
+    if (!hwnd || !::IsWindow(hwnd)) return false;
+    // Compute required outer size for desired client size
+    DWORD style = (DWORD)::GetWindowLongPtr(hwnd, GWL_STYLE);
+    DWORD exStyle = (DWORD)::GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+    RECT rc{ 0, 0, targetWidth, targetHeight };
+    UINT dpi = 96;
+    GetWindowDpi(hwnd, dpi);
+    auto pAdjustForDpi = (BOOL (WINAPI*)(LPRECT,DWORD,BOOL,DWORD,UINT))GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi");
+    BOOL ok = FALSE;
+    if (pAdjustForDpi) {
+        ok = pAdjustForDpi(&rc, style, FALSE, exStyle, dpi);
+    } else {
+        ok = ::AdjustWindowRectEx(&rc, style, FALSE, exStyle);
+    }
+    if (!ok) return false;
+    int outerW = rc.right - rc.left;
+    int outerH = rc.bottom - rc.top;
+    // Position unchanged; resize only
+    return ::SetWindowPos(hwnd, nullptr, 0, 0, outerW, outerH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 std::wstring GetProcessNameFromHWND(HWND hwnd) {

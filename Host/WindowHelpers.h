@@ -21,6 +21,14 @@ CreateCaptureItemForWindow(HWND hwnd);
 winrt::Windows::Graphics::Capture::GraphicsCaptureItem
 CreateCaptureItemForMonitor(HMONITOR hmon);
 
+// Gets the client area size (width/height in pixels) of a window. Returns false if hwnd invalid.
+bool GetClientAreaSize(HWND hwnd, int& outWidth, int& outHeight);
+
+// Resizes a window so that its client area becomes exactly targetWidth x targetHeight pixels.
+// Uses AdjustWindowRectExForDpi when available to account for non-client area and DPI.
+// Returns true on success.
+bool SetWindowClientAreaSize(HWND hwnd, int targetWidth, int targetHeight);
+
 std::wstring GetProcessNameFromHWND(HWND hwnd);
 std::wstring GetWindowTitle(HWND hwnd);
 
