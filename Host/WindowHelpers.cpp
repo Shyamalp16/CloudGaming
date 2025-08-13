@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <winrt/Windows.Foundation.h>
 #include <windows.graphics.capture.interop.h>
+#include <winrt/Windows.Graphics.Display.h>
 
 HWND fetchForegroundWindow()
 {
@@ -61,6 +62,27 @@ CreateCaptureItemForWindow(HWND hwnd)
         return nullptr;
     }
 
+    return item;
+}
+
+winrt::Windows::Graphics::Capture::GraphicsCaptureItem
+CreateCaptureItemForMonitor(HMONITOR hmon)
+{
+    using namespace winrt::Windows::Graphics::Capture;
+    if (!hmon) return nullptr;
+    auto interopFactory = winrt::get_activation_factory<
+        GraphicsCaptureItem,
+        IGraphicsCaptureItemInterop>();
+
+    GraphicsCaptureItem item{ nullptr };
+    HRESULT hr = interopFactory->CreateForMonitor(
+        hmon,
+        winrt::guid_of<GraphicsCaptureItem>(),
+        winrt::put_abi(item));
+    if (FAILED(hr)) {
+        std::wcerr << L"[CreateCaptureItemForMonitor] Failed. HRESULT=0x" << std::hex << hr << std::endl;
+        return nullptr;
+    }
     return item;
 }
 

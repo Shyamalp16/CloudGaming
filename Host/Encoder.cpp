@@ -420,6 +420,26 @@ namespace Encoder {
         hwFrame->pts = av_rescale_q(pts, { 1, 1000000 }, codecCtx->time_base);
 
         int ret = avcodec_send_frame(codecCtx, hwFrame);
+        if (ret == AVERROR(EAGAIN)) {
+            // Encoder output queue full; drain packets and retry once
+            for (;;) {
+                int rcv = avcodec_receive_packet(codecCtx, packet);
+                if (rcv == AVERROR(EAGAIN) || rcv == AVERROR_EOF) {
+                    break;
+                } else if (rcv < 0) {
+                    char errBuf[128];
+                    av_make_error_string(errBuf, 128, rcv);
+                    std::cerr << "[Encoder] Drain on EAGAIN failed: " << errBuf << "\n";
+                    break;
+                }
+                packet->stream_index = videoStream->index;
+                pushPacketToWebRTC(packet);
+                av_packet_unref(packet);
+            }
+            // Retry once after draining
+            ret = avcodec_send_frame(codecCtx, hwFrame);
+        }
+
         if (ret < 0) {
             char errBuf[128];
             av_make_error_string(errBuf, 128, ret);

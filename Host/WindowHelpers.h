@@ -17,6 +17,9 @@ uint64_t GetWindowIdFromHWND(HWND hwnd);
 // Creates a GraphicsCaptureItem from an HWND
 winrt::Windows::Graphics::Capture::GraphicsCaptureItem
 CreateCaptureItemForWindow(HWND hwnd);
+// Creates a GraphicsCaptureItem from a monitor handle
+winrt::Windows::Graphics::Capture::GraphicsCaptureItem
+CreateCaptureItemForMonitor(HMONITOR hmon);
 
 std::wstring GetProcessNameFromHWND(HWND hwnd);
 std::wstring GetWindowTitle(HWND hwnd);

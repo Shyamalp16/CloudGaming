@@ -1,5 +1,6 @@
 ﻿
 #include <winrt/Windows.Foundation.h>
+#include <windows.h>
 #include <winrt/Windows.Graphics.Capture.h>
 #include <iostream>
 #include <conio.h>
@@ -62,6 +63,10 @@ void monitorConnection() {
 
 int main()
 {
+    // Ensure the process is DPI-aware so WGC item.Size() is not DPI-virtualized (which shrinks sizes)
+    if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+        SetProcessDPIAware();
+    }
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     std::wcout << L"[main] Apartment initialized.\n";
 
