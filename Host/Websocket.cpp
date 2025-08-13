@@ -29,17 +29,15 @@ void senderThread() {
             if (getIceConnectionState() >= 0) {
                 if (!packet.data.empty() && packet.data.data() != nullptr) {
                     int result = sendVideoPacket(packet.data.data(), static_cast<int>(packet.data.size()), packet.pts);
-                    if (result != 0) {
-                        std::cerr << "[SenderThread] Failed to send video packet: " << result << std::endl;
+                    // std::cerr << "[SenderThread] Failed to send video packet: " << result << std::endl;
                     }
                     else {
-                        std::cout << "[SenderThread] Sent video packet successfully (PTS: " << packet.pts << ")" << std::endl;
+                        // std::cout << "[SenderThread] Sent video packet successfully (PTS: " << packet.pts << ")" << std::endl;
                     }
                 }
             }
         }
     }
-}
 
 void sendFrames() {
     while (!ShutdownManager::IsShutdown()) {
@@ -103,6 +101,7 @@ void on_fail(client* c, websocketpp::connection_hdl hdl) {
 
 void on_close(client* c, websocketpp::connection_hdl hdl) {
     std::cout << "[WebSocket] Connection closed" << std::endl;
+    // Do not propagate Shutdown here; allow manual Stop/Close order only
 }
 
 void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
@@ -155,8 +154,8 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
             // is outside the scope of this latency measurement task, but this is where you'd integrate it.
         }
         else if (type == "peer-disconnected") {
-            std::cout << "[WebSocket] Peer has disconnected. Initiating shutdown." << std::endl;
-            ShutdownManager::SetShutdown(true);
+            std::cout << "[WebSocket] Peer has disconnected. Keeping host alive and closing PeerConnection only." << std::endl;
+            try { closePeerConnection(); } catch (...) {}
         }
         else if (type == "offer") {
             std::cout << "[WebSocket] Received offer from server: \n" << message.dump() << std::endl;
@@ -219,19 +218,38 @@ void initWebsocket(const std::string& roomId) {
         }
         });
 
-    g_frame_thread = std::thread(&sendFrames);
-    g_sender_thread = std::thread(&senderThread);
+    // Video is sent directly from Encoder::pushPacketToWebRTC -> sendVideoPacket.
+    // Disable legacy queue-based sender threads to avoid duplicate RTP sends.
+    // g_frame_thread = std::thread(&sendFrames);
+    // g_sender_thread = std::thread(&senderThread);
 }
 
 void stopWebsocket() {
+    static std::atomic<bool> stopped{ false };
+    bool expected = false;
+    if (!stopped.compare_exchange_strong(expected, true)) {
+        std::wcout << L"[Shutdown] stopWebsocket already executed. Skipping.\n";
+        return;
+    }
+
     std::wcout << L"[Shutdown] Initiating websocket shutdown...\n";
-    ShutdownManager::SetShutdown(true);
+    // Signal encoder loops to stop producing frames
     Encoder::SignalEncoderShutdown();
     g_packetQueue.shutdown();
 
+    // Close the PeerConnection first to stop RTP/data traffic gracefully
+    try {
+        closePeerConnection();
+    } catch (...) {
+        std::wcout << L"[Shutdown] Exception during closePeerConnection (ignored).\n";
+    }
+
     std::wcout << L"[Shutdown] Stopping websocket client...\n";
-    wsClient.stop();
-    wsClient.get_io_service().stop();
+    try {
+        wsClient.stop();
+    } catch (...) {
+        std::wcout << L"[Shutdown] Exception during wsClient.stop() (ignored).\n";
+    }
 
     std::wcout << L"[Shutdown] Joining websocket thread...\n";
     if (g_websocket_thread.joinable()) {

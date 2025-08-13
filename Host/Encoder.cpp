@@ -102,14 +102,17 @@ namespace Encoder {
         {
             std::lock_guard<std::mutex> lock(g_frameMutex);
             g_latestFrameData.assign(packet->data, packet->data + packet->size);
-            g_latestPTS = packet->pts;
+            // Convert packet PTS from codec time_base to microseconds for downstream RTP timestamping
+            int64_t pts_us = av_rescale_q(packet->pts, codecCtx->time_base, AVRational{1, 1000000});
+            g_latestPTS = pts_us;
             g_frameReady = true;
         }
         g_frameAvailable.notify_one();
 
         logNALUnits(packet->data, packet->size);
 
-        int result = sendVideoPacket(packet->data, packet->size, packet->pts);
+        // Pass PTS in microseconds to Go layer
+        int result = sendVideoPacket(packet->data, packet->size, g_latestPTS);
         if (result != 0) {
             std::wcerr << L"[WebRTC] Failed to send video packet to WebRTC module. Error code: " << result << L"\n";
         }
@@ -222,7 +225,7 @@ namespace Encoder {
             }
         }
         else { // Software encoder
-            codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
+            codecCtx->pix_fmt = AV_PIX_FMT_NV12;
         }
 
         AVDictionary* opts = nullptr;
@@ -230,11 +233,29 @@ namespace Encoder {
             av_dict_set(&opts, "preset", "p7", 0);
             av_dict_set(&opts, "rc", "vbr", 0);
             av_dict_set(&opts, "zerolatency", "1", 0);
+            av_dict_set(&opts, "repeat-headers", "1", 0);
+            av_dict_set(&opts, "profile", "baseline", 0);
+        }
+        else if (encoderName == "h264_qsv") {
+            av_dict_set(&opts, "preset", "veryfast", 0);
+            av_dict_set(&opts, "zerolatency", "1", 0);
+            av_dict_set(&opts, "repeat-headers", "1", 0);
+            av_dict_set(&opts, "profile", "baseline", 0);
+        }
+        else if (encoderName == "h264_amf") {
+            av_dict_set(&opts, "usage", "lowlatency_high_quality", 0);
+            av_dict_set(&opts, "repeat-headers", "1", 0);
+            av_dict_set(&opts, "profile", "baseline", 0);
         }
         else if (encoderName == "libx264") {
             av_dict_set(&opts, "preset", "ultrafast", 0);
             av_dict_set(&opts, "tune", "zerolatency", 0);
+            av_dict_set(&opts, "x264-params", "repeat-headers=1", 0);
         }
+
+        // Ensure Annex B where supported (NVENC/libx264 use AVCodecContext flags instead of option)
+        av_dict_set(&opts, "annexb", "1", 0);
+        codecCtx->flags &= ~AV_CODEC_FLAG_GLOBAL_HEADER; // carry SPS/PPS in-band
 
         if (avcodec_open2(codecCtx, codec, &opts) < 0) {
             std::cerr << "[Encoder] Failed to open codec." << std::endl;
@@ -273,8 +294,8 @@ namespace Encoder {
         ID3D11Texture2D* ffmpegTexture = (ID3D11Texture2D*)hwFrame->data[0];
         context->CopyResource(ffmpegTexture, texture);
 
-        // Rescale PTS from 100ns units (QueryPerformanceCounter) to the codec's time_base.
-        hwFrame->pts = av_rescale_q(pts, { 1, 10000000 }, codecCtx->time_base);
+        // Rescale PTS from microseconds to the codec's time_base.
+        hwFrame->pts = av_rescale_q(pts, { 1, 1000000 }, codecCtx->time_base);
 
         int ret = avcodec_send_frame(codecCtx, hwFrame);
         if (ret < 0) {

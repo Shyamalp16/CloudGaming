@@ -53,6 +53,8 @@ var (
 	pingTimestamps        map[uint64]int64 // Stores host_send_time for video_frame_ping
 	pingTimestampsMutex   sync.Mutex       // Mutex for pingTimestamps
 	connectionState       webrtc.PeerConnectionState
+	// Negotiated RTP payload type for H.264 (set after AddTrack). Default to 96.
+	videoPayloadType uint8 = 96
 )
 
 func init() {
@@ -570,12 +572,12 @@ func createPeerConnectionGo() C.int {
 			})
 
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-				log.Printf(
+				/* log.Printf(
 					"[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s",
 					dc.Label(),
 					idStr,
 					string(msg.Data),
-				)
+				) */
 				// Host doesn't need to process pong for RTT, just log for now
 				var messageData map[string]interface{}
 				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
@@ -719,6 +721,15 @@ func createPeerConnectionGo() C.int {
 		log.Println(
 			"[Go/Pion] CRITICAL: Could not get SSRC from RTPSender parameters.",
 		)
+	}
+
+	// Capture the negotiated payload type for H.264 so RTP packets use the correct PT
+	for _, c := range params.Codecs {
+		if c.MimeType == webrtc.MimeTypeH264 {
+			videoPayloadType = uint8(c.PayloadType)
+			log.Printf("[Go/Pion] Negotiated H.264 payload type: %d\n", videoPayloadType)
+			break
+		}
 	}
 
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
@@ -876,10 +887,11 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 
 	buf := C.GoBytes(data, size)
 
+	// PTS from C++ is in microseconds. Convert to 90kHz clock.
 	const frameRate = 60.0
 	const frameDuration90kHz = 90000.0 / frameRate
-	ptsFloat := float64(pts) / 1000000.0
-	baseTimeStamp := uint32(ptsFloat * 90000.0)
+	ptsSeconds := float64(pts) / 1_000_000.0
+	baseTimeStamp := uint32(ptsSeconds * 90000.0)
 
 	if currentTimestamp == 0 {
 		currentTimestamp = baseTimeStamp
@@ -896,6 +908,7 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 
 	nalUnits := splitNALUnits(buf)
 	if len(nalUnits) == 0 {
+		log.Printf("[Go/Pion] splitNALUnits produced 0 NAL units (input size=%d)\n", len(buf))
 		return -1
 	}
 
@@ -904,7 +917,7 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 			rtpPacket := &rtp.Packet{
 				Header: rtp.Header{
 					Version:        2,
-					PayloadType:    96,
+					PayloadType:    videoPayloadType,
 					SequenceNumber: currentSequenceNumber,
 					Timestamp:      currentTimestamp,
 					SSRC:           trackSSRC,
@@ -957,6 +970,7 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 }
 
 func splitNALUnits(buf []byte) [][]byte {
+	// First, try Annex B start-code scanning
 	var nalUnits [][]byte
 	start := 0
 	i := 0
@@ -990,7 +1004,23 @@ func splitNALUnits(buf []byte) [][]byte {
 		}
 	}
 
-	return filteredNALs
+	if len(filteredNALs) > 0 {
+		return filteredNALs
+	}
+
+	// Fallback: parse AVCC length-prefixed format (4-byte big-endian NAL size)
+	var avccNALs [][]byte
+	offset := 0
+	for offset+4 <= len(buf) {
+		size := int(buf[offset])<<24 | int(buf[offset+1])<<16 | int(buf[offset+2])<<8 | int(buf[offset+3])
+		offset += 4
+		if size <= 0 || offset+size > len(buf) {
+			break
+		}
+		avccNALs = append(avccNALs, buf[offset:offset+size])
+		offset += size
+	}
+	return avccNALs
 }
 
 func sendFragmentedNALUnit(nal []byte, maxPacketSize int, isLastNAL bool) error {
@@ -1029,7 +1059,7 @@ func sendFragmentedNALUnit(nal []byte, maxPacketSize int, isLastNAL bool) error 
 		rtpPacket := &rtp.Packet{
 			Header: rtp.Header{
 				Version:        2,
-				PayloadType:    96,
+				PayloadType:    videoPayloadType,
 				SequenceNumber: currentSequenceNumber,
 				Timestamp:      currentTimestamp,
 				SSRC:           trackSSRC,
@@ -1067,6 +1097,16 @@ func closePeerConnection() {
 	defer pcMutex.Unlock()
 
 	if peerConnection != nil {
+		// Best-effort close DataChannels first to avoid races with SCTP shutdown
+		if dataChannel != nil {
+			_ = dataChannel.Close()
+		}
+		if mouseChannel != nil {
+			_ = mouseChannel.Close()
+		}
+		if videoFeedbackChannel != nil {
+			_ = videoFeedbackChannel.Close()
+		}
 		_ = peerConnection.Close()
 		peerConnection = nil
 		videoTrack = nil
@@ -1206,4 +1246,3 @@ func (r *rtcpReaderInterceptor) UnbindRemoteStream(info *interceptor.StreamInfo)
 func (r *rtcpReaderInterceptor) Close() error {
 	return nil
 }
-

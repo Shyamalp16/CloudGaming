@@ -732,11 +732,8 @@
           switch (msg.type) {
             case 'peer-disconnected':
               log('Peer has disconnected. Closing connection.', 'warn');
-              if (peerConnection) {
-                peerConnection.close();
-              }
-              showLoadingOverlay('Host Disconnected', 'The host has ended the session.');
-              updateConnectionStatus('disconnected', 'Host Left');
+              log('Peer-disconnected received. Not closing UI automatically; waiting for reconnect or manual action.');
+              updateConnectionStatus('disconnected', 'Peer Left');
               if (ws) {
                 ws.onclose = null; // Prevent the default onclose handler from trying to reconnect
                 ws.close();
@@ -806,17 +803,20 @@
 
       peerConnection.ontrack = (event) => {
         log(`Received remote track: Kind=${event.track.kind}, ID=${event.track.id}`);
-        if (event.track.kind === 'video' && hiddenVideoElement.srcObject !== event.streams[0]) {
-          log(`Attaching stream ${event.streams[0].id} to hidden video element.`);
-          hiddenVideoElement.srcObject = event.streams[0];
-          hiddenVideoElement.play().then(() => {
-            log('Video started playing, beginning canvas rendering...');
-            renderVideoToCanvas();
-            hideLoadingOverlay();
-            updateConnectionStatus('connected', 'Streaming');
-          }).catch(e => {
-            log(`Video play() failed: ${e}. User interaction might be required.`, 'error');
-          });
+        if (event.track.kind === 'video') {
+          const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+          if (hiddenVideoElement.srcObject !== stream) {
+            log(`Attaching stream ${stream.id} to hidden video element.`);
+            hiddenVideoElement.srcObject = stream;
+            hiddenVideoElement.play().then(() => {
+              log('Video started playing, beginning canvas rendering...');
+              renderVideoToCanvas();
+              hideLoadingOverlay();
+              updateConnectionStatus('connected', 'Streaming');
+            }).catch(e => {
+              log(`Video play() failed: ${e}. User interaction might be required.`, 'error');
+            });
+          }
         }
       };
 
@@ -907,7 +907,7 @@
         const message = JSON.parse(event.data);
 
         if (message.type === "video_frame_ping") {
-          log(`[CLIENT] [PING] Received video_frame_ping for frame ${message.frame_id}`);
+          // log(`[CLIENT] [PING] Received video_frame_ping for frame ${message.frame_id}`);
 
           const pongMessage = {
             type: "video_frame_pong",
@@ -917,9 +917,9 @@
 
           if (videoFeedbackChannel && videoFeedbackChannel.readyState === 'open') {
             videoFeedbackChannel.send(JSON.stringify(pongMessage));
-            log(`[CLIENT] [PONG] Sent video_frame_pong for frame ${message.frame_id}`);
+            // log(`[CLIENT] [PONG] Sent video_frame_pong for frame ${message.frame_id}`);
           } else {
-            log("[CLIENT] videoFeedbackChannel not open, cannot send pong.", 'warn');
+            // log("[CLIENT] videoFeedbackChannel not open, cannot send pong.", 'warn');
           }
         } else if (message.type === "rtt_update") {
           latency = message.rtt.toFixed(1); // Update global latency variable

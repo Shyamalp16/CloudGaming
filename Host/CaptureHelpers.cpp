@@ -105,7 +105,8 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                 if (!surface) return;
 
                 int sequenceNumber = frameSequenceCounter++;
-                int64_t timestamp = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+                // Timestamp in microseconds for encoder/Go layer
+                int64_t timestamp = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
                 {
                     std::lock_guard<std::mutex> lock(queueMutex);
                     framePriorityQueue.push({ sequenceNumber, surface, timestamp });

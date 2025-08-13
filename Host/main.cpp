@@ -56,8 +56,7 @@ void onRTCP(double packetLoss, double rtt, double jitter) {
 void monitorConnection() {
     int state = getPeerConnectionState();
     if (state == 4 || state == 5 || state == 6) { // Disconnected, Failed, Closed
-        std::wcout << L"[main] Peer has disconnected. Shutting down." << std::endl;
-        ShutdownManager::SetShutdown(true);
+        std::wcout << L"[main] Peer disconnected (state=" << state << L"). Keeping host alive for reconnection." << std::endl;
     }
 }
 
@@ -183,12 +182,14 @@ int main()
     }
 
     std::wcout << L"[main] Stopping capture...\n";
+    // Order shutdown to avoid races: stop capture -> close PC -> stop ws -> flush/close encoder -> close Go
     audioCapturer.StopCapture();
-    stopWebsocket();
     StopCapture(token, framePool);
+    try { closePeerConnection(); } catch (...) {}
+    stopWebsocket();
     session.Close();
     framePool.Close();
-    Encoder::FlushEncoder();
+    // Encoder is finalized inside StopCapture(); avoid flushing/finalizing after free
     closeGo(); 
 
     return 0;

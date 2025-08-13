@@ -103,7 +103,12 @@ void CaptureAndEncodeLoop() {
                 Encoder::InitializeEncoder("output.mp4", frameWidth, frameHeight, 60);
             }
 
-            Encoder::EncodeFrame(acquiredDesktopImage.Get(), d3d11DeviceContext.Get(), desc.Width, desc.Height, frameInfo.LastPresentTime.QuadPart);
+            // Convert QPC timestamp to microseconds if provided; fallback to steady_clock
+            int64_t pts_us = static_cast<int64_t>(frameInfo.LastPresentTime.QuadPart / 10); // QPC 100ns -> us
+            if (pts_us <= 0) {
+                pts_us = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+            }
+            Encoder::EncodeFrame(acquiredDesktopImage.Get(), d3d11DeviceContext.Get(), desc.Width, desc.Height, pts_us);
 
             deskDupl->ReleaseFrame();
         }
