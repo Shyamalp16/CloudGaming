@@ -78,7 +78,7 @@ void CaptureAndEncodeLoop() {
         return;
     }
 
-    Encoder::InitializeEncoder("output.mp4", frameWidth, frameHeight, 60);
+    // Defer encoder init to actual captured size in loop below
 
     auto frameInterval = std::chrono::microseconds(1000000 / 120); // target 120 fps local
     auto nextFrameTime = std::chrono::steady_clock::now();
@@ -97,10 +97,14 @@ void CaptureAndEncodeLoop() {
             D3D11_TEXTURE2D_DESC desc;
             acquiredDesktopImage->GetDesc(&desc);
 
-            if (desc.Width != frameWidth || desc.Height != frameHeight) {
-                frameWidth = desc.Width;
-                frameHeight = desc.Height;
-                Encoder::InitializeEncoder("output.mp4", frameWidth, frameHeight, 60);
+            if (frameWidth == 0 || frameHeight == 0) {
+                frameWidth = desc.Width & ~1U;
+                frameHeight = desc.Height & ~1U;
+                Encoder::InitializeEncoder("output.mp4", frameWidth, frameHeight, 120);
+            } else if (desc.Width != (UINT)frameWidth || desc.Height != (UINT)frameHeight) {
+                frameWidth = desc.Width & ~1U;
+                frameHeight = desc.Height & ~1U;
+                Encoder::InitializeEncoder("output.mp4", frameWidth, frameHeight, 120);
             }
 
             // Convert QPC timestamp to microseconds if provided; fallback to steady_clock

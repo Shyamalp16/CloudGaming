@@ -23,6 +23,12 @@ using namespace winrt::Windows::Foundation;
 //Global Variables
 std::vector<std::thread> workerThreads;
 std::atomic<bool> isCapturing{ false };
+// Track capture device and framepool settings to handle dynamic size changes without scaling
+static Direct3D11::IDirect3DDevice g_winrtCaptureDevice{ nullptr };
+static DirectXPixelFormat g_capturePixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
+static int g_captureNumBuffers = 2;
+static std::atomic<int> g_lastContentW{ 0 };
+static std::atomic<int> g_lastContentH{ 0 };
 
 struct FrameData {
     int sequenceNumber;
@@ -58,6 +64,10 @@ Direct3D11CaptureFramePool createFreeThreadedFramePool(
 {
     int numberOfBuffers = 2; // lower buffering to reduce latency
     auto pixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
+    // Store for Recreate on content size changes
+    g_winrtCaptureDevice = d3dDevice;
+    g_capturePixelFormat = pixelFormat;
+    g_captureNumBuffers = numberOfBuffers;
     Direct3D11CaptureFramePool framePool = nullptr;
     try
     {
@@ -101,6 +111,26 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                 auto frame = sender.TryGetNextFrame();
                 if (!frame) return;
 
+                // If content size changed, Recreate the frame pool to avoid implicit scaling
+                auto contentSize = frame.ContentSize();
+                if (contentSize.Width > 0 && contentSize.Height > 0) {
+                    int curW = g_lastContentW.load();
+                    int curH = g_lastContentH.load();
+                    if (contentSize.Width != curW || contentSize.Height != curH) {
+                        // Align to even dimensions for H.264
+                        contentSize.Width &= ~1;
+                        contentSize.Height &= ~1;
+                        try {
+                            sender.Recreate(g_winrtCaptureDevice, g_capturePixelFormat, g_captureNumBuffers, contentSize);
+                            g_lastContentW.store(contentSize.Width);
+                            g_lastContentH.store(contentSize.Height);
+                            return; // Skip this frame; next frames will be at the new size
+                        } catch (...) {
+                            // If recreate fails, proceed with current frame to avoid stalls
+                        }
+                    }
+                }
+
                 auto surface = frame.Surface();
                 if (!surface) return;
 
@@ -125,6 +155,10 @@ void ProcessFrames() {
     winrt::com_ptr<ID3D11DeviceContext> context;
     device->GetImmediateContext(context.put());
 
+    // Initialize encoder on first real frame with actual capture size
+    static int lastInitW = 0;
+    static int lastInitH = 0;
+
     while (true) {
         FrameData frameData;
 
@@ -146,6 +180,14 @@ void ProcessFrames() {
             auto texture = GetTextureFromSurface(frameData.surface);
             D3D11_TEXTURE2D_DESC desc{};
             texture->GetDesc(&desc);
+            // Ensure even dimensions for H.264
+            int encW = static_cast<int>(desc.Width & ~1U);
+            int encH = static_cast<int>(desc.Height & ~1U);
+            if (encW != lastInitW || encH != lastInitH) {
+                Encoder::InitializeEncoder("output.mp4", encW, encH, 120);
+                lastInitW = encW;
+                lastInitH = encH;
+            }
             // Create a Copyable SRV texture if the capture surface is not bindable
             if ((desc.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE)) == 0) {
                 D3D11_TEXTURE2D_DESC copyDesc = desc;
@@ -181,7 +223,6 @@ void StartCapture() {
     for (int i = 0; i < numThreads; i++) {
         workerThreads.emplace_back(ProcessFrames);
     }
-	Encoder::InitializeEncoder("output.mp4", 1920, 1080, 120);
 }
 
 void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& framePool) {

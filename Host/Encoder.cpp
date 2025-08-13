@@ -230,7 +230,7 @@ namespace Encoder {
         currentHeight = height;
         codecCtx->time_base = AVRational{ 1, fps };
         codecCtx->framerate = { fps, 1 };
-        codecCtx->gop_size = fps; // 1-second GOP
+        codecCtx->gop_size = fps * 2; // Relax IDR cadence to ~2 seconds
         codecCtx->max_b_frames = 0; // low-latency
         codecCtx->bit_rate = 50000000; // 50 Mbps target bitrate
 
@@ -291,20 +291,23 @@ namespace Encoder {
 
         AVDictionary* opts = nullptr;
         if (encoderName == "h264_nvenc") {
-            av_dict_set(&opts, "preset", "p6", 0);
+            av_dict_set(&opts, "preset", "p7", 0);
             av_dict_set(&opts, "rc", "cbr", 0);
             av_dict_set(&opts, "repeat-headers", "1", 0);
-            av_dict_set(&opts, "profile", "baseline", 0);
+            av_dict_set(&opts, "profile", "main", 0); // use Main profile
             av_dict_set(&opts, "rc-lookahead", "0", 0);
             av_dict_set(&opts, "bf", "0", 0);
-            // Tight VBV for stable latency
+            // Spatial AQ for detail preservation
+            av_dict_set(&opts, "spatial_aq", "1", 0);
+            av_dict_set(&opts, "aq-strength", "10", 0);
+            // Looser VBV to reduce quality pulsing
             char rateBuf[32];
+            char buf2[32];
             snprintf(rateBuf, sizeof(rateBuf), "%d", codecCtx->bit_rate);
+            snprintf(buf2, sizeof(buf2), "%d", codecCtx->bit_rate * 2);
             av_dict_set(&opts, "maxrate", rateBuf, 0);
-            av_dict_set(&opts, "bufsize", rateBuf, 0);
-            // Force IDR more frequently to ensure decoder gets keyframes quickly
-            av_dict_set(&opts, "forced-idr", "1", 0);
-            av_dict_set(&opts, "gops-per-idr", "1", 0);
+            av_dict_set(&opts, "bufsize", buf2, 0);
+            // Relax forced IDR (handled by gop_size)
         }
         else if (encoderName == "h264_qsv") {
             av_dict_set(&opts, "preset", "veryfast", 0);
