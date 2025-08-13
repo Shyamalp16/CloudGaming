@@ -80,7 +80,7 @@ void CaptureAndEncodeLoop() {
 
     Encoder::InitializeEncoder("output.mp4", frameWidth, frameHeight, 60);
 
-    auto frameInterval = std::chrono::microseconds(1000000 / 60);
+    auto frameInterval = std::chrono::microseconds(1000000 / 120); // target 120 fps local
     auto nextFrameTime = std::chrono::steady_clock::now();
 
     while (!ShutdownManager::IsShutdown()) {

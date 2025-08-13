@@ -56,7 +56,7 @@ Direct3D11CaptureFramePool createFreeThreadedFramePool(
     Direct3D11::IDirect3DDevice d3dDevice,
     winrt::Windows::Graphics::SizeInt32 size)
 {
-    int numberOfBuffers = 3;
+    int numberOfBuffers = 2; // lower buffering to reduce latency
     auto pixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
     Direct3D11CaptureFramePool framePool = nullptr;
     try

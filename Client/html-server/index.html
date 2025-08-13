@@ -525,6 +525,8 @@
     let lastFrameTime = Date.now();
     let fps = 0;
     let latency = 0;
+    let netFps = 0; // decoded frames per second (from inbound-rtp)
+    let bitrateKbps = 0; // computed from bytesReceived
 
     canvas.width = 1920;
     canvas.height = 1080;
@@ -647,9 +649,11 @@
     function updatePerformanceDisplay() {
       document.getElementById('fpsValue').textContent = `${fps} fps`;
       document.getElementById('latencyValue').textContent = `${latency} ms`;
-      document.getElementById('qualityValue').textContent = fps > 50 ? 'Excellent' : fps > 30 ? 'Good' : 'Poor';
-      
-      const qualityLevel = fps > 50 ? 4 : fps > 30 ? 3 : fps > 15 ? 2 : 1;
+      document.getElementById('bitrateValue').textContent = `${bitrateKbps} kbps`;
+      // Quality based on decoded fps from network (netFps)
+      const q = netFps > 50 ? 'Excellent' : netFps > 30 ? 'Good' : 'Poor';
+      document.getElementById('qualityValue').textContent = q;
+      const qualityLevel = netFps > 50 ? 4 : netFps > 30 ? 3 : netFps > 15 ? 2 : 1;
       updateQualityIndicator(qualityLevel);
     }
 
@@ -666,27 +670,19 @@
 
     function renderVideoToCanvas() {
       if (hiddenVideoElement.videoWidth > 0 && hiddenVideoElement.videoHeight > 0) {
+        // Fit video to canvas with preserved aspect and black bars cleared
+        const vW = hiddenVideoElement.videoWidth;
+        const vH = hiddenVideoElement.videoHeight;
+        const scale = Math.min(canvas.width / vW, canvas.height / vH);
+        const dW = Math.floor(vW * scale);
+        const dH = Math.floor(vH * scale);
+        const dx = Math.floor((canvas.width - dW) / 2);
+        const dy = Math.floor((canvas.height - dH) / 2);
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(
-          hiddenVideoElement, 
-          0, 0, 
-          hiddenVideoElement.videoWidth, 
-          hiddenVideoElement.videoHeight,
-          0, 0, 
-          canvas.width, 
-          canvas.height
-        );
+        ctx.drawImage(hiddenVideoElement, 0, 0, vW, vH, dx, dy, dW, dH);
 
         frameCount++;
-        // Sample brightness every ~30 frames
-        if ((debugSampleCounter++ % 30) === 0) {
-          const b = sampleCanvasBrightness();
-          log(`[VIDEO] canvas brightness=${b}`);
-          if (b >= 0 && b < 2) {
-            log('[VIDEO] Canvas appears black. Showing raw <video> for debugging.');
-            try { window.toggleRawVideo && window.toggleRawVideo(); } catch {}
-          }
-        }
+        // FPS tracking
         const currentTime = Date.now();
         if (currentTime - lastFrameTime >= 1000) {
           fps = Math.round((frameCount * 1000) / (currentTime - lastFrameTime));
@@ -836,6 +832,9 @@
         if (animationId) {
           cancelAnimationFrame(animationId);
         }
+        // Reset stats on disconnect
+        fps = 0; netFps = 0; bitrateKbps = 0;
+        updatePerformanceDisplay();
         peerConnection?.close();
         peerConnection = null;
         dataChannel = null;
@@ -873,7 +872,13 @@
             hiddenVideoElement.play().then(() => {
               logVideoState('after play() resolved');
               log('Video started playing, beginning canvas rendering...');
-              renderVideoToCanvas();
+              if (animationId) cancelAnimationFrame(animationId);
+              // Fit canvas to viewport for correct fullscreen scaling
+              const vp = document.getElementById('streamViewport');
+              const rect = vp.getBoundingClientRect();
+              canvas.width = Math.max(1, Math.floor(rect.width));
+              canvas.height = Math.max(1, Math.floor(rect.height));
+              animationId = requestAnimationFrame(renderVideoToCanvas);
               hideLoadingOverlay();
               updateConnectionStatus('connected', 'Streaming');
             }).catch(e => {
@@ -882,17 +887,45 @@
           }
           // Auto-resize canvas to remote frame size on first frames
           hiddenVideoElement.onresize = () => {
-            if (hiddenVideoElement.videoWidth && hiddenVideoElement.videoHeight) {
-              canvas.width = hiddenVideoElement.videoWidth;
-              canvas.height = hiddenVideoElement.videoHeight;
-              logVideoState('onresize -> resized canvas');
-            }
+            // Keep canvas matched to viewport (not raw video size) to avoid double scaling
+            const vp = document.getElementById('streamViewport');
+            const rect = vp.getBoundingClientRect();
+            canvas.width = Math.max(1, Math.floor(rect.width));
+            canvas.height = Math.max(1, Math.floor(rect.height));
+            log('Resized canvas to viewport');
           };
-          // Periodic diagnostic log for the first 10 seconds after track
-          let diagCount = 0;
-          const diagTimer = setInterval(() => {
-            logVideoState('periodic');
-            if (++diagCount >= 10) clearInterval(diagTimer);
+          window.addEventListener('resize', () => {
+            const vp = document.getElementById('streamViewport');
+            const rect = vp.getBoundingClientRect();
+            canvas.width = Math.max(1, Math.floor(rect.width));
+            canvas.height = Math.max(1, Math.floor(rect.height));
+          });
+          // Poll WebRTC stats to compute decoded fps and bitrate
+          let lastFramesDecoded = 0;
+          let lastBytes = 0;
+          let lastStatsTime = performance.now();
+          const statsTimer = setInterval(async () => {
+            if (!peerConnection) { clearInterval(statsTimer); return; }
+            try {
+              const stats = await peerConnection.getStats();
+              let inbound = null;
+              stats.forEach(report => {
+                if (report.type === 'inbound-rtp' && report.kind === 'video') inbound = report;
+              });
+              if (!inbound) return;
+              const now = performance.now();
+              const dt = Math.max(1, now - lastStatsTime);
+              const frames = inbound.framesDecoded || 0;
+              const bytes = inbound.bytesReceived || 0;
+              const dFrames = frames - lastFramesDecoded;
+              const dBytes = bytes - lastBytes;
+              netFps = Math.round((dFrames * 1000) / dt);
+              bitrateKbps = Math.round((dBytes * 8) / dt);
+              lastFramesDecoded = frames;
+              lastBytes = bytes;
+              lastStatsTime = now;
+              updatePerformanceDisplay();
+            } catch (e) {}
           }, 1000);
         }
       };
@@ -920,6 +953,11 @@
           updateConnectionStatus('connected', 'ICE Connected');
         } else if (peerConnection.iceConnectionState === 'disconnected') {
           updateConnectionStatus('disconnected', 'ICE Disconnected');
+          if (animationId) cancelAnimationFrame(animationId);
+          fps = 0; netFps = 0; bitrateKbps = 0; updatePerformanceDisplay();
+        } else if (peerConnection.iceConnectionState === 'failed' || peerConnection.iceConnectionState === 'closed') {
+          if (animationId) cancelAnimationFrame(animationId);
+          fps = 0; netFps = 0; bitrateKbps = 0; updatePerformanceDisplay();
         }
       };
       
@@ -928,6 +966,10 @@
       };
       peerConnection.onconnectionstatechange = () => {
         log('PeerConnection state changed to: ' + peerConnection.connectionState);
+        if (['disconnected','failed','closed'].includes(peerConnection.connectionState)) {
+          if (animationId) cancelAnimationFrame(animationId);
+          fps = 0; netFps = 0; bitrateKbps = 0; updatePerformanceDisplay();
+        }
       };
       peerConnection.onsignalingstatechange = () => {
         log('Signaling state changed to: ' + peerConnection.signalingState);

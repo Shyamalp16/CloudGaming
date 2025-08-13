@@ -48,7 +48,6 @@ static Microsoft::WRL::ComPtr<ID3D11VideoDevice> g_videoDevice;
 static Microsoft::WRL::ComPtr<ID3D11VideoContext> g_videoContext;
 static Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> g_vpEnumerator;
 static Microsoft::WRL::ComPtr<ID3D11VideoProcessor> g_videoProcessor;
-static Microsoft::WRL::ComPtr<ID3D11Texture2D> g_vpNV12Texture;
 static int g_vpWidth = 0;
 static int g_vpHeight = 0;
 
@@ -58,7 +57,6 @@ static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height
     g_videoContext.Reset();
     g_vpEnumerator.Reset();
     g_videoProcessor.Reset();
-    g_vpNV12Texture.Reset();
     g_vpWidth = width;
     g_vpHeight = height;
 
@@ -89,19 +87,6 @@ static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height
         return false;
     }
 
-    D3D11_TEXTURE2D_DESC nv12Desc{};
-    nv12Desc.Width = width;
-    nv12Desc.Height = height;
-    nv12Desc.MipLevels = 1;
-    nv12Desc.ArraySize = 1;
-    nv12Desc.Format = DXGI_FORMAT_NV12;
-    nv12Desc.SampleDesc.Count = 1;
-    nv12Desc.Usage = D3D11_USAGE_DEFAULT;
-    nv12Desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(device->CreateTexture2D(&nv12Desc, nullptr, g_vpNV12Texture.GetAddressOf()))) {
-        std::cerr << "[Encoder][VP] CreateTexture2D NV12 failed" << std::endl;
-        return false;
-    }
     std::wcout << L"[Encoder][VP] Initialized VideoProcessor for " << width << L"x" << height << std::endl;
     return true;
 }
@@ -245,9 +230,9 @@ namespace Encoder {
         currentHeight = height;
         codecCtx->time_base = AVRational{ 1, fps };
         codecCtx->framerate = { fps, 1 };
-        codecCtx->gop_size = 10;
-        codecCtx->max_b_frames = 0;
-        codecCtx->bit_rate = 30000000;
+        codecCtx->gop_size = fps; // 1-second GOP
+        codecCtx->max_b_frames = 0; // low-latency
+        codecCtx->bit_rate = 50000000; // 50 Mbps target bitrate
 
         // Configure D3D11VA frames with NV12 sw_format (GPU path)
         if (isHardware) {
@@ -306,11 +291,17 @@ namespace Encoder {
 
         AVDictionary* opts = nullptr;
         if (encoderName == "h264_nvenc") {
-            av_dict_set(&opts, "preset", "p7", 0);
-            av_dict_set(&opts, "rc", "vbr", 0);
-            av_dict_set(&opts, "zerolatency", "1", 0);
+            av_dict_set(&opts, "preset", "p6", 0);
+            av_dict_set(&opts, "rc", "cbr", 0);
             av_dict_set(&opts, "repeat-headers", "1", 0);
             av_dict_set(&opts, "profile", "baseline", 0);
+            av_dict_set(&opts, "rc-lookahead", "0", 0);
+            av_dict_set(&opts, "bf", "0", 0);
+            // Tight VBV for stable latency
+            char rateBuf[32];
+            snprintf(rateBuf, sizeof(rateBuf), "%d", codecCtx->bit_rate);
+            av_dict_set(&opts, "maxrate", rateBuf, 0);
+            av_dict_set(&opts, "bufsize", rateBuf, 0);
             // Force IDR more frequently to ensure decoder gets keyframes quickly
             av_dict_set(&opts, "forced-idr", "1", 0);
             av_dict_set(&opts, "gops-per-idr", "1", 0);
@@ -413,15 +404,15 @@ namespace Encoder {
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
         outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
         outDesc.Texture2D.MipSlice = 0;
-    if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(g_vpNV12Texture.Get(), g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) {
+        // Create output view directly on FFmpeg's NV12 texture (hwFrame->data[0]) to avoid extra copy
+        ID3D11Texture2D* ffmpegNV12 = (ID3D11Texture2D*)hwFrame->data[0];
+        if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(ffmpegNV12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) {
             std::cerr << "[Encoder][VP] CreateVideoProcessorOutputView failed." << std::endl; return; }
         D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
     if (FAILED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream))) {
             std::cerr << "[Encoder][VP] VideoProcessorBlt failed." << std::endl; return; }
 
-        // Copy NV12 into FFmpeg hwFrame texture and send
-        ID3D11Texture2D* ffmpegNV12 = (ID3D11Texture2D*)hwFrame->data[0];
-        context->CopyResource(ffmpegNV12, g_vpNV12Texture.Get());
+        // No extra copy needed; VP wrote directly into ffmpegNV12 via output view
 
         hwFrame->pts = av_rescale_q(pts, { 1, 1000000 }, codecCtx->time_base);
 

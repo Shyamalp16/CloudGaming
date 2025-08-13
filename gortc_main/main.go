@@ -911,21 +911,10 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	buf := C.GoBytes(data, size)
 
 	// PTS from C++ is in microseconds. Convert to 90kHz clock.
-	const frameRate = 60.0
-	const frameDuration90kHz = 90000.0 / frameRate
+	// Derive RTP timestamp directly from capture PTS each frame to avoid pacing jitter
 	ptsSeconds := float64(pts) / 1_000_000.0
 	baseTimeStamp := uint32(ptsSeconds * 90000.0)
-
-	if currentTimestamp == 0 {
-		currentTimestamp = baseTimeStamp
-	} else {
-		expectedIncrement := uint32(frameDuration90kHz)
-		if baseTimeStamp > currentTimestamp {
-			currentTimestamp = baseTimeStamp
-		} else {
-			currentTimestamp += expectedIncrement
-		}
-	}
+	currentTimestamp = baseTimeStamp
 
 	// Typical MTU safe payload allowing for headers
 	const maxPacketSize = 1200
