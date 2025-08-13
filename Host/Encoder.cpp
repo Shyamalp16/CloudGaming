@@ -9,6 +9,7 @@
 #include "PacketQueue.h"
 #include "D3DHelpers.h" // For GetGpuVendorId
 #include <libavutil/hwcontext_d3d11va.h>
+#include <d3d11.h>
 #include <wrl.h>
 
 SwsContext* Encoder::swsCtx = nullptr;
@@ -41,6 +42,69 @@ static bool g_shutdown = false;
 
 static std::chrono::steady_clock::time_point encoderStartTime;
 static bool isFirstFrame = true;
+
+// D3D11 VideoProcessor resources for GPU BGRA -> NV12 conversion
+static Microsoft::WRL::ComPtr<ID3D11VideoDevice> g_videoDevice;
+static Microsoft::WRL::ComPtr<ID3D11VideoContext> g_videoContext;
+static Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> g_vpEnumerator;
+static Microsoft::WRL::ComPtr<ID3D11VideoProcessor> g_videoProcessor;
+static Microsoft::WRL::ComPtr<ID3D11Texture2D> g_vpNV12Texture;
+static int g_vpWidth = 0;
+static int g_vpHeight = 0;
+
+static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height)
+{
+    g_videoDevice.Reset();
+    g_videoContext.Reset();
+    g_vpEnumerator.Reset();
+    g_videoProcessor.Reset();
+    g_vpNV12Texture.Reset();
+    g_vpWidth = width;
+    g_vpHeight = height;
+
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> dc;
+    device->GetImmediateContext(dc.GetAddressOf());
+    if (FAILED(device->QueryInterface(__uuidof(ID3D11VideoDevice), (void**)g_videoDevice.GetAddressOf()))) {
+        std::cerr << "[Encoder][VP] ID3D11VideoDevice QI failed" << std::endl;
+        return false;
+    }
+    if (FAILED(dc->QueryInterface(__uuidof(ID3D11VideoContext), (void**)g_videoContext.GetAddressOf()))) {
+        std::cerr << "[Encoder][VP] ID3D11VideoContext QI failed" << std::endl;
+        return false;
+    }
+
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc{};
+    desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    desc.InputWidth = width;
+    desc.InputHeight = height;
+    desc.OutputWidth = width;
+    desc.OutputHeight = height;
+    desc.Usage = D3D11_VIDEO_USAGE_OPTIMAL_SPEED;
+    if (FAILED(g_videoDevice->CreateVideoProcessorEnumerator(&desc, g_vpEnumerator.GetAddressOf()))) {
+        std::cerr << "[Encoder][VP] CreateVideoProcessorEnumerator failed" << std::endl;
+        return false;
+    }
+    if (FAILED(g_videoDevice->CreateVideoProcessor(g_vpEnumerator.Get(), 0, g_videoProcessor.GetAddressOf()))) {
+        std::cerr << "[Encoder][VP] CreateVideoProcessor failed" << std::endl;
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC nv12Desc{};
+    nv12Desc.Width = width;
+    nv12Desc.Height = height;
+    nv12Desc.MipLevels = 1;
+    nv12Desc.ArraySize = 1;
+    nv12Desc.Format = DXGI_FORMAT_NV12;
+    nv12Desc.SampleDesc.Count = 1;
+    nv12Desc.Usage = D3D11_USAGE_DEFAULT;
+    nv12Desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device->CreateTexture2D(&nv12Desc, nullptr, g_vpNV12Texture.GetAddressOf()))) {
+        std::cerr << "[Encoder][VP] CreateTexture2D NV12 failed" << std::endl;
+        return false;
+    }
+    std::wcout << L"[Encoder][VP] Initialized VideoProcessor for " << width << L"x" << height << std::endl;
+    return true;
+}
 
 namespace Encoder {
 
@@ -185,8 +249,60 @@ namespace Encoder {
         codecCtx->max_b_frames = 0;
         codecCtx->bit_rate = 30000000;
 
-        // Use NV12 software frames and let NVENC upload; avoids BGRA->NV12 on GPU issues
-        codecCtx->pix_fmt = AV_PIX_FMT_NV12;
+        // Configure D3D11VA frames with NV12 sw_format (GPU path)
+        if (isHardware) {
+            codecCtx->pix_fmt = AV_PIX_FMT_D3D11;
+
+            if (av_hwdevice_ctx_create(&hwDeviceCtx, hwDeviceType, nullptr, nullptr, 0) < 0) {
+                std::cerr << "[Encoder] Failed to create HW device context." << std::endl;
+                return;
+            }
+            AVHWDeviceContext* deviceCtx = (AVHWDeviceContext*)hwDeviceCtx->data;
+            AVD3D11VADeviceContext* d3d11vaDeviceCtx = (AVD3D11VADeviceContext*)deviceCtx->hwctx;
+            d3d11vaDeviceCtx->device = (ID3D11Device*)GetD3DDevice().get();
+            d3d11vaDeviceCtx->device->AddRef();
+            codecCtx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
+
+            hwFramesCtx = av_hwframe_ctx_alloc(hwDeviceCtx);
+            if (!hwFramesCtx) {
+                std::cerr << "[Encoder] Failed to allocate hwFramesCtx." << std::endl;
+                return;
+            }
+            AVHWFramesContext* framesCtx = (AVHWFramesContext*)hwFramesCtx->data;
+            framesCtx->format = AV_PIX_FMT_D3D11;
+            framesCtx->sw_format = AV_PIX_FMT_NV12;
+            framesCtx->width = width;
+            framesCtx->height = height;
+            framesCtx->initial_pool_size = 8;
+            // Ensure D3D11 textures are created with render target and SRV so we can CopyResource into them and the encoder can read
+            AVD3D11VAFramesContext* framesHw = (AVD3D11VAFramesContext*)framesCtx->hwctx;
+            if (framesHw) {
+                framesHw->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                framesHw->MiscFlags = 0;
+            }
+            if (av_hwframe_ctx_init(hwFramesCtx) < 0) {
+                std::cerr << "[Encoder] Failed to init hwFramesCtx." << std::endl;
+                return;
+            }
+            codecCtx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
+
+            hwFrame = av_frame_alloc();
+            if (av_hwframe_get_buffer(codecCtx->hw_frames_ctx, hwFrame, 0) < 0) {
+                // Retry with larger pool and explicit bind flags
+                AVHWFramesContext* retryCtx = (AVHWFramesContext*)hwFramesCtx->data;
+                retryCtx->initial_pool_size = 16;
+                AVD3D11VAFramesContext* hw = (AVD3D11VAFramesContext*)retryCtx->hwctx;
+                if (hw) hw->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                if (av_hwframe_ctx_init(hwFramesCtx) < 0 || av_hwframe_get_buffer(codecCtx->hw_frames_ctx, hwFrame, 0) < 0) {
+                    std::cerr << "[Encoder] Failed to alloc hwFrame after retry." << std::endl;
+                    return;
+                }
+            }
+
+            InitializeVideoProcessor((ID3D11Device*)GetD3DDevice().get(), width, height);
+        } else {
+            codecCtx->pix_fmt = AV_PIX_FMT_NV12;
+        }
 
         AVDictionary* opts = nullptr;
         if (encoderName == "h264_nvenc") {
@@ -242,36 +358,15 @@ namespace Encoder {
 
         packet = av_packet_alloc();
 
-        // Allocate NV12 frame buffer for encoder input
-        if (nv12Frame) {
-            av_frame_free(&nv12Frame);
-        }
-        nv12Frame = av_frame_alloc();
-        nv12Frame->format = AV_PIX_FMT_NV12;
-        nv12Frame->width = width;
-        nv12Frame->height = height;
-        if (av_frame_get_buffer(nv12Frame, 32) < 0) {
-            std::cerr << "[Encoder] Failed to allocate NV12 frame buffer." << std::endl;
-            return;
-        }
-        // Initialize SWS converter from BGRA -> NV12
-        if (swsCtx) {
-            sws_freeContext(swsCtx);
-            swsCtx = nullptr;
-        }
-        swsCtx = sws_getContext(width, height, AV_PIX_FMT_BGRA, width, height, AV_PIX_FMT_NV12, SWS_BILINEAR, nullptr, nullptr, nullptr);
-        if (!swsCtx) {
-            std::cerr << "[Encoder] Failed to create sws context." << std::endl;
-            return;
-        }
+        // CPU swscale path not used in GPU mode
 
         std::wcout << L"[Encoder] " << std::wstring(encoderName.begin(), encoderName.end()) << " encoder initialized successfully." << std::endl;
     }
 
     void EncodeFrame(ID3D11Texture2D* texture, ID3D11DeviceContext* context, int width, int height, int64_t pts) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
-        if (!codecCtx || !swsCtx || !nv12Frame) {
-            std::cerr << "[Encoder] Encoder not initialized or frames not allocated." << std::endl;
+        if (!codecCtx || !hwFrame || !g_videoProcessor) {
+            std::cerr << "[Encoder] Encoder/VideoProcessor not initialized." << std::endl;
             return;
         }
 
@@ -281,44 +376,56 @@ namespace Encoder {
         int srcW = (int)(srcDesc.Width & ~1U);
         int srcH = (int)(srcDesc.Height & ~1U);
         if (srcW != currentWidth || srcH != currentHeight) {
-            FinalizeEncoder();
-            InitializeEncoder("output.mp4", srcW, srcH, codecCtx->framerate.num);
-            if (!codecCtx || !swsCtx || !nv12Frame) {
-                std::cerr << "[Encoder] Re-init failed on size change." << std::endl;
-                return;
+            // Reconfigure hw frames and video processor for new size
+            if (hwFrame) { av_frame_free(&hwFrame); hwFrame = nullptr; }
+            if (hwFramesCtx) { av_buffer_unref(&hwFramesCtx); hwFramesCtx = nullptr; }
+            currentWidth = srcW; currentHeight = srcH;
+            hwFramesCtx = av_hwframe_ctx_alloc(hwDeviceCtx);
+            if (!hwFramesCtx) return;
+            AVHWFramesContext* framesCtx = (AVHWFramesContext*)hwFramesCtx->data;
+            framesCtx->format = AV_PIX_FMT_D3D11;
+            framesCtx->sw_format = AV_PIX_FMT_NV12;
+            framesCtx->width = currentWidth;
+            framesCtx->height = currentHeight;
+            framesCtx->initial_pool_size = 8;
+            AVD3D11VAFramesContext* framesHw = (AVD3D11VAFramesContext*)framesCtx->hwctx;
+            if (framesHw) {
+                framesHw->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                framesHw->MiscFlags = 0;
             }
+            if (av_hwframe_ctx_init(hwFramesCtx) < 0) return;
+            if (codecCtx->hw_frames_ctx) av_buffer_unref(&codecCtx->hw_frames_ctx);
+            codecCtx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
+            hwFrame = av_frame_alloc();
+            if (av_hwframe_get_buffer(codecCtx->hw_frames_ctx, hwFrame, 0) < 0) return;
+            InitializeVideoProcessor((ID3D11Device*)GetD3DDevice().get(), currentWidth, currentHeight);
         }
 
-        // Create a staging texture for CPU readback
-        D3D11_TEXTURE2D_DESC stagingDesc = srcDesc;
-        stagingDesc.BindFlags = 0;
-        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        stagingDesc.Usage = D3D11_USAGE_STAGING;
-        stagingDesc.MiscFlags = 0;
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+        // GPU VideoProcessor BGRA->NV12
+        Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
+        Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc{};
+        inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        inDesc.Texture2D.MipSlice = 0; inDesc.Texture2D.ArraySlice = 0;
         ID3D11Device* device = (ID3D11Device*)GetD3DDevice().get();
-        if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, staging.GetAddressOf()))) {
-            std::cerr << "[Encoder] Failed to create staging texture." << std::endl;
-            return;
-        }
-        context->CopyResource(staging.Get(), texture);
+    if (FAILED(g_videoDevice->CreateVideoProcessorInputView(texture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf()))) {
+            std::cerr << "[Encoder][VP] CreateVideoProcessorInputView failed." << std::endl; return; }
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
+        outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        outDesc.Texture2D.MipSlice = 0;
+    if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(g_vpNV12Texture.Get(), g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) {
+            std::cerr << "[Encoder][VP] CreateVideoProcessorOutputView failed." << std::endl; return; }
+        D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
+    if (FAILED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream))) {
+            std::cerr << "[Encoder][VP] VideoProcessorBlt failed." << std::endl; return; }
 
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-            std::cerr << "[Encoder] Failed to map staging texture." << std::endl;
-            return;
-        }
+        // Copy NV12 into FFmpeg hwFrame texture and send
+        ID3D11Texture2D* ffmpegNV12 = (ID3D11Texture2D*)hwFrame->data[0];
+        context->CopyResource(ffmpegNV12, g_vpNV12Texture.Get());
 
-        // Convert BGRA (with row pitch) -> NV12 using swscale
-        const uint8_t* srcData[4] = { (const uint8_t*)mapped.pData, nullptr, nullptr, nullptr };
-        int srcLinesize[4] = { (int)mapped.RowPitch, 0, 0, 0 };
-        sws_scale(swsCtx, srcData, srcLinesize, 0, currentHeight, nv12Frame->data, nv12Frame->linesize);
-        context->Unmap(staging.Get(), 0);
+        hwFrame->pts = av_rescale_q(pts, { 1, 1000000 }, codecCtx->time_base);
 
-        // Set PTS and send to encoder
-        nv12Frame->pts = av_rescale_q(pts, { 1, 1000000 }, codecCtx->time_base);
-
-        int ret = avcodec_send_frame(codecCtx, nv12Frame);
+        int ret = avcodec_send_frame(codecCtx, hwFrame);
         if (ret < 0) {
             char errBuf[128];
             av_make_error_string(errBuf, 128, ret);
