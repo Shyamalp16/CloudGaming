@@ -108,7 +108,25 @@ void CaptureAndEncodeLoop() {
             if (pts_us <= 0) {
                 pts_us = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
             }
-            Encoder::EncodeFrame(acquiredDesktopImage.Get(), d3d11DeviceContext.Get(), desc.Width, desc.Height, pts_us);
+            // Validate that the duplicated texture is compatible for CopyResource
+            if ((desc.BindFlags & D3D11_BIND_RENDER_TARGET) == 0 && (desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0) {
+                // Create a staging copy with CPU read disabled but GPU bind flags set for safe copying
+                D3D11_TEXTURE2D_DESC safeDesc = desc;
+                safeDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE; // minimal bind for CopyResource safety
+                safeDesc.MiscFlags = 0;
+                ComPtr<ID3D11Texture2D> safeCopy;
+                if (SUCCEEDED(d3d11Device->CreateTexture2D(&safeDesc, nullptr, &safeCopy))) {
+            // Ensure sizes are even for H.264
+            safeDesc.Width &= ~1U;
+            safeDesc.Height &= ~1U;
+            d3d11DeviceContext->CopyResource(safeCopy.Get(), acquiredDesktopImage.Get());
+            Encoder::EncodeFrame(safeCopy.Get(), d3d11DeviceContext.Get(), safeDesc.Width, safeDesc.Height, pts_us);
+                } else {
+                    Encoder::EncodeFrame(acquiredDesktopImage.Get(), d3d11DeviceContext.Get(), desc.Width, desc.Height, pts_us);
+                }
+            } else {
+                Encoder::EncodeFrame(acquiredDesktopImage.Get(), d3d11DeviceContext.Get(), desc.Width, desc.Height, pts_us);
+            }
 
             deskDupl->ReleaseFrame();
         }

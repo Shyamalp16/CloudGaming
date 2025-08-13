@@ -9,6 +9,7 @@
 #include "PacketQueue.h"
 #include "D3DHelpers.h" // For GetGpuVendorId
 #include <libavutil/hwcontext_d3d11va.h>
+#include <wrl.h>
 
 SwsContext* Encoder::swsCtx = nullptr;
 AVFrame* Encoder::nv12Frame = nullptr;
@@ -176,57 +177,16 @@ namespace Encoder {
 
         codecCtx->width = width;
         codecCtx->height = height;
+        currentWidth = width;
+        currentHeight = height;
         codecCtx->time_base = AVRational{ 1, fps };
         codecCtx->framerate = { fps, 1 };
         codecCtx->gop_size = 10;
         codecCtx->max_b_frames = 0;
         codecCtx->bit_rate = 30000000;
 
-        if (isHardware) {
-            codecCtx->pix_fmt = hwPixFmt; // INPUT PIXEL FORMAT
-
-            if (av_hwdevice_ctx_create(&hwDeviceCtx, hwDeviceType, nullptr, nullptr, 0) < 0) {
-                std::cerr << "[Encoder] Failed to create HW device context." << std::endl;
-                return;
-            }
-
-            AVHWDeviceContext* deviceCtx = (AVHWDeviceContext*)hwDeviceCtx->data;
-            AVD3D11VADeviceContext* d3d11vaDeviceCtx = (AVD3D11VADeviceContext*)deviceCtx->hwctx;
-            d3d11vaDeviceCtx->device = (ID3D11Device*)GetD3DDevice().get();
-            d3d11vaDeviceCtx->device->AddRef();
-            std::wcout << L"[Encoder] Passed existing D3D11 device to FFmpeg." << std::endl;
-
-            codecCtx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
-
-            hwFramesCtx = av_hwframe_ctx_alloc(hwDeviceCtx);
-            if (!hwFramesCtx) {
-                std::cerr << "[Encoder] Failed to allocate hardware frames context." << std::endl;
-                return;
-            }
-
-            AVHWFramesContext* framesCtx = (AVHWFramesContext*)hwFramesCtx->data;
-            framesCtx->format = hwPixFmt;
-            framesCtx->sw_format = AV_PIX_FMT_BGRA; // Software format is BGRA
-            framesCtx->width = width;
-            framesCtx->height = height;
-            framesCtx->initial_pool_size = 20;
-
-            if (av_hwframe_ctx_init(hwFramesCtx) < 0) {
-                std::cerr << "[Encoder] Failed to initialize hardware frames context." << std::endl;
-                return;
-            }
-
-            codecCtx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
-
-            hwFrame = av_frame_alloc();
-            if (av_hwframe_get_buffer(codecCtx->hw_frames_ctx, hwFrame, 0) < 0) {
-                std::cerr << "[Encoder] Failed to allocate hardware frame buffer." << std::endl;
-                return;
-            }
-        }
-        else { // Software encoder
-            codecCtx->pix_fmt = AV_PIX_FMT_NV12;
-        }
+        // Use NV12 software frames and let NVENC upload; avoids BGRA->NV12 on GPU issues
+        codecCtx->pix_fmt = AV_PIX_FMT_NV12;
 
         AVDictionary* opts = nullptr;
         if (encoderName == "h264_nvenc") {
@@ -235,6 +195,9 @@ namespace Encoder {
             av_dict_set(&opts, "zerolatency", "1", 0);
             av_dict_set(&opts, "repeat-headers", "1", 0);
             av_dict_set(&opts, "profile", "baseline", 0);
+            // Force IDR more frequently to ensure decoder gets keyframes quickly
+            av_dict_set(&opts, "forced-idr", "1", 0);
+            av_dict_set(&opts, "gops-per-idr", "1", 0);
         }
         else if (encoderName == "h264_qsv") {
             av_dict_set(&opts, "preset", "veryfast", 0);
@@ -279,25 +242,83 @@ namespace Encoder {
 
         packet = av_packet_alloc();
 
+        // Allocate NV12 frame buffer for encoder input
+        if (nv12Frame) {
+            av_frame_free(&nv12Frame);
+        }
+        nv12Frame = av_frame_alloc();
+        nv12Frame->format = AV_PIX_FMT_NV12;
+        nv12Frame->width = width;
+        nv12Frame->height = height;
+        if (av_frame_get_buffer(nv12Frame, 32) < 0) {
+            std::cerr << "[Encoder] Failed to allocate NV12 frame buffer." << std::endl;
+            return;
+        }
+        // Initialize SWS converter from BGRA -> NV12
+        if (swsCtx) {
+            sws_freeContext(swsCtx);
+            swsCtx = nullptr;
+        }
+        swsCtx = sws_getContext(width, height, AV_PIX_FMT_BGRA, width, height, AV_PIX_FMT_NV12, SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!swsCtx) {
+            std::cerr << "[Encoder] Failed to create sws context." << std::endl;
+            return;
+        }
+
         std::wcout << L"[Encoder] " << std::wstring(encoderName.begin(), encoderName.end()) << " encoder initialized successfully." << std::endl;
     }
 
     void EncodeFrame(ID3D11Texture2D* texture, ID3D11DeviceContext* context, int width, int height, int64_t pts) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
-        if (!codecCtx || !hwFrame) {
-            std::cerr << "[Encoder] Encoder not initialized or hardware frame not allocated." << std::endl;
+        if (!codecCtx || !swsCtx || !nv12Frame) {
+            std::cerr << "[Encoder] Encoder not initialized or frames not allocated." << std::endl;
             return;
         }
 
-        // The hwFrame->data[0] is the texture allocated by FFmpeg's hwframe context.
-        // We need to copy the captured texture into it. This is a GPU-to-GPU copy.
-        ID3D11Texture2D* ffmpegTexture = (ID3D11Texture2D*)hwFrame->data[0];
-        context->CopyResource(ffmpegTexture, texture);
+        // Ensure even dimensions and re-init encoder if size changed
+        D3D11_TEXTURE2D_DESC srcDesc{};
+        texture->GetDesc(&srcDesc);
+        int srcW = (int)(srcDesc.Width & ~1U);
+        int srcH = (int)(srcDesc.Height & ~1U);
+        if (srcW != currentWidth || srcH != currentHeight) {
+            FinalizeEncoder();
+            InitializeEncoder("output.mp4", srcW, srcH, codecCtx->framerate.num);
+            if (!codecCtx || !swsCtx || !nv12Frame) {
+                std::cerr << "[Encoder] Re-init failed on size change." << std::endl;
+                return;
+            }
+        }
 
-        // Rescale PTS from microseconds to the codec's time_base.
-        hwFrame->pts = av_rescale_q(pts, { 1, 1000000 }, codecCtx->time_base);
+        // Create a staging texture for CPU readback
+        D3D11_TEXTURE2D_DESC stagingDesc = srcDesc;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.MiscFlags = 0;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+        ID3D11Device* device = (ID3D11Device*)GetD3DDevice().get();
+        if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, staging.GetAddressOf()))) {
+            std::cerr << "[Encoder] Failed to create staging texture." << std::endl;
+            return;
+        }
+        context->CopyResource(staging.Get(), texture);
 
-        int ret = avcodec_send_frame(codecCtx, hwFrame);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+            std::cerr << "[Encoder] Failed to map staging texture." << std::endl;
+            return;
+        }
+
+        // Convert BGRA (with row pitch) -> NV12 using swscale
+        const uint8_t* srcData[4] = { (const uint8_t*)mapped.pData, nullptr, nullptr, nullptr };
+        int srcLinesize[4] = { (int)mapped.RowPitch, 0, 0, 0 };
+        sws_scale(swsCtx, srcData, srcLinesize, 0, currentHeight, nv12Frame->data, nv12Frame->linesize);
+        context->Unmap(staging.Get(), 0);
+
+        // Set PTS and send to encoder
+        nv12Frame->pts = av_rescale_q(pts, { 1, 1000000 }, codecCtx->time_base);
+
+        int ret = avcodec_send_frame(codecCtx, nv12Frame);
         if (ret < 0) {
             char errBuf[128];
             av_make_error_string(errBuf, 128, ret);

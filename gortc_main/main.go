@@ -21,6 +21,7 @@ import (
 	"log"
 	"math/rand"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -722,14 +723,31 @@ func createPeerConnectionGo() C.int {
 			"[Go/Pion] CRITICAL: Could not get SSRC from RTPSender parameters.",
 		)
 	}
-
-	// Capture the negotiated payload type for H.264 so RTP packets use the correct PT
-	for _, c := range params.Codecs {
-		if c.MimeType == webrtc.MimeTypeH264 {
-			videoPayloadType = uint8(c.PayloadType)
-			log.Printf("[Go/Pion] Negotiated H.264 payload type: %d\n", videoPayloadType)
-			break
+	// Enumerate codecs and select H264 payload type specifically
+	if len(params.Codecs) == 0 {
+		log.Printf("[Go/Pion] WARNING: No codecs in RTPSender parameters; defaulting PT=%d\n", videoPayloadType)
+	} else {
+		var firstH264PT uint8 = 0
+		var preferredPT uint8 = 0
+		for idx, c := range params.Codecs {
+			log.Printf("[Go/Pion] RTPSender codec[%d]: PT=%d, Mime=%s, FMTP='%s'\n", idx, c.PayloadType, c.MimeType, c.SDPFmtpLine)
+			if c.MimeType == webrtc.MimeTypeH264 {
+				if firstH264PT == 0 {
+					firstH264PT = uint8(c.PayloadType)
+				}
+				// Prefer packetization-mode=1 and profile-level-id=42e01f (baseline)
+				fmtp := c.SDPFmtpLine
+				if strings.Contains(fmtp, "packetization-mode=1") && strings.Contains(fmtp, "profile-level-id=42e01f") {
+					preferredPT = uint8(c.PayloadType)
+				}
+			}
 		}
+		if preferredPT != 0 {
+			videoPayloadType = preferredPT
+		} else if firstH264PT != 0 {
+			videoPayloadType = firstH264PT
+		}
+		log.Printf("[Go/Pion] Selected H264 payload type: %d\n", videoPayloadType)
 	}
 
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
@@ -885,6 +903,11 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		return -1
 	}
 
+	// Guard: do not send if PC is not connected
+	if connectionState != webrtc.PeerConnectionStateConnected {
+		return 0
+	}
+
 	buf := C.GoBytes(data, size)
 
 	// PTS from C++ is in microseconds. Convert to 90kHz clock.
@@ -904,13 +927,17 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		}
 	}
 
-	const maxPacketSize = 1000
+	// Typical MTU safe payload allowing for headers
+	const maxPacketSize = 1200
 
 	nalUnits := splitNALUnits(buf)
 	if len(nalUnits) == 0 {
 		log.Printf("[Go/Pion] splitNALUnits produced 0 NAL units (input size=%d)\n", len(buf))
 		return -1
 	}
+
+	// Ensure SPS/PPS are sent before IDR if encoder didn't repeat headers
+	// Detect IDR (type 5) without prior SPS/PPS in this batch and synthesize from extradata if available in future.
 
 	for i, nal := range nalUnits {
 		if len(nal) <= maxPacketSize {

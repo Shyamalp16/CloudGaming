@@ -144,9 +144,26 @@ void ProcessFrames() {
 
         if (frameData.surface) {
             auto texture = GetTextureFromSurface(frameData.surface);
-            D3D11_TEXTURE2D_DESC desc;
+            D3D11_TEXTURE2D_DESC desc{};
             texture->GetDesc(&desc);
-            Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
+            // Create a Copyable SRV texture if the capture surface is not bindable
+            if ((desc.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE)) == 0) {
+                D3D11_TEXTURE2D_DESC copyDesc = desc;
+                copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                copyDesc.MiscFlags = 0;
+                winrt::com_ptr<ID3D11Texture2D> copyTex;
+                if (SUCCEEDED(GetD3DDevice()->CreateTexture2D(&copyDesc, nullptr, copyTex.put()))) {
+                    // Ensure even dimensions
+                    copyDesc.Width &= ~1U;
+                    copyDesc.Height &= ~1U;
+                    context->CopyResource(copyTex.get(), texture.get());
+                    Encoder::EncodeFrame(copyTex.get(), context.get(), copyDesc.Width, copyDesc.Height, frameData.timestamp);
+                } else {
+                    Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
+                }
+            } else {
+                Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
+            }
         }
     }
 }
