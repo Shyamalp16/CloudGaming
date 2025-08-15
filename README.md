@@ -30,9 +30,9 @@ The system is composed of three main components that work together to establish 
 
 | Module | Language(s) | Key Libraries & Frameworks | Purpose |
 | :--- | :--- | :--- | :--- |
-| **Host** | C++ | **FFmpeg** (Encoding), **Pion WebRTC** (Go), **WinRT/C++**, **DirectX 11** | Screen/audio capture, H.264 encoding, WebRTC session management. |
+| **Host** | C++ | **FFmpeg** (Encoding), **Pion WebRTC** (Go), **WinRT/C++**, **DirectX 11 (DXGI)** | Screen/audio capture, H.264 encoding, WebRTC session management. |
 | **Server** | JavaScript | **Node.js**, **ws** (WebSocket library), **Redis** | Signaling, matchmaking, and ICE candidate exchange. |
-| **Client** | JavaScript | **HTML5**, **wrtc** (Node WebRTC, for client-side JS) | Renders video, captures user input, and manages the WebRTC connection. |
+| **Client** | JavaScript | **HTML5**, WebRTC API | Renders video, captures user input, and manages the WebRTC connection. |
 
 ---
 
@@ -43,9 +43,9 @@ The system is composed of three main components that work together to establish 
 The Host is the core of the streaming solution. It runs on the machine with the game or application to be streamed.
 
 **Key Components:**
-*   **`main.cpp`**: Entry point of the application. Initializes all components.
-*   **Capture (`CaptureHelpers.cpp`, `AudioHelper.cpp`)**: Uses the modern `Windows.Graphics.Capture` API for high-performance, low-latency screen capture and `winrt::Windows::Media::Audio::AudioGraph` for audio.
-*   **Encoding (`Encoder.cpp`)**: Takes raw captured frames and uses the FFmpeg library (`libavcodec`) to encode them into the efficient **H.264** video format. It dynamically selects the best available hardware encoder (NVIDIA's NVENC, AMD's AMF, or Intel's QSV).
+*   **`main.cpp`**: Entry point of the application. Initializes all components and reads settings from `config.json`.
+*   **Capture (`FrameCaptureThread.cpp`, `AudioCapturer.cpp`)**: Uses the **DXGI Desktop Duplication API** for high-performance, low-latency screen capture and standard Windows APIs for audio capture. DXGI is chosen for its raw performance in full-screen scenarios.
+*   **Encoding (`Encoder.cpp`)**: Takes raw captured GPU frames (ID3D11Texture2D) and uses the FFmpeg library (`libavcodec`) to encode them into the efficient **H.264** video format. It dynamically selects the best available hardware encoder (NVIDIA's NVENC, AMD's AMF, or Intel's QSV) and performs GPU-accelerated color space conversion (BGRA to NV12).
 *   **WebRTC (`gortc_main/main.go`)**: A Go module, compiled into a C-shared library, that handles all the complexities of the WebRTC protocol using the excellent **Pion** library. It manages the peer connection, data channels, and ICE negotiation. C++ communicates with this Go layer via CGO, using the functions defined in `pion_webrtc.h`.
 *   **Input Handling (`KeyInputHandler`, `MouseInputHandler`)**: Receives keyboard and mouse events from the Client via WebRTC data channels and simulates them locally on the Host machine using `SendInput`.
 *   **Signaling (`Websocket.cpp`)**: Connects to the Node.js Signaling Server to announce its availability and negotiate with a client.
@@ -142,3 +142,44 @@ The system works by creating a continuous feedback loop between the Client and t
     *   From this point forward, the hardware encoder will compress the video stream to match this new, adjusted bitrate.
 
 This entire process runs continuously, allowing the stream to adapt to changing network conditions in near real-time, ensuring the best possible quality and smoothness.
+
+---
+
+## Building and Running
+
+This is a complex project with multiple components.
+
+### Prerequisites
+- Windows 10/11
+- Visual Studio 2022 with C++ development workload
+- Node.js and npm
+- Go toolchain
+- FFmpeg shared libraries (place `avcodec.dll`, `avformat.dll`, `avutil.dll`, `swresample.dll`, `swscale.dll` in the same directory as the Host executable).
+
+### 1. Build the Go WebRTC Module
+```bash
+cd gortc_main
+go build -o pion_webrtc.dll -buildmode=c-shared main.go
+# Copy the generated pion_webrtc.dll and pion_webrtc.h to the Host directory
+```
+
+### 2. Build the C++ Host
+- Open `DisplayCaptureProject.sln` in Visual Studio.
+- Ensure the project is configured to link against the FFmpeg libraries and the generated `pion_webrtc.lib`.
+- Build the solution for the `x64` platform.
+
+### 3. Run the Signaling Server
+```bash
+cd Server
+npm install
+# Run your desired server
+node PureSignalingServer.js
+```
+
+### 4. Configure and Run the Host
+- Edit `config.json` to specify the target application to capture.
+- Run the compiled `DisplayCaptureProject.exe`. Note the Room ID it prints to the console.
+
+### 5. Run the Client
+- Open `Client/html-server/index.html` in a web browser.
+- Enter the Room ID from the Host and click "Connect".

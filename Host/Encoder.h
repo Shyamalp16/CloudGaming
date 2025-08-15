@@ -5,7 +5,6 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
-#include <libswscale/swscale.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
@@ -35,9 +34,6 @@ namespace Encoder {
 
     extern "C" int sendVideoPacket(uint8_t* data, int size, int64_t pts);
 
-    // Remove declarations for unused software conversion components
-    extern SwsContext* swsCtx;
-    extern AVFrame* nv12Frame;
     extern int currentWidth;
     extern int currentHeight;
 

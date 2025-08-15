@@ -185,6 +185,8 @@ void ProcessFrames() {
                 D3D11_TEXTURE2D_DESC copyDesc = desc;
                 copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
                 copyDesc.MiscFlags = 0;
+                copyDesc.Usage = D3D11_USAGE_DEFAULT;
+                copyDesc.CPUAccessFlags = 0;
                 winrt::com_ptr<ID3D11Texture2D> copyTex;
                 if (SUCCEEDED(GetD3DDevice()->CreateTexture2D(&copyDesc, nullptr, copyTex.put()))) {
                     // Ensure even dimensions

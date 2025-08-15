@@ -12,8 +12,7 @@
 #include <d3d11.h>
 #include <wrl.h>
 
-SwsContext* Encoder::swsCtx = nullptr;
-AVFrame* Encoder::nv12Frame = nullptr;
+// Removed unused software conversion components
 int Encoder::currentWidth = 0;
 int Encoder::currentHeight = 0;
 
