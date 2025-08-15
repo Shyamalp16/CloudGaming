@@ -86,6 +86,11 @@
       overflow: hidden;
     }
 
+    /* Immersive mode removes top header offset and chrome */
+    body.immersive .game-container { top: 0; }
+    body.immersive .game-header { display: none; }
+    body.immersive .stream-viewport { border: none; box-shadow: none; }
+
     .stream-viewport {
       position: relative;
       width: 100%;
@@ -102,7 +107,6 @@
       height: 100%;
       display: block;
       cursor: none;
-      object-fit: contain;
       background: #000;
     }
 
@@ -670,19 +674,21 @@
 
     function renderVideoToCanvas() {
       if (hiddenVideoElement.videoWidth > 0 && hiddenVideoElement.videoHeight > 0) {
-        // Fit video to canvas with preserved aspect and black bars cleared
+        // Fill the canvas (cover). Prefer preserving the top edge (no top crop),
+        // so when vertical cropping is needed, anchor to top.
         const vW = hiddenVideoElement.videoWidth;
         const vH = hiddenVideoElement.videoHeight;
-        const scale = Math.min(canvas.width / vW, canvas.height / vH);
+        const scale = Math.max(canvas.width / vW, canvas.height / vH);
         const dW = Math.floor(vW * scale);
         const dH = Math.floor(vH * scale);
-        const dx = Math.floor((canvas.width - dW) / 2);
-        const dy = Math.floor((canvas.height - dH) / 2);
+        let dx = Math.floor((canvas.width - dW) / 2);
+        let dy = Math.floor((canvas.height - dH) / 2);
+        // Keep vertical centering; remove only actual empty bars by filling background first
+        // and covering the canvas fully. No manual top anchoring to avoid bottom cut.
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(hiddenVideoElement, 0, 0, vW, vH, dx, dy, dW, dH);
 
         frameCount++;
-        // FPS tracking
         const currentTime = Date.now();
         if (currentTime - lastFrameTime >= 1000) {
           fps = Math.round((frameCount * 1000) / (currentTime - lastFrameTime));
@@ -878,6 +884,8 @@
               const rect = vp.getBoundingClientRect();
               canvas.width = Math.max(1, Math.floor(rect.width));
               canvas.height = Math.max(1, Math.floor(rect.height));
+              // Enable immersive layout (remove header/top offset and borders)
+              document.body.classList.add('immersive');
               animationId = requestAnimationFrame(renderVideoToCanvas);
               hideLoadingOverlay();
               updateConnectionStatus('connected', 'Streaming');
