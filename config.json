@@ -3,7 +3,7 @@
     "serverUrlBase": "ws://localhost:3002"
   },
   "host": {
-    "targetProcessName": "cs2.exe",
+    "targetProcessName": "vlc.exe",
     "outputAudioFile": "D:\\output.wav"
   }
 }

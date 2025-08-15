@@ -59,6 +59,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     WAVEFORMATEX* pwfx = NULL;
     HANDLE hFile = INVALID_HANDLE_VALUE;
     DWORD dataSize = 0;
+    DWORD sleepMs = 10; // polling interval, refined after buffer size known
 
     hr = CoInitialize(NULL);
     if (FAILED(hr))
@@ -299,7 +300,6 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     }
 
     // Derive a reasonable polling interval from buffer size (~quarter-buffer)
-    DWORD sleepMs = 10;
     if (pwfx && pwfx->nSamplesPerSec) {
         DWORD bufferMs = (bufferFrameCount * 1000u) / pwfx->nSamplesPerSec;
         sleepMs = std::max<DWORD>(1, bufferMs / 4);
@@ -318,12 +318,13 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
         while (numFramesAvailable != 0)
         {
+            UINT64 devPos = 0, qpcPos = 0;
             hr = m_pCaptureClient->GetBuffer(
                 &pData,
                 &numFramesAvailable,
                 &flags,
-                NULL,
-                NULL);
+                &devPos,
+                &qpcPos);
 
             if (FAILED(hr))
             {
@@ -337,12 +338,12 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 // Write explicit silence when device reports silence
                 static std::vector<BYTE> zeroBuf;
                 if (zeroBuf.size() < bytesToWrite) zeroBuf.assign(bytesToWrite, 0);
-                if (!WriteFile(hFile, zeroBuf.data(), bytesToWrite, &bytesWritten, NULL)) {
+                if (bytesToWrite && !WriteFile(hFile, zeroBuf.data(), bytesToWrite, &bytesWritten, NULL)) {
                     std::wcerr << L"Failed to write silent buffer to file." << std::endl;
                     goto Exit;
                 }
             } else {
-                if (!WriteFile(hFile, pData, bytesToWrite, &bytesWritten, NULL))
+                if (bytesToWrite && !WriteFile(hFile, pData, bytesToWrite, &bytesWritten, NULL))
                 {
                     std::wcerr << L"Failed to write to file." << std::endl;
                     goto Exit;
@@ -366,14 +367,18 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         }
     }
 
-    if (!FixWavHeader(hFile, dataSize, pwfx->cbSize))
-    {
-        std::wcerr << L"Failed to fix WAV header." << std::endl;
-    }
+    // Header will be finalized in Exit to cover both normal and error exits
 
 Exit:
     if (hFile != INVALID_HANDLE_VALUE)
     {
+        // Finalize header if we captured any data
+        if (dataSize > 0 && pwfx) {
+            if (!FixWavHeader(hFile, dataSize, pwfx->cbSize)) {
+                std::wcerr << L"Failed to fix WAV header at shutdown." << std::endl;
+            }
+            FlushFileBuffers(hFile);
+        }
         CloseHandle(hFile);
     }
 
