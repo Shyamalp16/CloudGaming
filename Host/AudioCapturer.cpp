@@ -2,6 +2,7 @@
 #include <iostream>
 #include <fstream>
 #include <comdef.h>
+#include <vector>
 
 #define REFTIMES_PER_SEC  10000000
 #define REFTIMES_PER_MILLISEC  10000
@@ -214,7 +215,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
                 hr = m_pAudioClient->Initialize(
                     AUDCLNT_SHAREMODE_SHARED,
-                    0,
+                    AUDCLNT_STREAMFLAGS_LOOPBACK, // capture render (what-you-hear)
                     hnsRequestedDuration,
                     0,
                     pwfx,
@@ -297,9 +298,16 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         goto Exit;
     }
 
+    // Derive a reasonable polling interval from buffer size (~quarter-buffer)
+    DWORD sleepMs = 10;
+    if (pwfx && pwfx->nSamplesPerSec) {
+        DWORD bufferMs = (bufferFrameCount * 1000u) / pwfx->nSamplesPerSec;
+        sleepMs = std::max<DWORD>(1, bufferMs / 4);
+    }
+
     while (m_stopCapture == false)
     {
-        Sleep(hnsRequestedDuration / REFTIMES_PER_MILLISEC / 2); // Adjust sleep based on buffer size
+        Sleep(sleepMs);
 
         hr = m_pCaptureClient->GetNextPacketSize(&numFramesAvailable);
         if (FAILED(hr))
@@ -323,20 +331,22 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 goto Exit;
             }
 
-            if (flags & AUDCLNT_BUFFERFLAGS_SILENT)
-            {
-                pData = NULL;  // Tell CopyData to write silence.
-                std::wcout << L"[AudioCapturer] Buffer is silent." << std::endl;
-            }
-
             DWORD bytesToWrite = numFramesAvailable * pwfx->nBlockAlign;
-            std::wcout << L"[AudioCapturer] numFramesAvailable: " << numFramesAvailable << L", bytesToWrite: " << bytesToWrite << std::endl;
-
             DWORD bytesWritten;
-            if (!WriteFile(hFile, pData, bytesToWrite, &bytesWritten, NULL))
-            {
-                std::wcerr << L"Failed to write to file." << std::endl;
-                goto Exit;
+            if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                // Write explicit silence when device reports silence
+                static std::vector<BYTE> zeroBuf;
+                if (zeroBuf.size() < bytesToWrite) zeroBuf.assign(bytesToWrite, 0);
+                if (!WriteFile(hFile, zeroBuf.data(), bytesToWrite, &bytesWritten, NULL)) {
+                    std::wcerr << L"Failed to write silent buffer to file." << std::endl;
+                    goto Exit;
+                }
+            } else {
+                if (!WriteFile(hFile, pData, bytesToWrite, &bytesWritten, NULL))
+                {
+                    std::wcerr << L"Failed to write to file." << std::endl;
+                    goto Exit;
+                }
             }
             dataSize += bytesWritten;
 
@@ -385,7 +395,8 @@ Exit:
 bool AudioCapturer::WriteWavHeader(HANDLE hFile, WAVEFORMATEX* pwfx, DWORD dataSize)
 {
     DWORD bytesWritten;
-    DWORD dwRiffSize = dataSize + 36;
+    DWORD fmtSize = sizeof(WAVEFORMATEX) + pwfx->cbSize; // 16 for PCM, 18+cbSize otherwise
+    DWORD dwRiffSize = 20 + fmtSize + dataSize; // 4('WAVE') + 8('fmt '+size) + fmt + 8('data'+size) + data
 
     // RIFF chunk
     if (!WriteFile(hFile, "RIFF", 4, &bytesWritten, NULL)) return false;
@@ -394,9 +405,9 @@ bool AudioCapturer::WriteWavHeader(HANDLE hFile, WAVEFORMATEX* pwfx, DWORD dataS
 
     // FORMAT chunk
     if (!WriteFile(hFile, "fmt ", 4, &bytesWritten, NULL)) return false;
-    DWORD dwFmtSize = sizeof(WAVEFORMATEX) + pwfx->cbSize;
+    DWORD dwFmtSize = fmtSize;
     if (!WriteFile(hFile, &dwFmtSize, 4, &bytesWritten, NULL)) return false;
-    if (!WriteFile(hFile, pwfx, sizeof(WAVEFORMATEX) + pwfx->cbSize, &bytesWritten, NULL)) return false;
+    if (!WriteFile(hFile, pwfx, fmtSize, &bytesWritten, NULL)) return false;
 
     // DATA chunk
     if (!WriteFile(hFile, "data", 4, &bytesWritten, NULL)) return false;
@@ -408,15 +419,16 @@ bool AudioCapturer::WriteWavHeader(HANDLE hFile, WAVEFORMATEX* pwfx, DWORD dataS
 bool AudioCapturer::FixWavHeader(HANDLE hFile, DWORD dataSize, WORD cbSize)
 {
     DWORD bytesWritten;
-    // dwRiffSize = 4 (WAVE) + 4 (fmt ID) + 4 (fmt size) + (18 + cbSize) (WAVEFORMATEX) + 4 (data ID) + 4 (data size) + dataSize
-    DWORD dwRiffSize = 42 + cbSize + dataSize;
+    // RIFF size = 4 (WAVE) + 4 (fmt ID) + 4 (fmt size) + (sizeof(WAVEFORMATEX)+cbSize) + 4 (data ID) + 4 (data size) + dataSize
+    DWORD fmtSize = sizeof(WAVEFORMATEX) + cbSize; // typically 16 or 18+cbSize
+    DWORD dwRiffSize = 20 + fmtSize + dataSize;
 
     // Update RIFF chunk size
     SetFilePointer(hFile, 4, NULL, FILE_BEGIN);
     if (!WriteFile(hFile, &dwRiffSize, 4, &bytesWritten, NULL)) return false;
 
-    // dataSize offset = 4 (RIFF) + 4 (dwRiffSize) + 4 (WAVE) + 4 (fmt ID) + 4 (fmt size) + (18 + cbSize) (WAVEFORMATEX) + 4 (data ID)
-    DWORD dataSizeOffset = 42 + cbSize;
+    // dataSize offset = 4 (RIFF) + 4 (dwRiffSize) + 4 (WAVE) + 4 (fmt ID) + 4 (fmt size) + fmtSize (WAVEFORMATEX + cbSize) + 4 (data ID)
+    DWORD dataSizeOffset = 24 + fmtSize;
     SetFilePointer(hFile, dataSizeOffset, NULL, FILE_BEGIN);
     if (!WriteFile(hFile, &dataSize, 4, &bytesWritten, NULL)) return false;
 
