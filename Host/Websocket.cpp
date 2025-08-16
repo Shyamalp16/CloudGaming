@@ -29,7 +29,8 @@ void senderThread() {
         if (g_packetQueue.pop(packet)) {
             if (getIceConnectionState() >= 0) {
                 if (!packet.data.empty() && packet.data.data() != nullptr) {
-                    int64_t frameDurationUs = 16667; // match Go pacing (~60fps)
+                    // If this legacy path is re-enabled, compute from encoder fps instead of 60 fps
+                    int64_t frameDurationUs = 1000000 / 120; // ~8333us at 120fps
                     int result = sendVideoSample(packet.data.data(), static_cast<int>(packet.data.size()), frameDurationUs);
                     // std::cerr << "[SenderThread] Failed to send video packet: " << result << std::endl;
                     }

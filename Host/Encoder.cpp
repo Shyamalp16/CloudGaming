@@ -164,8 +164,12 @@ namespace Encoder {
         logNALUnits(packet->data, packet->size);
 
         // Pass PTS in microseconds to Go layer
-        // Assume constant frame rate pacing on the Go side; provide frame duration
-        int64_t frameDurationUs = 16667; // ~60fps by default; consider computing from actual fps
+        // Provide frame duration from current encoder FPS for paced sending
+        int fpsNum = codecCtx && codecCtx->framerate.den != 0 ? codecCtx->framerate.num : 60;
+        int fpsDen = codecCtx && codecCtx->framerate.den != 0 ? codecCtx->framerate.den : 1;
+        double fpsVal = fpsDen != 0 ? static_cast<double>(fpsNum) / static_cast<double>(fpsDen) : 60.0;
+        if (fpsVal <= 0.0) fpsVal = 60.0;
+        int64_t frameDurationUs = static_cast<int64_t>(1000000.0 / fpsVal);
         int result = sendVideoSample(packet->data, packet->size, frameDurationUs);
         if (result != 0) {
             std::wcerr << L"[WebRTC] Failed to send video packet to WebRTC module. Error code: " << result << L"\n";
@@ -236,7 +240,7 @@ namespace Encoder {
         codecCtx->framerate = { fps, 1 };
         codecCtx->gop_size = fps * 1; // IDR every ~1 second for fast recovery
         codecCtx->max_b_frames = 0; // low-latency
-        codecCtx->bit_rate = 5000000; // Start ~5 Mbps for Wi‑Fi
+        codecCtx->bit_rate = 20000000; // Start ~20 Mbps
 
         // Configure D3D11VA frames with NV12 sw_format (GPU path)
         if (isHardware) {

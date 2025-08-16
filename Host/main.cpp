@@ -44,15 +44,41 @@ void onRTCP(double packetLoss, double rtt, double jitter) {
                << L", RTT: " << rtt 
                << L", Jitter: " << jitter << std::endl;
 
-    // Simple bitrate adjustment logic
-    // This is a basic example. A more sophisticated algorithm would be needed for production.
-    static int currentBitrate = 30000000; // Initial bitrate
-    if (packetLoss > 0.05 && currentBitrate > 1000000) {
-        currentBitrate *= 0.8; // Decrease bitrate by 20%
-        Encoder::AdjustBitrate(currentBitrate);
-    } else if (packetLoss < 0.02 && currentBitrate < 50000000) {
-        currentBitrate *= 1.1; // Increase bitrate by 10%
-        Encoder::AdjustBitrate(currentBitrate);
+    // Adaptive bitrate controller (AIMD) with cooldown
+    static int currentBitrate = 30000000;           // start at 30 Mbps
+    static const int minBitrate = 10000000;         // 10 Mbps
+    static const int maxBitrate = 50000000;         // 50 Mbps
+    static int cleanSamples = 0;                    // consecutive good reports
+    static auto lastChange = std::chrono::steady_clock::now();
+
+    auto now = std::chrono::steady_clock::now();
+    auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastChange).count();
+
+    // Multiplicative decrease on loss
+    if (packetLoss >= 0.03) { // >=3% loss
+        if (since >= 300) { // short cooldown for decreases
+            // Heavier drop if severe loss
+            double factor = (packetLoss >= 0.10) ? 0.6 : 0.8;
+            int target = static_cast<int>(currentBitrate * factor);
+            currentBitrate = std::max(minBitrate, target);
+            Encoder::AdjustBitrate(currentBitrate);
+            lastChange = now;
+        }
+        cleanSamples = 0;
+        return;
+    }
+
+    // Additive increase when clean
+    cleanSamples++;
+    if (since >= 1000 && cleanSamples >= 3) { // every ~1s and 3 clean samples
+        int step = 5'000'000; // +5 Mbps
+        int target = currentBitrate + step;
+        if (target <= maxBitrate) {
+            currentBitrate = target;
+            Encoder::AdjustBitrate(currentBitrate);
+            lastChange = now;
+        }
+        cleanSamples = 0;
     }
 }
 
