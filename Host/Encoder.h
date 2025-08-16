@@ -8,6 +8,7 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
+#include <libavutil/opt.h>
 }
 #include <cstdint>
 #include <iostream>
@@ -31,8 +32,9 @@ namespace Encoder {
     void FlushEncoder();
     void SignalEncoderShutdown();
     void AdjustBitrate(int new_bitrate);
+    void RequestIDR();
 
-    extern "C" int sendVideoPacket(uint8_t* data, int size, int64_t pts);
+    extern "C" int sendVideoSample(uint8_t* data, int size, int64_t durationUs);
 
     extern int currentWidth;
     extern int currentHeight;

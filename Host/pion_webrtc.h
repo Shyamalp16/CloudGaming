@@ -41,13 +41,13 @@ extern "C" {
     void handleRemoteIceCandidate(const char* candidateStr);
 
     /**
-     * @brief Sends an H.264 video packet to the WebRTC pipeline.
-     * @param data Pointer to the H.264 packet data.
-     * @param size Length of the packet data in bytes.
-     * @param pts Presentation timestamp in microseconds.
+     * @brief Sends one encoded H.264 frame as a sample. Pion will packetize and pace.
+     * @param data Pointer to Annex-B H.264 frame (include SPS/PPS on keyframes).
+     * @param size Length of frame in bytes.
+     * @param durationUs Frame duration in microseconds (e.g., 16667 for 60fps).
      * @return 0 on success, -1 on failure.
      */
-    int sendVideoPacket(uint8_t* data, int size, int64_t pts);
+    int sendVideoSample(uint8_t* data, int size, int64_t durationUs);
 
     /**
      * @brief Sends an Opus audio packet (RTP payload) to the WebRTC pipeline.
@@ -88,6 +88,12 @@ extern "C" {
      */
     typedef void (*RTCPCallback)(double, double, double);
     void SetRTCPCallback(RTCPCallback callback);
+
+    /**
+     * @brief Sets the callback invoked on incoming RTCP PLI/FIR to request a keyframe.
+     */
+    typedef void (*OnPLICallback)();
+    void SetPLICallback(OnPLICallback cb);
 
     char* getDataChannelMessage();
 

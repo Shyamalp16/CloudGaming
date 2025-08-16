@@ -91,6 +91,9 @@ static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height
 }
 
 namespace Encoder {
+    extern "C" void OnPLI() {
+        RequestIDR();
+    }
 
     void setEncodedFrameCallback(EncodedFrameCallback callback) {
         g_onEncodedFrameCallback = callback;
@@ -161,7 +164,9 @@ namespace Encoder {
         logNALUnits(packet->data, packet->size);
 
         // Pass PTS in microseconds to Go layer
-        int result = sendVideoPacket(packet->data, packet->size, g_latestPTS);
+        // Assume constant frame rate pacing on the Go side; provide frame duration
+        int64_t frameDurationUs = 16667; // ~60fps by default; consider computing from actual fps
+        int result = sendVideoSample(packet->data, packet->size, frameDurationUs);
         if (result != 0) {
             std::wcerr << L"[WebRTC] Failed to send video packet to WebRTC module. Error code: " << result << L"\n";
         }
@@ -229,9 +234,9 @@ namespace Encoder {
         currentHeight = height;
         codecCtx->time_base = AVRational{ 1, fps };
         codecCtx->framerate = { fps, 1 };
-        codecCtx->gop_size = fps * 2; // Relax IDR cadence to ~2 seconds
+        codecCtx->gop_size = fps * 1; // IDR every ~1 second for fast recovery
         codecCtx->max_b_frames = 0; // low-latency
-        codecCtx->bit_rate = 50000000; // 50 Mbps target bitrate
+        codecCtx->bit_rate = 5000000; // Start ~5 Mbps for Wi‑Fi
 
         // Configure D3D11VA frames with NV12 sw_format (GPU path)
         if (isHardware) {
@@ -486,6 +491,15 @@ namespace Encoder {
             av_packet_unref(packet);
         }
         std::wcout << L"[DEBUG] Encoder flush complete\n";
+    }
+
+    void RequestIDR() {
+        std::lock_guard<std::mutex> lock(g_encoderMutex);
+        if (!codecCtx) return;
+        // Best-effort force IDR on next frame for common encoders
+        av_opt_set(codecCtx->priv_data, "force_key_frames", "expr:gte(t,n_forced*1)", 0);
+        // For NVENC, try forcing IDR if supported
+        av_opt_set_int(codecCtx->priv_data, "forced-idr", 1, 0);
     }
 
     void FinalizeEncoder() {

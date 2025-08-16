@@ -11,7 +11,8 @@ using json = nlohmann::json;
 
 client wsClient;
 websocketpp::connection_hdl g_connectionHandle;
-std::string base_uri = "ws://localhost:3002/";
+// std::string base_uri = "ws://localhost:3002/";
+std::string base_uri = "ws://10.0.0.134:3002/";
 std::thread g_websocket_thread;
 std::thread g_frame_thread;
 std::thread g_sender_thread;
@@ -28,7 +29,8 @@ void senderThread() {
         if (g_packetQueue.pop(packet)) {
             if (getIceConnectionState() >= 0) {
                 if (!packet.data.empty() && packet.data.data() != nullptr) {
-                    int result = sendVideoPacket(packet.data.data(), static_cast<int>(packet.data.size()), packet.pts);
+                    int64_t frameDurationUs = 16667; // match Go pacing (~60fps)
+                    int result = sendVideoSample(packet.data.data(), static_cast<int>(packet.data.size()), frameDurationUs);
                     // std::cerr << "[SenderThread] Failed to send video packet: " << result << std::endl;
                     }
                     else {

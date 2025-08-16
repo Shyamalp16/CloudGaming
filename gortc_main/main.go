@@ -6,12 +6,17 @@ package main
 #include <string.h>
 
 typedef void (*RTCPCallback)(double packetLoss, double rtt, double jitter);
+typedef void (*OnPLICallback)();
 
 // Helper function to call the C function pointer
 static inline void callRTCPCallback(RTCPCallback f, double p, double r, double j) {
     if (f) {
         f(p, r, j);
     }
+}
+
+static inline void callPLICallback(OnPLICallback f) {
+    if (f) { f(); }
 }
 */
 import "C"
@@ -21,7 +26,6 @@ import (
 	"log"
 	"math/rand"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -30,24 +34,26 @@ import (
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v3/pkg/media"
 )
 
 var rtcpCallback C.RTCPCallback
+var pliCallback C.OnPLICallback
 
 // Global variables
 var (
 	peerConnection        *webrtc.PeerConnection
 	pcMutex               sync.Mutex
-	videoTrack            *webrtc.TrackLocalStaticRTP // For sending H.264 RTP packets
-	audioTrack            *webrtc.TrackLocalStaticRTP // For sending Opus RTP packets
+	videoTrack            *webrtc.TrackLocalStaticSample // switched to sample track for pacing
+	audioTrack            *webrtc.TrackLocalStaticRTP
 	trackSSRC             uint32
 	audioSSRC             uint32
-	lastAnswerSDP         string // Store answer SDP for C++ retrieval
+	lastAnswerSDP         string
 	currentSequenceNumber uint16
 	currentTimestamp      uint32
 	currentAudioSeq       uint16
 	currentAudioTS        uint32
-	videoFrameCounter     uint64 // New: for unique frame IDs
+	videoFrameCounter     uint64
 	dataChannel           *webrtc.DataChannel
 	messageQueue          []string
 	mouseQueue            []string
@@ -55,13 +61,11 @@ var (
 	mouseChannel          *webrtc.DataChannel
 	latencyChannel        *webrtc.DataChannel
 	videoFeedbackChannel  *webrtc.DataChannel
-	pingTimestamps        map[uint64]int64 // Stores host_send_time for video_frame_ping
-	pingTimestampsMutex   sync.Mutex       // Mutex for pingTimestamps
+	pingTimestamps        map[uint64]int64
+	pingTimestampsMutex   sync.Mutex
 	connectionState       webrtc.PeerConnectionState
-	// Negotiated RTP payload type for H.264 (set after AddTrack). Default to 96.
-	videoPayloadType uint8 = 96
-	// Negotiated RTP payload type for Opus (set after AddTrack)
-	audioPayloadType uint8 = 111
+	videoPayloadType      uint8 = 96
+	audioPayloadType      uint8 = 111
 )
 
 func init() {
@@ -105,20 +109,50 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	return 0
 }
 
+//export sendVideoSample
+func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.int {
+	pcMutex.Lock()
+	defer pcMutex.Unlock()
+
+	if peerConnection == nil || videoTrack == nil {
+		return -1
+	}
+	if connectionState != webrtc.PeerConnectionStateConnected {
+		return 0
+	}
+
+	buf := C.GoBytes(data, size)
+	dur := time.Duration(int64(durationUs)) * time.Microsecond
+
+	if err := videoTrack.WriteSample(media.Sample{Data: buf, Duration: dur}); err != nil {
+		return -1
+	}
+
+	// Optional RTT ping to client (unchanged):
+	if videoFeedbackChannel != nil && videoFeedbackChannel.ReadyState() == webrtc.DataChannelStateOpen {
+		videoFrameCounter++
+		hostSendTime := time.Now().UnixNano()
+		pingTimestampsMutex.Lock()
+		pingTimestamps[videoFrameCounter] = hostSendTime
+		pingTimestampsMutex.Unlock()
+		pingMessage := map[string]interface{}{
+			"type":           "video_frame_ping",
+			"frame_id":       videoFrameCounter,
+			"host_send_time": fmt.Sprintf("%d", hostSendTime),
+		}
+		if pingJSON, err := json.Marshal(pingMessage); err == nil {
+			_ = videoFeedbackChannel.SendText(string(pingJSON))
+		}
+	}
+	return 0
+}
+
 func enqueueMessage(msg string) {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
-	log.Printf(
-		"[Go/Pion] --> Enqueueing message: '%s'. Queue size BEFORE: %d",
-		msg,
-		len(messageQueue),
-	)
+	log.Printf("[Go/Pion] --> Enqueueing message: '%s'. Queue size BEFORE: %d", msg, len(messageQueue))
 	messageQueue = append(messageQueue, msg)
-	log.Printf(
-		"[Go/Pion] --> Enqueued message: '%s'. Queue size AFTER: %d",
-		msg,
-		len(messageQueue),
-	)
+	log.Printf("[Go/Pion] --> Enqueued message: '%s'. Queue size AFTER: %d", msg, len(messageQueue))
 }
 
 func enqueueMouseEvent(msg string) {
@@ -731,12 +765,9 @@ func createPeerConnectionGo() C.int {
 		"[Go/Pion] createPeerConnectionGo: OnDataChannel handler has been set up on the PeerConnection.",
 	)
 
-	videoTrack, err = webrtc.NewTrackLocalStaticRTP(
-		webrtc.RTPCodecCapability{
-			MimeType:    "video/h264",
-			ClockRate:   90000,
-			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
-		},
+	// Create video track (Sample based)
+	videoTrack, err = webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"},
 		"video",
 		"game-stream",
 	)
@@ -752,59 +783,22 @@ func createPeerConnectionGo() C.int {
 		pcMutex.Unlock()
 		return 0
 	}
-
-	rtpSender, err := peerConnection.AddTrack(videoTrack)
-	if err != nil {
+	if _, err := peerConnection.AddTrack(videoTrack); err != nil {
 		log.Printf("[Go/Pion] Error adding video track: %v\n", err)
 		if pcErr := peerConnection.Close(); pcErr != nil {
-			log.Printf(
-				"[Go/Pion] createPeerConnectionGo: Error closing PeerConnection after AddTrack failure: %v\n",
-				pcErr,
-			)
+			log.Printf("[Go/Pion] createPeerConnectionGo: Error closing PeerConnection after AddTrack failure: %v\n", pcErr)
 		}
 		peerConnection = nil
 		pcMutex.Unlock()
 		return 0
 	}
 
-	params := rtpSender.GetParameters()
-	if len(params.Encodings) > 0 {
-		trackSSRC = uint32(params.Encodings[0].SSRC)
-		log.Printf(
-			"[Go/Pion] Successfully captured SSRC for video track: %d\n",
-			trackSSRC,
-		)
-	} else {
-		log.Println(
-			"[Go/Pion] CRITICAL: Could not get SSRC from RTPSender parameters.",
-		)
-	}
+	// Cap sender bitrate to ~5 Mbps to avoid wireless bursts
+	// Disabled: this Pion version doesn't expose MaxBitrate/SetParameters on RTPSender.
+	// Rely on encoder-side bitrate (set to ~5 Mbps) and congestion control.
+
 	// Enumerate codecs and select H264 payload type specifically
-	if len(params.Codecs) == 0 {
-		log.Printf("[Go/Pion] WARNING: No codecs in RTPSender parameters; defaulting PT=%d\n", videoPayloadType)
-	} else {
-		var firstH264PT uint8 = 0
-		var preferredPT uint8 = 0
-		for idx, c := range params.Codecs {
-			log.Printf("[Go/Pion] RTPSender codec[%d]: PT=%d, Mime=%s, FMTP='%s'\n", idx, c.PayloadType, c.MimeType, c.SDPFmtpLine)
-			if c.MimeType == webrtc.MimeTypeH264 {
-				if firstH264PT == 0 {
-					firstH264PT = uint8(c.PayloadType)
-				}
-				// Prefer packetization-mode=1 and profile-level-id=42e01f (baseline)
-				fmtp := c.SDPFmtpLine
-				if strings.Contains(fmtp, "packetization-mode=1") && strings.Contains(fmtp, "profile-level-id=42e01f") {
-					preferredPT = uint8(c.PayloadType)
-				}
-			}
-		}
-		if preferredPT != 0 {
-			videoPayloadType = preferredPT
-		} else if firstH264PT != 0 {
-			videoPayloadType = firstH264PT
-		}
-		log.Printf("[Go/Pion] Selected H264 payload type: %d\n", videoPayloadType)
-	}
+	// Removed: previous code queried RTPSender params, which is unnecessary for TrackLocalStaticSample pacing.
 
 	// Create and add Opus audio track
 	audio, err := webrtc.NewTrackLocalStaticRTP(
@@ -978,92 +972,7 @@ func handleRemoteIceCandidate(candidateStr *C.char) {
 
 //export sendVideoPacket
 func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
-	pcMutex.Lock()
-	defer pcMutex.Unlock()
-
-	if peerConnection == nil || videoTrack == nil {
-		return -1
-	}
-
-	// Guard: do not send if PC is not connected
-	if connectionState != webrtc.PeerConnectionStateConnected {
-		return 0
-	}
-
-	buf := C.GoBytes(data, size)
-
-	// PTS from C++ is in microseconds. Convert to 90kHz clock.
-	// Derive RTP timestamp directly from capture PTS each frame to avoid pacing jitter
-	ptsSeconds := float64(pts) / 1_000_000.0
-	baseTimeStamp := uint32(ptsSeconds * 90000.0)
-	currentTimestamp = baseTimeStamp
-
-	// Typical MTU safe payload allowing for headers
-	const maxPacketSize = 1200
-
-	nalUnits := splitNALUnits(buf)
-	if len(nalUnits) == 0 {
-		log.Printf("[Go/Pion] splitNALUnits produced 0 NAL units (input size=%d)\n", len(buf))
-		return -1
-	}
-
-	// Ensure SPS/PPS are sent before IDR if encoder didn't repeat headers
-	// Detect IDR (type 5) without prior SPS/PPS in this batch and synthesize from extradata if available in future.
-
-	for i, nal := range nalUnits {
-		if len(nal) <= maxPacketSize {
-			rtpPacket := &rtp.Packet{
-				Header: rtp.Header{
-					Version:        2,
-					PayloadType:    videoPayloadType,
-					SequenceNumber: currentSequenceNumber,
-					Timestamp:      currentTimestamp,
-					SSRC:           trackSSRC,
-					Marker:         i == len(nalUnits)-1,
-				},
-				Payload: nal,
-			}
-
-			currentSequenceNumber++
-			if err := videoTrack.WriteRTP(rtpPacket); err != nil {
-				return -1
-			}
-		} else {
-			err := sendFragmentedNALUnit(nal, maxPacketSize, i == len(nalUnits)-1)
-			if err != nil {
-				return -1
-			}
-		}
-	}
-
-	// After sending all RTP packets for the frame, send a video_frame_ping
-	if videoFeedbackChannel != nil && videoFeedbackChannel.ReadyState() == webrtc.DataChannelStateOpen {
-		videoFrameCounter++
-		hostSendTime := time.Now().UnixNano()
-
-		pingTimestampsMutex.Lock()
-		pingTimestamps[videoFrameCounter] = hostSendTime
-		pingTimestampsMutex.Unlock()
-
-		pingMessage := map[string]interface{}{
-			"type":           "video_frame_ping",
-			"frame_id":       videoFrameCounter,
-			"host_send_time": fmt.Sprintf("%d", hostSendTime), // Send as a string to avoid JS precision loss
-		}
-
-		pingJSON, err := json.Marshal(pingMessage)
-		if err != nil {
-			log.Printf("[Go/Pion] Error marshalling video_frame_ping: %v\n", err)
-			return 0 // Keep as C.int return
-		}
-
-		if err := videoFeedbackChannel.SendText(string(pingJSON)); err != nil {
-			log.Printf("[Go/Pion] Error sending video_frame_ping: %v\n", err)
-		} else {
-			log.Printf("[Go/Pion] [PING] Sent video_frame_ping for frame %d.", videoFrameCounter)
-		}
-	}
-
+	// Deprecated path (kept for compatibility); prefer sendVideoSample
 	return 0
 }
 
@@ -1122,59 +1031,7 @@ func splitNALUnits(buf []byte) [][]byte {
 }
 
 func sendFragmentedNALUnit(nal []byte, maxPacketSize int, isLastNAL bool) error {
-	if len(nal) < 2 {
-		return nil
-	}
-
-	nalType := nal[0] & 0x1F
-	fuIndicator := (nal[0] & 0xE0) | 28
-	maxPayloadSize := maxPacketSize - 2
-
-	nalPayload := nal[1:]
-	offset := 0
-	firstFragment := true
-
-	for offset < len(nalPayload) {
-		chunkSize := len(nalPayload) - offset
-		if chunkSize > maxPayloadSize {
-			chunkSize = maxPayloadSize
-		}
-
-		fuHeader := byte(0)
-		if firstFragment {
-			fuHeader |= 0x80
-		}
-		if offset+chunkSize >= len(nalPayload) {
-			fuHeader |= 0x40
-		}
-		fuHeader |= nalType
-
-		payload := make([]byte, 2+chunkSize)
-		payload[0] = fuIndicator
-		payload[1] = fuHeader
-		copy(payload[2:], nalPayload[offset:offset+chunkSize])
-
-		rtpPacket := &rtp.Packet{
-			Header: rtp.Header{
-				Version:        2,
-				PayloadType:    videoPayloadType,
-				SequenceNumber: currentSequenceNumber,
-				Timestamp:      currentTimestamp,
-				SSRC:           trackSSRC,
-				Marker:         (offset+chunkSize >= len(nalPayload)) && isLastNAL,
-			},
-			Payload: payload,
-		}
-
-		currentSequenceNumber++
-		if err := videoTrack.WriteRTP(rtpPacket); err != nil {
-			return err
-		}
-
-		offset += chunkSize
-		firstFragment = false
-	}
-
+	// Deprecated with TrackLocalStaticSample; pacing handled by WriteSample on full frames.
 	return nil
 }
 
@@ -1267,6 +1124,11 @@ func SetRTCPCallback(callback C.RTCPCallback) {
 	rtcpCallback = callback
 }
 
+//export SetPLICallback
+func SetPLICallback(callback C.OnPLICallback) {
+	pliCallback = callback
+}
+
 func main() {
 	// This main function is required for building as a C shared library,
 	// but its contents are not directly executed when loaded as a DLL.
@@ -1313,6 +1175,16 @@ func (r *rtcpReaderInterceptor) BindRTCPReader(reader interceptor.RTCPReader) in
 						jitterSeconds := float64(report.Jitter) / 90000.0
 						C.callRTCPCallback(rtcpCallback, C.double(packetLoss), C.double(0), C.double(jitterSeconds))
 					}
+				}
+			case *rtcp.PictureLossIndication:
+				// If C.OnPLI is available, this will call into C++ to force IDR.
+				// Otherwise, this is a no-op.
+				if pliCallback != nil {
+					C.callPLICallback(pliCallback)
+				}
+			case *rtcp.FullIntraRequest:
+				if pliCallback != nil {
+					C.callPLICallback(pliCallback)
 				}
 			}
 		}

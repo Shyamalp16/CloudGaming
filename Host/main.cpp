@@ -35,6 +35,9 @@
 #include "pion_webrtc.h" 
 #include "Encoder.h"
 
+// PLI callback implemented in Encoder.cpp
+extern "C" void OnPLI();
+
 // RTCP Callback Function
 void onRTCP(double packetLoss, double rtt, double jitter) {
     std::wcout << L"[main] RTCP Stats - Packet Loss: " << packetLoss 
@@ -71,7 +74,9 @@ int main()
     std::wcout << L"[main] Apartment initialized.\n";
 
     initGo(); 
-    SetRTCPCallback(onRTCP); 
+    SetRTCPCallback(onRTCP);
+    // Register PLI callback to force IDR on encoder
+    SetPLICallback(OnPLI);
 
     // --- Load Configuration ---
     nlohmann::json config;

@@ -503,7 +503,8 @@
         connectToSignalingServer(roomId);
     });
 
-    const serverUrlBase = "ws://localhost:3002";
+    // const serverUrlBase = "ws://localhost:3002";
+    const serverUrlBase = "ws://10.0.0.134:3002";
     let ws;
     let peerConnection;
     const hiddenVideoElement = document.getElementById('hiddenVideo');
@@ -1236,6 +1237,24 @@
       } catch (err) {
         log('Error creating/setting/sending offer: ' + err.message, 'error');
       }
+    }
+
+    // After creating the MediaStream and attaching, set playback hints
+    if (hiddenVideoElement) {
+      hiddenVideoElement.setAttribute('playsinline', 'true');
+      if ('contentHint' in hiddenVideoElement) {
+        hiddenVideoElement.contentHint = 'motion';
+      }
+    }
+    if (peerConnection && peerConnection.getReceivers) {
+      const receivers = peerConnection.getReceivers();
+      receivers.forEach(r => {
+        if (r.track && r.track.kind === 'video') {
+          try {
+            r.setDegradationPreference && r.setDegradationPreference('maintain-framerate');
+          } catch (e) { /* ignore if unsupported */ }
+        }
+      });
     }
 
     window.addEventListener('keydown', handleKeyDown);
