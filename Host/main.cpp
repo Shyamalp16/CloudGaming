@@ -84,9 +84,7 @@ int main()
     }
 
     std::string targetProcessName = config["host"]["targetProcessName"].get<std::string>();
-    std::string outputAudioFile = config["host"]["outputAudioFile"].get<std::string>();
     std::wstring wideTargetProcessName(targetProcessName.begin(), targetProcessName.end());
-    std::wstring wideOutputAudioFile(outputAudioFile.begin(), outputAudioFile.end());
 
     // --- Room ID Generation ---
     std::string roomId = generateRoomId();
@@ -191,7 +189,7 @@ int main()
     StartCapture();
     initWebsocket(roomId);
     AudioCapturer audioCapturer;
-    audioCapturer.StartCapture(wideOutputAudioFile, msedge[0].processId);
+    audioCapturer.StartCapture(msedge[0].processId);
     std::wcout << L"[main] Capture started! Press any key to stop.\n";
 
     // Main loop

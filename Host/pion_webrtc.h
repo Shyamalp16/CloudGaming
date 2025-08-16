@@ -50,6 +50,15 @@ extern "C" {
     int sendVideoPacket(uint8_t* data, int size, int64_t pts);
 
     /**
+     * @brief Sends an Opus audio packet (RTP payload) to the WebRTC pipeline.
+     * @param data Pointer to the Opus RTP payload data.
+     * @param size Length of the payload data in bytes.
+     * @param pts  Presentation timestamp in microseconds.
+     * @return 0 on success, -1 on failure.
+     */
+    int sendAudioPacket(uint8_t* data, int size, int64_t pts);
+
+    /**
      * @brief Gets the current ICE connection state of the PeerConnection.
      * @return The ICE connection state as an integer (-1 if no PeerConnection).
      *         See webrtc::ICEConnectionState enum for values (e.g., 4 = Connected).

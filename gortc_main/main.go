@@ -39,10 +39,14 @@ var (
 	peerConnection        *webrtc.PeerConnection
 	pcMutex               sync.Mutex
 	videoTrack            *webrtc.TrackLocalStaticRTP // For sending H.264 RTP packets
+	audioTrack            *webrtc.TrackLocalStaticRTP // For sending Opus RTP packets
 	trackSSRC             uint32
+	audioSSRC             uint32
 	lastAnswerSDP         string // Store answer SDP for C++ retrieval
 	currentSequenceNumber uint16
 	currentTimestamp      uint32
+	currentAudioSeq       uint16
+	currentAudioTS        uint32
 	videoFrameCounter     uint64 // New: for unique frame IDs
 	dataChannel           *webrtc.DataChannel
 	messageQueue          []string
@@ -56,10 +60,49 @@ var (
 	connectionState       webrtc.PeerConnectionState
 	// Negotiated RTP payload type for H.264 (set after AddTrack). Default to 96.
 	videoPayloadType uint8 = 96
+	// Negotiated RTP payload type for Opus (set after AddTrack)
+	audioPayloadType uint8 = 111
 )
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
+}
+
+//export sendAudioPacket
+func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
+	pcMutex.Lock()
+	defer pcMutex.Unlock()
+
+	if peerConnection == nil || audioTrack == nil {
+		return -1
+	}
+	if connectionState != webrtc.PeerConnectionStateConnected {
+		return 0
+	}
+
+	payload := C.GoBytes(data, size)
+
+	// Opus uses 48kHz clock; derive timestamp from pts (us)
+	ptsSeconds := float64(pts) / 1_000_000.0
+	currentAudioTS = uint32(ptsSeconds * 48000.0)
+
+	pkt := &rtp.Packet{
+		Header: rtp.Header{
+			Version:        2,
+			PayloadType:    audioPayloadType,
+			SequenceNumber: currentAudioSeq,
+			Timestamp:      currentAudioTS,
+			SSRC:           audioSSRC,
+			Marker:         false,
+		},
+		Payload: payload,
+	}
+	currentAudioSeq++
+
+	if err := audioTrack.WriteRTP(pkt); err != nil {
+		return -1
+	}
+	return 0
 }
 
 func enqueueMessage(msg string) {
@@ -196,6 +239,19 @@ func createPeerConnectionGo() C.int {
 	if err := mediaEngine.RegisterCodec(codec, webrtc.RTPCodecTypeVideo); err != nil {
 		log.Printf("[Go/Pion] Error registering H.264 codec: %v\n", err)
 		// pcMutex.Unlock()
+		return 0
+	}
+
+	// Ensure Opus audio is available
+	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypeOpus,
+			ClockRate: 48000,
+			Channels:  2,
+		},
+		PayloadType: 111,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		log.Printf("[Go/Pion] Error registering Opus codec: %v\n", err)
 		return 0
 	}
 
@@ -748,6 +804,32 @@ func createPeerConnectionGo() C.int {
 			videoPayloadType = firstH264PT
 		}
 		log.Printf("[Go/Pion] Selected H264 payload type: %d\n", videoPayloadType)
+	}
+
+	// Create and add Opus audio track
+	audio, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
+		"audio",
+		"game-audio",
+	)
+	if err != nil {
+		log.Printf("[Go/Pion] Error creating audio track: %v\n", err)
+	} else {
+		if aSender, err2 := peerConnection.AddTrack(audio); err2 != nil {
+			log.Printf("[Go/Pion] Error adding audio track: %v\n", err2)
+		} else {
+			audioTrack = audio
+			aParams := aSender.GetParameters()
+			if len(aParams.Encodings) > 0 {
+				audioSSRC = uint32(aParams.Encodings[0].SSRC)
+			}
+			for _, c := range aParams.Codecs {
+				if c.MimeType == webrtc.MimeTypeOpus {
+					audioPayloadType = uint8(c.PayloadType)
+				}
+			}
+			log.Printf("[Go/Pion] Audio track added. PT=%d SSRC=%d\n", audioPayloadType, audioSSRC)
+		}
 	}
 
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {

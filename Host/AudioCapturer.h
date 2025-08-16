@@ -7,6 +7,10 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <audiopolicy.h>
+#include <vector>
+#include <memory>
+#include <chrono>
+#include "OpusEncoder.h"
 
 class AudioCapturer
 {
@@ -14,18 +18,27 @@ public:
     AudioCapturer();
     ~AudioCapturer();
 
-    bool StartCapture(const std::wstring& outputFilePath, DWORD processId);
+    bool StartCapture(DWORD processId);
     void StopCapture();
 
 private:
     void CaptureThread(DWORD processId);
-    bool WriteWavHeader(HANDLE hFile, WAVEFORMATEX* pwfx, DWORD dataSize);
-    bool FixWavHeader(HANDLE hFile, DWORD dataSize, WORD cbSize);
-
+    bool ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, void* format, std::vector<float>& floatData);
+    void ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs);
+    
     std::thread m_captureThread;
     std::atomic<bool> m_stopCapture;
-    std::wstring m_outputFilePath;
-
+    
+    // Opus encoder
+    std::unique_ptr<OpusEncoderWrapper> m_opusEncoder;
+    std::vector<float> m_frameBuffer;
+    size_t m_samplesPerFrame;
+    
+    // Timing for 20ms frames
+    std::chrono::high_resolution_clock::time_point m_startTime;
+    int64_t m_nextFrameTime;
+    uint32_t m_rtpTimestamp;
+    
     // COM interfaces
     IMMDeviceEnumerator* m_pEnumerator = nullptr;
     IMMDevice* m_pDevice = nullptr;

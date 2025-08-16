@@ -3,6 +3,11 @@
 #include <fstream>
 #include <comdef.h>
 #include <vector>
+#include <algorithm>
+#include "pion_webrtc.h"
+#include <mmreg.h>
+#include <ks.h>
+#include <ksmedia.h>
 
 #define REFTIMES_PER_SEC  10000000
 #define REFTIMES_PER_MILLISEC  10000
@@ -16,8 +21,13 @@ AudioCapturer::AudioCapturer() :
     m_pEnumerator(nullptr),
     m_pDevice(nullptr),
     m_pAudioClient(nullptr),
-    m_pCaptureClient(nullptr)
+    m_pCaptureClient(nullptr),
+    m_nextFrameTime(0),
+    m_rtpTimestamp(0),
+    m_samplesPerFrame(960) // 20ms at 48kHz
 {
+    // Initialize Opus encoder with optimized settings for low-latency gaming
+    m_opusEncoder = std::make_unique<OpusEncoderWrapper>();
 }
 
 AudioCapturer::~AudioCapturer()
@@ -25,17 +35,43 @@ AudioCapturer::~AudioCapturer()
     StopCapture();
 }
 
-bool AudioCapturer::StartCapture(const std::wstring& outputFilePath, DWORD processId)
+bool AudioCapturer::StartCapture(DWORD processId)
 {
-    m_outputFilePath = outputFilePath;
     m_stopCapture = false;
-    // Store the process ID for the capture thread to use
-    // You'll need to add a member variable for this in AudioCapturer.h
-    // For now, let's assume you have a member `m_targetProcessId`
-    // m_targetProcessId = processId; 
-    // For now, I'll pass it as an argument to the thread function
+    
+    // Initialize Opus encoder with optimized settings for low-latency gaming
+    OpusEncoderWrapper::Settings settings;
+    settings.sampleRate = 48000;        // 48 kHz
+    settings.channels = 1;              // Mono for lower bandwidth (change to 2 for stereo)
+    settings.frameSize = 960;           // 20ms frames at 48kHz
+    settings.bitrate = 32000;           // 32 kbps for mono (64 kbps for stereo)
+    settings.complexity = 6;            // Balance between quality and CPU usage
+    settings.useVbr = true;             // Variable bitrate
+    settings.constrainedVbr = true;     // Constrain VBR peaks
+    settings.enableFec = true;          // Forward Error Correction for packet loss
+    settings.expectedLossPerc = 10;     // Expect 10% packet loss
+    settings.enableDtx = false;         // Disable DTX for gaming (want consistent latency)
+    settings.application = 2049;        // OPUS_APPLICATION_AUDIO for music/gaming
+    
+    if (!m_opusEncoder->initialize(settings)) {
+        std::wcerr << L"[AudioCapturer] Failed to initialize Opus encoder" << std::endl;
+        return false;
+    }
+    
+    // Initialize timing
+    m_startTime = std::chrono::high_resolution_clock::now();
+    m_nextFrameTime = 0;
+    m_rtpTimestamp = 0;
+    m_samplesPerFrame = settings.frameSize * settings.channels;
+    m_frameBuffer.resize(m_samplesPerFrame);
+    
+    std::wcout << L"[AudioCapturer] Initialized Opus encoder: " 
+               << settings.sampleRate << L"Hz, " 
+               << settings.channels << L" channels, "
+               << settings.frameSize << L" samples/frame, "
+               << settings.bitrate << L" bps" << std::endl;
+    
     m_captureThread = std::thread(&AudioCapturer::CaptureThread, this, processId);
-
     return true;
 }
 
@@ -57,8 +93,6 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     BYTE* pData;
     DWORD flags;
     WAVEFORMATEX* pwfx = NULL;
-    HANDLE hFile = INVALID_HANDLE_VALUE;
-    DWORD dataSize = 0;
     DWORD sleepMs = 10; // polling interval, refined after buffer size known
 
     hr = CoInitialize(NULL);
@@ -213,13 +247,19 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     << L", nBlockAlign=" << pwfx->nBlockAlign
                     << L", wBitsPerSample=" << pwfx->wBitsPerSample
                     << L", cbSize=" << pwfx->cbSize << std::endl;
+                
+                // Verify format compatibility for Opus encoding
+                if (pwfx->nSamplesPerSec != 48000) {
+                    std::wcout << L"[AudioCapturer] WARNING: Audio format is " << pwfx->nSamplesPerSec 
+                               << L"Hz, but Opus encoder expects 48kHz. Resampling may be needed." << std::endl;
+                }
 
                 hr = m_pAudioClient->Initialize(
                     AUDCLNT_SHAREMODE_SHARED,
                     AUDCLNT_STREAMFLAGS_LOOPBACK, // capture render (what-you-hear)
                     hnsRequestedDuration,
                     0,
-                    pwfx,
+                    const_cast<const WAVEFORMATEX*>(pwfx),
                     NULL);
 
                 if (FAILED(hr))
@@ -279,18 +319,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     // pDevice is released when m_pDevice is released, or if not found, it's released in the loop.
     // pSessionControl and pSessionControl2 are released in the loop or assigned to member variable.
 
-    hFile = CreateFile(m_outputFilePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE)
-    {
-        std::wcerr << L"Unable to create output file." << std::endl;
-        goto Exit;
-    }
-
-    if (!WriteWavHeader(hFile, pwfx, 0))
-    {
-        std::wcerr << L"Unable to write WAV header." << std::endl;
-        goto Exit;
-    }
+    std::wcout << L"[AudioCapturer] Starting audio capture and Opus encoding..." << std::endl;
 
     hr = m_pAudioClient->Start();  // Start recording.
     if (FAILED(hr))
@@ -332,24 +361,44 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 goto Exit;
             }
 
-            DWORD bytesToWrite = numFramesAvailable * pwfx->nBlockAlign;
-            DWORD bytesWritten;
+            // Convert PCM to float and process for Opus encoding
+            std::vector<float> floatSamples;
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                // Write explicit silence when device reports silence
-                static std::vector<BYTE> zeroBuf;
-                if (zeroBuf.size() < bytesToWrite) zeroBuf.assign(bytesToWrite, 0);
-                if (bytesToWrite && !WriteFile(hFile, zeroBuf.data(), bytesToWrite, &bytesWritten, NULL)) {
-                    std::wcerr << L"Failed to write silent buffer to file." << std::endl;
-                    goto Exit;
-                }
+                // Generate silence in float format
+                const size_t totalSamples = numFramesAvailable * pwfx->nChannels;
+                floatSamples.assign(totalSamples, 0.0f);
             } else {
-                if (bytesToWrite && !WriteFile(hFile, pData, bytesToWrite, &bytesWritten, NULL))
-                {
-                    std::wcerr << L"Failed to write to file." << std::endl;
+                // Convert PCM data to float
+                if (!ConvertPCMToFloat(pData, numFramesAvailable, static_cast<void*>(pwfx), floatSamples)) {
+                    std::wcerr << L"[AudioCapturer] Failed to convert PCM to float format" << std::endl;
                     goto Exit;
                 }
             }
-            dataSize += bytesWritten;
+            
+            // Convert stereo to mono if needed (Opus encoder is configured for mono)
+            std::vector<float> processedSamples;
+            if (pwfx->nChannels == 2) {
+                // Convert stereo to mono by averaging left and right channels
+                const size_t monoSamples = floatSamples.size() / 2;
+                processedSamples.resize(monoSamples);
+                for (size_t i = 0; i < monoSamples; ++i) {
+                    processedSamples[i] = (floatSamples[i * 2] + floatSamples[i * 2 + 1]) * 0.5f;
+                }
+            } else if (pwfx->nChannels == 1) {
+                // Already mono
+                processedSamples = std::move(floatSamples);
+            } else {
+                std::wcerr << L"[AudioCapturer] Unsupported channel count: " << pwfx->nChannels << std::endl;
+                goto Exit;
+            }
+            
+            // Calculate timestamp for this audio data
+            auto currentTime = std::chrono::high_resolution_clock::now();
+            auto elapsedTime = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - m_startTime);
+            int64_t timestampUs = elapsedTime.count();
+            
+            // Process audio frame for Opus encoding and WebRTC transmission
+            ProcessAudioFrame(processedSamples.data(), processedSamples.size(), timestampUs);
 
             hr = m_pCaptureClient->ReleaseBuffer(numFramesAvailable);
             if (FAILED(hr))
@@ -367,20 +416,10 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         }
     }
 
-    // Header will be finalized in Exit to cover both normal and error exits
+    // Cleanup and shutdown
 
 Exit:
-    if (hFile != INVALID_HANDLE_VALUE)
-    {
-        // Finalize header if we captured any data
-        if (dataSize > 0 && pwfx) {
-            if (!FixWavHeader(hFile, dataSize, pwfx->cbSize)) {
-                std::wcerr << L"Failed to fix WAV header at shutdown." << std::endl;
-            }
-            FlushFileBuffers(hFile);
-        }
-        CloseHandle(hFile);
-    }
+    std::wcout << L"[AudioCapturer] Audio capture stopped." << std::endl;
 
     CoTaskMemFree(pwfx);
     if (pSessionControl2) pSessionControl2->Release();
@@ -397,46 +436,129 @@ Exit:
     CoUninitialize();
 }
 
-bool AudioCapturer::WriteWavHeader(HANDLE hFile, WAVEFORMATEX* pwfx, DWORD dataSize)
+
+
+bool AudioCapturer::ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, void* formatPtr, std::vector<float>& floatData)
 {
-    DWORD bytesWritten;
-    DWORD fmtSize = sizeof(WAVEFORMATEX) + pwfx->cbSize; // 16 for PCM, 18+cbSize otherwise
-    DWORD dwRiffSize = 20 + fmtSize + dataSize; // 4('WAVE') + 8('fmt '+size) + fmt + 8('data'+size) + data
+    if (!pcmData || !formatPtr || numFrames == 0) return false;
+    
+    // Cast to WAVEFORMATEX - this is safe since we know the type from the caller
+    const WAVEFORMATEX* format = static_cast<const WAVEFORMATEX*>(formatPtr);
+    const size_t totalSamples = static_cast<size_t>(numFrames) * static_cast<size_t>(format->nChannels);
+    floatData.resize(totalSamples);
 
-    // RIFF chunk
-    if (!WriteFile(hFile, "RIFF", 4, &bytesWritten, NULL)) return false;
-    if (!WriteFile(hFile, &dwRiffSize, 4, &bytesWritten, NULL)) return false;
-    if (!WriteFile(hFile, "WAVE", 4, &bytesWritten, NULL)) return false;
+    WORD tag = format->wFormatTag;
+    WORD bitsPerSample = format->wBitsPerSample;
 
-    // FORMAT chunk
-    if (!WriteFile(hFile, "fmt ", 4, &bytesWritten, NULL)) return false;
-    DWORD dwFmtSize = fmtSize;
-    if (!WriteFile(hFile, &dwFmtSize, 4, &bytesWritten, NULL)) return false;
-    if (!WriteFile(hFile, pwfx, fmtSize, &bytesWritten, NULL)) return false;
+    // Handle WAVE_FORMAT_EXTENSIBLE by inspecting SubFormat
+    if (tag == WAVE_FORMAT_EXTENSIBLE && format->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+        const WAVEFORMATEXTENSIBLE* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
+        // Prefer valid bits if set
+        if (ext->Samples.wValidBitsPerSample) {
+            bitsPerSample = ext->Samples.wValidBitsPerSample;
+        }
 
-    // DATA chunk
-    if (!WriteFile(hFile, "data", 4, &bytesWritten, NULL)) return false;
-    if (!WriteFile(hFile, &dataSize, 4, &bytesWritten, NULL)) return false;
+        if (IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
+            tag = WAVE_FORMAT_IEEE_FLOAT;
+        } else if (IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_PCM)) {
+            tag = WAVE_FORMAT_PCM;
+        }
+    }
 
+    if (tag == WAVE_FORMAT_IEEE_FLOAT) {
+        if (bitsPerSample == 32) {
+            const float* pcmFloat = reinterpret_cast<const float*>(pcmData);
+            std::copy(pcmFloat, pcmFloat + totalSamples, floatData.begin());
+            return true;
+        }
+        return false;
+    }
+
+    if (tag == WAVE_FORMAT_PCM) {
+        if (bitsPerSample == 16) {
+            const int16_t* pcm16 = reinterpret_cast<const int16_t*>(pcmData);
+            for (size_t i = 0; i < totalSamples; ++i) {
+                floatData[i] = static_cast<float>(pcm16[i]) / 32768.0f;
+            }
+            return true;
+        } else if (bitsPerSample == 24) {
+            // 24-bit little-endian signed PCM
+            const uint8_t* p = reinterpret_cast<const uint8_t*>(pcmData);
+            for (size_t i = 0; i < totalSamples; ++i) {
+                int32_t sample = (static_cast<int32_t>(p[i*3 + 0])      ) |
+                                 (static_cast<int32_t>(p[i*3 + 1]) << 8 ) |
+                                 (static_cast<int32_t>(p[i*3 + 2]) << 16);
+                // Sign-extend 24-bit to 32-bit
+                if (sample & 0x00800000) sample |= 0xFF000000;
+                floatData[i] = static_cast<float>(sample) / 8388608.0f; // 2^23
+            }
+            return true;
+        } else if (bitsPerSample == 32) {
+            const int32_t* pcm32 = reinterpret_cast<const int32_t*>(pcmData);
+            for (size_t i = 0; i < totalSamples; ++i) {
+                floatData[i] = static_cast<float>(pcm32[i]) / 2147483648.0f; // 2^31
+            }
+            return true;
+        }
+        return false;
+    }
+
+    return false;
+    
     return true;
 }
 
-bool AudioCapturer::FixWavHeader(HANDLE hFile, DWORD dataSize, WORD cbSize)
+void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs)
 {
-    DWORD bytesWritten;
-    // RIFF size = 4 (WAVE) + 4 (fmt ID) + 4 (fmt size) + (sizeof(WAVEFORMATEX)+cbSize) + 4 (data ID) + 4 (data size) + dataSize
-    DWORD fmtSize = sizeof(WAVEFORMATEX) + cbSize; // typically 16 or 18+cbSize
-    DWORD dwRiffSize = 20 + fmtSize + dataSize;
-
-    // Update RIFF chunk size
-    SetFilePointer(hFile, 4, NULL, FILE_BEGIN);
-    if (!WriteFile(hFile, &dwRiffSize, 4, &bytesWritten, NULL)) return false;
-
-    // dataSize offset = 4 (RIFF) + 4 (dwRiffSize) + 4 (WAVE) + 4 (fmt ID) + 4 (fmt size) + fmtSize (WAVEFORMATEX + cbSize) + 4 (data ID)
-    DWORD dataSizeOffset = 24 + fmtSize;
-    SetFilePointer(hFile, dataSizeOffset, NULL, FILE_BEGIN);
-    if (!WriteFile(hFile, &dataSize, 4, &bytesWritten, NULL)) return false;
-
-    return true;
+    if (!samples || sampleCount == 0) return;
+    
+    // Accumulate samples into frame buffer
+    static std::vector<float> accumulatedSamples;
+    static size_t accumulatedCount = 0;
+    
+    // Append new samples
+    const size_t currentSize = accumulatedSamples.size();
+    accumulatedSamples.resize(currentSize + sampleCount);
+    std::copy(samples, samples + sampleCount, accumulatedSamples.begin() + currentSize);
+    accumulatedCount += sampleCount;
+    
+    // Process complete 20ms frames (960 samples for mono at 48kHz)
+    while (accumulatedCount >= m_samplesPerFrame) {
+        // Extract one frame
+        std::copy(accumulatedSamples.begin(), accumulatedSamples.begin() + m_samplesPerFrame, m_frameBuffer.begin());
+        
+        // Encode with Opus
+        std::vector<uint8_t> encodedData;
+        if (m_opusEncoder->encodeFrame(m_frameBuffer.data(), encodedData)) {
+            // Calculate RTP timestamp (48kHz clock, increment by 960 per 20ms frame)
+            m_rtpTimestamp += 960;
+            
+            // Calculate microsecond timestamp for this frame
+            auto currentTime = std::chrono::high_resolution_clock::now();
+            auto elapsedTime = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - m_startTime);
+            int64_t frameTimestampUs = elapsedTime.count();
+            
+            // Send to WebRTC
+            int result = sendAudioPacket(encodedData.data(), static_cast<int>(encodedData.size()), frameTimestampUs);
+            if (result != 0) {
+                std::wcerr << L"[AudioCapturer] Failed to send audio packet to WebRTC. Error: " << result << std::endl;
+            } else {
+                // Log every 100 frames (2 seconds) to avoid spam
+                static int frameCount = 0;
+                if (++frameCount % 100 == 0) {
+                    std::wcout << L"[AudioCapturer] Sent Opus frame " << frameCount << L", size: " << encodedData.size() 
+                               << L" bytes, RTP timestamp: " << m_rtpTimestamp << std::endl;
+                }
+            }
+        } else {
+            std::wcerr << L"[AudioCapturer] Failed to encode audio frame with Opus" << std::endl;
+        }
+        
+        // Remove processed samples from accumulator
+        accumulatedSamples.erase(accumulatedSamples.begin(), accumulatedSamples.begin() + m_samplesPerFrame);
+        accumulatedCount -= m_samplesPerFrame;
+    }
 }
+
+
 
