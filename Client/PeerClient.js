@@ -212,7 +212,7 @@ async function startConnection() {
       // Add H.264 codec definition and feedback mechanisms
       sdpLines.splice(lastRtpmapIndex + 1, 0,
         'a=rtpmap:96 H264/90000',
-        'a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f',
+        'a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033',
         'a=rtcp-fb:96 nack',
         'a=rtcp-fb:96 nack pli'
       );

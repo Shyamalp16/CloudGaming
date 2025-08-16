@@ -165,11 +165,24 @@ namespace Encoder {
 
         // Pass PTS in microseconds to Go layer
         // Provide frame duration from current encoder FPS for paced sending
-        int fpsNum = codecCtx && codecCtx->framerate.den != 0 ? codecCtx->framerate.num : 60;
-        int fpsDen = codecCtx && codecCtx->framerate.den != 0 ? codecCtx->framerate.den : 1;
-        double fpsVal = fpsDen != 0 ? static_cast<double>(fpsNum) / static_cast<double>(fpsDen) : 60.0;
-        if (fpsVal <= 0.0) fpsVal = 60.0;
-        int64_t frameDurationUs = static_cast<int64_t>(1000000.0 / fpsVal);
+        static bool loggedFps = false;
+        int fpsNum = codecCtx ? codecCtx->framerate.num : 60;
+        int fpsDen = codecCtx ? codecCtx->framerate.den : 1;
+        double fpsVal = (fpsDen != 0) ? static_cast<double>(fpsNum) / static_cast<double>(fpsDen) : 60.0;
+        if (!loggedFps) {
+            std::wcout << L"[Encoder] framerate num/den: " << fpsNum << L"/" << fpsDen << L" (~" << fpsVal << L" fps)\n";
+            loggedFps = true;
+        }
+        // Fallback to measured delta between successive frames if needed
+        static int64_t lastPtsUs = -1;
+        int64_t frameDurationUs;
+        if (lastPtsUs > 0 && g_latestPTS > lastPtsUs) {
+            frameDurationUs = g_latestPTS - lastPtsUs;
+        } else {
+            frameDurationUs = static_cast<int64_t>(1000000.0 / (fpsVal > 1.0 ? fpsVal : 60.0));
+        }
+        lastPtsUs = g_latestPTS;
+        if (frameDurationUs <= 0) frameDurationUs = 8333; // ~120fps fallback
         int result = sendVideoSample(packet->data, packet->size, frameDurationUs);
         if (result != 0) {
             std::wcerr << L"[WebRTC] Failed to send video packet to WebRTC module. Error code: " << result << L"\n";
@@ -241,6 +254,12 @@ namespace Encoder {
         codecCtx->gop_size = fps * 1; // IDR every ~1 second for fast recovery
         codecCtx->max_b_frames = 0; // low-latency
         codecCtx->bit_rate = 20000000; // Start ~20 Mbps
+
+        // Signal SDR BT.709 limited range to avoid washed/incorrect colors
+        codecCtx->color_range     = AVCOL_RANGE_MPEG;   // limited (broadcast range)
+        codecCtx->color_primaries = AVCOL_PRI_BT709;
+        codecCtx->color_trc       = AVCOL_TRC_BT709;
+        codecCtx->colorspace      = AVCOL_SPC_BT709;
 
         // Configure D3D11VA frames with NV12 sw_format (GPU path)
         if (isHardware) {
@@ -315,7 +334,20 @@ namespace Encoder {
             snprintf(buf2, sizeof(buf2), "%d", codecCtx->bit_rate * 2);
             av_dict_set(&opts, "maxrate", rateBuf, 0);
             av_dict_set(&opts, "bufsize", buf2, 0);
+            // Ensure color metadata is set on stream
+            av_dict_set(&opts, "colorspace", "bt709", 0);
+            av_dict_set(&opts, "color_primaries", "bt709", 0);
+            av_dict_set(&opts, "color_trc", "bt709", 0);
+            av_dict_set(&opts, "color_range", "pc", 0); // full range
+            av_dict_set(&opts, "level", "5.1", 0);
             // Relax forced IDR (handled by gop_size)
+        } else if (encoderName == "libx264") {
+            // x264 names differ; set BT.709 SDR limited
+            av_dict_set(&opts, "colorprim", "bt709", 0);
+            av_dict_set(&opts, "transfer",  "bt709", 0);
+            av_dict_set(&opts, "colormatrix","bt709", 0);
+            av_dict_set(&opts, "fullrange", "1", 0); // full range
+            av_dict_set(&opts, "level", "5.1", 0);
         }
         else if (encoderName == "h264_qsv") {
             av_dict_set(&opts, "preset", "veryfast", 0);

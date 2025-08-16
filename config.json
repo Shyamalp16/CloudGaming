@@ -3,6 +3,6 @@
     "serverUrlBase": "ws://10.0.0.134:3002"
   },
   "host": {
-    "targetProcessName": "vlc.exe"
+    "targetProcessName": "cs2.exe"
   }
 }

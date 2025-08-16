@@ -43,7 +43,7 @@ bool AudioCapturer::StartCapture(DWORD processId)
     OpusEncoderWrapper::Settings settings;
     settings.sampleRate = 48000;        // 48 kHz
     settings.channels = 2;              // Stereo for game/media audio
-    settings.frameSize = 960;           // 20ms frames at 48kHz
+    settings.frameSize = 480;           // 10ms frames at 48kHz
     settings.bitrate = 64000;           // 64 kbps for stereo
     settings.complexity = 6;            // Balance between quality and CPU usage
     settings.useVbr = true;             // Variable bitrate

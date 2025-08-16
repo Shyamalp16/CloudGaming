@@ -26,6 +26,7 @@ import (
 	"log"
 	"math/rand"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -266,7 +267,7 @@ func createPeerConnectionGo() C.int {
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:    "video/h264",
 			ClockRate:   90000,
-			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033",
 		},
 		PayloadType: 96,
 	}
@@ -900,7 +901,9 @@ func handleOffer(offerSDP *C.char) {
 		log.Printf("[Go/Pion] Error creating answer: %v\n", err)
 		return
 	}
-	log.Println("[Go/Pion] handleOffer: Answer created successfully.")
+	// Munge SDP to advertise H.264 Level 5.1 for higher FPS at 1080p
+	answer.SDP = strings.ReplaceAll(answer.SDP, "profile-level-id=42e01f", "profile-level-id=42e033")
+	log.Println("[Go/Pion] handleOffer: Answer created successfully (munged to 42e033).")
 
 	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
 	log.Println("[Go/Pion] handleOffer: Setting Local Description (answer).")
