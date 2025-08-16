@@ -42,15 +42,15 @@ bool AudioCapturer::StartCapture(DWORD processId)
     // Initialize Opus encoder with optimized settings for low-latency gaming
     OpusEncoderWrapper::Settings settings;
     settings.sampleRate = 48000;        // 48 kHz
-    settings.channels = 1;              // Mono for lower bandwidth (change to 2 for stereo)
+    settings.channels = 2;              // Stereo for game/media audio
     settings.frameSize = 960;           // 20ms frames at 48kHz
-    settings.bitrate = 32000;           // 32 kbps for mono (64 kbps for stereo)
+    settings.bitrate = 64000;           // 64 kbps for stereo
     settings.complexity = 6;            // Balance between quality and CPU usage
     settings.useVbr = true;             // Variable bitrate
     settings.constrainedVbr = true;     // Constrain VBR peaks
     settings.enableFec = true;          // Forward Error Correction for packet loss
     settings.expectedLossPerc = 10;     // Expect 10% packet loss
-    settings.enableDtx = false;         // Disable DTX for gaming (want consistent latency)
+    settings.enableDtx = false;         // Disable DTX for continuous game/media audio
     settings.application = 2049;        // OPUS_APPLICATION_AUDIO for music/gaming
     
     if (!m_opusEncoder->initialize(settings)) {
@@ -375,22 +375,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 }
             }
             
-            // Convert stereo to mono if needed (Opus encoder is configured for mono)
-            std::vector<float> processedSamples;
-            if (pwfx->nChannels == 2) {
-                // Convert stereo to mono by averaging left and right channels
-                const size_t monoSamples = floatSamples.size() / 2;
-                processedSamples.resize(monoSamples);
-                for (size_t i = 0; i < monoSamples; ++i) {
-                    processedSamples[i] = (floatSamples[i * 2] + floatSamples[i * 2 + 1]) * 0.5f;
-                }
-            } else if (pwfx->nChannels == 1) {
-                // Already mono
-                processedSamples = std::move(floatSamples);
-            } else {
-                std::wcerr << L"[AudioCapturer] Unsupported channel count: " << pwfx->nChannels << std::endl;
-                goto Exit;
-            }
+            // Preserve stereo (Opus encoder configured for 2 channels). Ensure matching channel count.
+            std::vector<float> processedSamples = std::move(floatSamples);
             
             // Calculate timestamp for this audio data
             auto currentTime = std::chrono::high_resolution_clock::now();
