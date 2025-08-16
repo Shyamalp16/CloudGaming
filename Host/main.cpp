@@ -45,8 +45,8 @@ void onRTCP(double packetLoss, double rtt, double jitter) {
                << L", Jitter: " << jitter << std::endl;
 
     // Adaptive bitrate controller (AIMD) with cooldown
-    static int currentBitrate = 30000000;           // start at 30 Mbps
-    static const int minBitrate = 10000000;         // 10 Mbps
+    static int currentBitrate = 35000000;           // start at 30 Mbps
+    static const int minBitrate = 15000000;         // 10 Mbps
     static const int maxBitrate = 50000000;         // 50 Mbps
     static int cleanSamples = 0;                    // consecutive good reports
     static auto lastChange = std::chrono::steady_clock::now();
