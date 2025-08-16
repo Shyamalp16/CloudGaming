@@ -11,8 +11,7 @@ using json = nlohmann::json;
 
 client wsClient;
 websocketpp::connection_hdl g_connectionHandle;
-// std::string base_uri = "ws://localhost:3002/";
-std::string base_uri = "ws://10.0.0.134:3002/";
+std::string base_uri = "ws://localhost:3002/";
 std::thread g_websocket_thread;
 std::thread g_frame_thread;
 std::thread g_sender_thread;

@@ -1,7 +1,7 @@
 const { RTCPeerConnection, RTCSessionDescription, RTCRtpReceiver } = require('wrtc');
 const WebSocket = require('ws');
 
-const serverUrlBase = 'ws://10.0.0.134:3002';
+const serverUrlBase = 'ws://localhost:3002';
 let ws;
 let peerConnection;
 

@@ -71,7 +71,7 @@ void onRTCP(double packetLoss, double rtt, double jitter) {
     // Additive increase when clean
     cleanSamples++;
     if (since >= 1000 && cleanSamples >= 3) { // every ~1s and 3 clean samples
-        int step = 3'000'000; // +5 Mbps
+        int step = 5'000'000; // +5 Mbps
         int target = currentBitrate + step;
         if (target <= maxBitrate) {
             currentBitrate = target;

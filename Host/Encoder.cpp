@@ -254,6 +254,9 @@ namespace Encoder {
         codecCtx->gop_size = fps * 1; // IDR every ~1 second for fast recovery
         codecCtx->max_b_frames = 0; // low-latency
         codecCtx->bit_rate = 20000000; // Start ~20 Mbps
+        // Initialize VBV to track target bitrate and avoid pulsing
+        codecCtx->rc_max_rate = codecCtx->bit_rate;
+        codecCtx->rc_buffer_size = codecCtx->bit_rate * 2;
 
         // Signal SDR BT.709 limited range to avoid washed/incorrect colors
         codecCtx->color_range     = AVCOL_RANGE_MPEG;   // limited (broadcast range)
@@ -574,6 +577,16 @@ namespace Encoder {
         if (codecCtx) {
             std::wcout << L"[Encoder] Adjusting bitrate to " << new_bitrate << L" bps\n";
             codecCtx->bit_rate = new_bitrate;
+            codecCtx->rc_max_rate = new_bitrate;
+            codecCtx->rc_buffer_size = new_bitrate * 2;
+            // Apply encoder-specific runtime controls
+            if (codecCtx->priv_data) {
+                av_opt_set_int(codecCtx->priv_data, "bitrate", new_bitrate, 0);
+                av_opt_set_int(codecCtx->priv_data, "maxrate", new_bitrate, 0);
+                av_opt_set_int(codecCtx->priv_data, "bufsize", new_bitrate * 2, 0);
+            }
+            // Force an IDR soon so downstream adapts to new rate quickly
+            av_opt_set(codecCtx->priv_data, "force_key_frames", "expr:gte(t,n_forced*1)", 0);
         }
     }
 }
