@@ -5,6 +5,7 @@
 #include "MouseInputHandler.h"
 #include "ShutdownManager.h"
 #include "PacketQueue.h"
+#include <unordered_set>
 
 typedef websocketpp::client<websocketpp::config::asio_client> client;
 using json = nlohmann::json;
@@ -15,6 +16,47 @@ std::string base_uri = "ws://localhost:3002/";
 std::thread g_websocket_thread;
 std::thread g_frame_thread;
 std::thread g_sender_thread;
+
+// Allowed key codes (must match client-side codes and KeyInputHandler mapping)
+static const std::unordered_set<std::string> kValidKeyCodes = {
+    // Letters
+    "KeyA","KeyB","KeyC","KeyD","KeyE","KeyF","KeyG","KeyH","KeyI","KeyJ","KeyK","KeyL","KeyM","KeyN","KeyO","KeyP","KeyQ","KeyR","KeyS","KeyT","KeyU","KeyV","KeyW","KeyX","KeyY","KeyZ",
+    // Numbers
+    "Digit0","Digit1","Digit2","Digit3","Digit4","Digit5","Digit6","Digit7","Digit8","Digit9",
+    // Numpad
+    "Numpad0","Numpad1","Numpad2","Numpad3","Numpad4","Numpad5","Numpad6","Numpad7","Numpad8","Numpad9",
+    "NumpadDecimal","NumpadAdd","NumpadSubtract","NumpadMultiply","NumpadDivide","NumpadEnter",
+    // Function
+    "F1","F2","F3","F4","F5","F6","F7","F8","F9","F10","F11","F12",
+    // Arrows
+    "ArrowUp","ArrowDown","ArrowLeft","ArrowRight",
+    // Modifiers / system
+    "ShiftLeft","ShiftRight","ControlLeft","ControlRight","AltLeft","AltRight","MetaLeft","MetaRight",
+    // Others
+    "Enter","Escape","Tab","Space","Backspace","Delete","Home","End","PageUp","PageDown","CapsLock","NumLock","ScrollLock","Insert","ContextMenu",
+    // Punctuation
+    "Backquote","Minus","Equal","BracketLeft","BracketRight","Backslash","Semicolon","Quote","Comma","Period","Slash"
+};
+
+// Simple token bucket for rate limiting
+struct TokenBucket {
+    double tokens{0};
+    double capacity{0};
+    double refillPerSec{0};
+    std::chrono::steady_clock::time_point last;
+    void init(double cap, double rate) { capacity = cap; refillPerSec = rate; tokens = cap; last = std::chrono::steady_clock::now(); }
+    bool consume(double n) {
+        auto now = std::chrono::steady_clock::now();
+        double dt = std::chrono::duration<double>(now - last).count();
+        tokens = std::min(capacity, tokens + dt * refillPerSec);
+        last = now;
+        if (tokens >= n) { tokens -= n; return true; }
+        return false;
+    }
+};
+static TokenBucket g_keyBucket; // e.g., 200 events/sec burst 200
+static TokenBucket g_mouseBucket; // e.g., 500 events/sec burst 500
+static std::once_flag g_bucketsInit;
 
 void on_open(client* c, websocketpp::connection_hdl hdl);
 void on_fail(client* c, websocketpp::connection_hdl hdl);
@@ -108,7 +150,15 @@ void on_close(client* c, websocketpp::connection_hdl hdl) {
 
 void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
     try {
-        json message = json::parse(msg->get_payload());
+        // Initialize rate-limiters once
+        std::call_once(g_bucketsInit, [](){ g_keyBucket.init(200, 200); g_mouseBucket.init(500, 500); });
+
+        const std::string& payload = msg->get_payload();
+        if (payload.size() > 1024) {
+            std::cerr << "[WebSocket] Dropping oversized message (" << payload.size() << ")" << std::endl;
+            return;
+        }
+        json message = json::parse(payload);
 
         if (!message.contains("type") || !message["type"].is_string()) {
             std::cerr << "[WebSocket] Received message without a valid 'type' field: " << message.dump() << std::endl;
@@ -137,6 +187,12 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
                       << ", host receive time: " << host_receive_time_ms << std::endl;
         }
         else if (type == "keydown" || type == "keyup" || type == "mousemove" || type == "mousedown" || type == "mouseup") {
+            // Basic per-type rate limiting
+            if (type == "keydown" || type == "keyup") {
+                if (!g_keyBucket.consume(1.0)) { return; }
+            } else {
+                if (!g_mouseBucket.consume(1.0)) { return; }
+            }
             // Validate and rate-limit input events
             static auto lastInputLog = std::chrono::steady_clock::now();
             auto now = std::chrono::steady_clock::now();
@@ -158,6 +214,18 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
                           << ", Host receive time: " << host_receive_time_ms
                           << ", One-way latency: " << one_way_latency << " ms" << std::endl;
                 lastInputLog = now;
+            }
+
+            // Validate key events: code must be known
+            if ((type == "keydown" || type == "keyup")) {
+                if (!message.contains("code") || !message["code"].is_string()) {
+                    return;
+                }
+                const std::string code = message["code"].get<std::string>();
+                if (kValidKeyCodes.find(code) == kValidKeyCodes.end()) {
+                    // Unknown key code; ignore
+                    return;
+                }
             }
 
             // Basic field validation for mouse events

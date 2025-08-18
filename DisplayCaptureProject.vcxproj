@@ -115,13 +115,10 @@
     <ClInclude Include="Host\CaptureHelpers.h" />
     <ClInclude Include="Host\D3DHelpers.h" />
     <ClInclude Include="Host\Encoder.h" />
-    <ClInclude Include="Host\FrameCaptureThread.h" />
     <ClInclude Include="Host\GlobalTime.h" />
     <ClInclude Include="Host\IdGenerator.h" />
     <ClInclude Include="Host\KeyInputHandler.h" />
     <ClInclude Include="Host\MouseInputHandler.h" />
-    <ClInclude Include="Host\MyCreateSdpObserver.h" />
-    <ClInclude Include="Host\MySetRemoteObserver.h" />
     <ClInclude Include="Host\pch.h" />
     <ClInclude Include="Host\pion_webrtc.h" />
     <ClInclude Include="Host\ShutdownManager.h" />
@@ -136,12 +133,9 @@
     <ClCompile Include="Host\D3DHelpers.cpp" />
     <ClCompile Include="Host\OpusEncoder.cpp" />
     <ClCompile Include="Host\Encoder.cpp" />
-    <ClCompile Include="Host\FrameCaptureThread.cpp" />
     <ClCompile Include="Host\KeyInputHandler.cpp" />
     <ClCompile Include="Host\main.cpp" />
     <ClCompile Include="Host\MouseInputHandler.cpp" />
-    <ClCompile Include="Host\MyCreateSdpObserver.cpp" />
-    <ClCompile Include="Host\MySetRemoteObserver.cpp" />
     <ClCompile Include="Host\pch.cpp" />
     <ClCompile Include="Host\ShutdownManager.cpp" />
     <ClCompile Include="Host\PacketQueue.cpp" />

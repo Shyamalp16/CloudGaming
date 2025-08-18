@@ -10,7 +10,6 @@
 #include "D3DHelpers.h"
 #include "WindowHelpers.h"
 #include "CaptureHelpers.h"
-#include "FrameCaptureThread.h"
 #include "Websocket.h"
 #include "AudioCapturer.h"
 #include "ShutdownManager.h"
