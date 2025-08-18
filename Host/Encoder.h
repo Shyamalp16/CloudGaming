@@ -37,6 +37,15 @@ namespace Encoder {
     // Configure encoder bitrate defaults (used on InitializeEncoder)
     void SetBitrateConfig(int start_bitrate_bps, int min_bitrate_bps, int max_bitrate_bps);
 
+    // RTCP-driven bitrate control (in-encoder strategy)
+    void ConfigureBitrateController(int min_bps,
+                                    int max_bps,
+                                    int increase_step_bps,
+                                    int decrease_cooldown_ms,
+                                    int clean_samples_required,
+                                    int increase_interval_ms);
+    void OnRtcpFeedback(double packetLoss, double rtt, double jitter);
+
     extern "C" int sendVideoSample(uint8_t* data, int size, int64_t durationUs);
 
     extern int currentWidth;

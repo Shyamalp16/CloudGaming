@@ -21,51 +21,9 @@
 // PLI callback implemented in Encoder.cpp
 extern "C" void OnPLI();
 
-// RTCP Callback Function
-// min/max bitrate are updated from config in main()
-static int g_cfgMinBitrate = 10000000; // 10 Mbps
-static int g_cfgMaxBitrate = 50000000; // 50 Mbps
+// RTCP Callback Function (delegates to Encoder-managed controller)
 void onRTCP(double packetLoss, double rtt, double jitter) {
-    std::wcout << L"[main] RTCP Stats - Packet Loss: " << packetLoss 
-               << L", RTT: " << rtt 
-               << L", Jitter: " << jitter << std::endl;
-
-    // Adaptive bitrate controller (AIMD) with cooldown
-    static int currentBitrate = 25000000;           // start ~25 Mbps; overridden by encoder config
-    static int minBitrate = g_cfgMinBitrate;
-    static int maxBitrate = g_cfgMaxBitrate;
-    static int cleanSamples = 0;                    // consecutive good reports
-    static auto lastChange = std::chrono::steady_clock::now();
-
-    auto now = std::chrono::steady_clock::now();
-    auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastChange).count();
-
-    // Multiplicative decrease on loss
-    if (packetLoss >= 0.03) { // >=3% loss
-        if (since >= 300) { // short cooldown for decreases
-            // Heavier drop if severe loss
-            double factor = (packetLoss >= 0.10) ? 0.6 : 0.8;
-            int target = static_cast<int>(currentBitrate * factor);
-            currentBitrate = std::max(minBitrate, target);
-            Encoder::AdjustBitrate(currentBitrate);
-            lastChange = now;
-        }
-        cleanSamples = 0;
-        return;
-    }
-
-    // Additive increase when clean
-    cleanSamples++;
-    if (since >= 1000 && cleanSamples >= 3) { // every ~1s and 3 clean samples
-        int step = 5'000'000; // +5 Mbps
-        int target = currentBitrate + step;
-        if (target <= maxBitrate) {
-            currentBitrate = target;
-            Encoder::AdjustBitrate(currentBitrate);
-            lastChange = now;
-        }
-        cleanSamples = 0;
-    }
+    Encoder::OnRtcpFeedback(packetLoss, rtt, jitter);
 }
 
 // Function to monitor the WebRTC connection state
@@ -221,10 +179,11 @@ int main()
             int brMin = vcfg.value("bitrateMin", 10000000);
             int brMax = vcfg.value("bitrateMax", 50000000);
             Encoder::SetBitrateConfig(brStart, brMin, brMax);
-            // update RTCP controller bounds
-            g_cfgMinBitrate = brMin;
-            g_cfgMaxBitrate = brMax;
-            // propagate fps to capture/encoder initialization
+            Encoder::ConfigureBitrateController(brMin, brMax,
+                                               5'000'000, // increase step
+                                               300,       // decrease cooldown
+                                               3,         // clean samples required
+                                               1000);     // increase interval
             SetCaptureTargetFps(fps);
         }
     } catch (...) {}

@@ -54,6 +54,15 @@ static int g_vpHeight = 0;
 static int g_startBitrateBps = 20000000; // 20 Mbps default
 static int g_minBitrateBps = 10000000;   // 10 Mbps default
 static int g_maxBitrateBps = 50000000;   // 50 Mbps default
+static int g_minBitrateController = 10000000;
+static int g_maxBitrateController = 50000000;
+static int g_increaseStep = 5000000;         // +5 Mbps
+static int g_decreaseCooldownMs = 300;       // ms
+static int g_cleanSamplesRequired = 3;
+static int g_increaseIntervalMs = 1000;      // ms
+static int g_currentBitrate = 25000000;      // start ~25 Mbps
+static int g_cleanSamples = 0;
+static std::chrono::steady_clock::time_point g_lastChange = std::chrono::steady_clock::now();
 
 static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height)
 {
@@ -100,6 +109,49 @@ namespace Encoder {
         if (start_bps > 0) g_startBitrateBps = start_bps;
         if (min_bps > 0) g_minBitrateBps = min_bps;
         if (max_bps > 0) g_maxBitrateBps = max_bps;
+        g_currentBitrate = g_startBitrateBps;
+    }
+
+    void ConfigureBitrateController(int min_bps,
+                                    int max_bps,
+                                    int increase_step_bps,
+                                    int decrease_cooldown_ms,
+                                    int clean_samples_required,
+                                    int increase_interval_ms) {
+        if (min_bps > 0) g_minBitrateController = min_bps;
+        if (max_bps > 0) g_maxBitrateController = max_bps;
+        if (increase_step_bps > 0) g_increaseStep = increase_step_bps;
+        if (decrease_cooldown_ms > 0) g_decreaseCooldownMs = decrease_cooldown_ms;
+        if (clean_samples_required > 0) g_cleanSamplesRequired = clean_samples_required;
+        if (increase_interval_ms > 0) g_increaseIntervalMs = increase_interval_ms;
+    }
+
+    void OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*jitter*/) {
+        auto now = std::chrono::steady_clock::now();
+        auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastChange).count();
+
+        if (packetLoss >= 0.03) { // >= 3% loss
+            if (since >= g_decreaseCooldownMs) {
+                double factor = (packetLoss >= 0.10) ? 0.6 : 0.8;
+                int target = static_cast<int>(g_currentBitrate * factor);
+                g_currentBitrate = std::max(g_minBitrateController, target);
+                AdjustBitrate(g_currentBitrate);
+                g_lastChange = now;
+            }
+            g_cleanSamples = 0;
+            return;
+        }
+
+        g_cleanSamples++;
+        if (since >= g_increaseIntervalMs && g_cleanSamples >= g_cleanSamplesRequired) {
+            int target = g_currentBitrate + g_increaseStep;
+            if (target <= g_maxBitrateController) {
+                g_currentBitrate = target;
+                AdjustBitrate(g_currentBitrate);
+                g_lastChange = now;
+            }
+            g_cleanSamples = 0;
+        }
     }
     extern "C" void OnPLI() {
         RequestIDR();
