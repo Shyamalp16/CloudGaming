@@ -94,6 +94,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     DWORD flags;
     WAVEFORMATEX* pwfx = NULL;
     DWORD sleepMs = 10; // polling interval (fallback when event mode is unavailable)
+    bool eventMode = false; // declared early to avoid goto skipping initialization
 
     hr = CoInitialize(NULL);
     if (FAILED(hr))
@@ -335,7 +336,6 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     std::wcout << L"[AudioCapturer] Starting audio capture and Opus encoding..." << std::endl;
 
     // Set up event handle if event-driven mode was enabled
-    bool eventMode = false;
     if (m_pAudioClient) {
         // If the client was initialized with EVENTCALLBACK, SetEventHandle will succeed
         if (!m_hCaptureEvent) {
