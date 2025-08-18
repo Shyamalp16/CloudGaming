@@ -69,6 +69,10 @@ var (
 	// Cache latest RTT (ms) from ping/pong to combine with RTCP loss/jitter
 	lastRttMutex sync.Mutex
 	lastRttMs    float64
+	// Throttled logging for enqueues
+	lastEnqueueLog    time.Time
+	msgEnqueueCount   int
+	mouseEnqueueCount int
 )
 
 func init() {
@@ -153,25 +157,27 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 func enqueueMessage(msg string) {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
-	log.Printf("[Go/Pion] --> Enqueueing message: '%s'. Queue size BEFORE: %d", msg, len(messageQueue))
 	messageQueue = append(messageQueue, msg)
-	log.Printf("[Go/Pion] --> Enqueued message: '%s'. Queue size AFTER: %d", msg, len(messageQueue))
+	msgEnqueueCount++
+	if time.Since(lastEnqueueLog) >= time.Second {
+		log.Printf("[Go/Pion] queued key msgs=%d mouse=%d", msgEnqueueCount, mouseEnqueueCount)
+		msgEnqueueCount = 0
+		mouseEnqueueCount = 0
+		lastEnqueueLog = time.Now()
+	}
 }
 
 func enqueueMouseEvent(msg string) {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
-	log.Printf(
-		"[Go/Pion] --> Enqueueing message: '%s'. Queue size BEFORE: %d",
-		msg,
-		len(mouseQueue),
-	)
 	mouseQueue = append(mouseQueue, msg)
-	log.Printf(
-		"[Go/Pion] --> Enqueued message: '%s'. Queue size AFTER: %d",
-		msg,
-		len(mouseQueue),
-	)
+	mouseEnqueueCount++
+	if time.Since(lastEnqueueLog) >= time.Second {
+		log.Printf("[Go/Pion] queued key msgs=%d mouse=%d", msgEnqueueCount, mouseEnqueueCount)
+		msgEnqueueCount = 0
+		mouseEnqueueCount = 0
+		lastEnqueueLog = time.Now()
+	}
 }
 
 //export getDataChannelMessage
@@ -391,22 +397,16 @@ func createPeerConnectionGo() C.int {
 			})
 
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-				log.Printf(
-					"[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s\n",
-					dc.Label(),
-					idStr,
-					string(msg.Data),
-				)
-				// Parse message to extract client_send_time
+				// Throttle noisy logs: only log size and acks
 				var messageData map[string]interface{}
 				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
 					if clientSendTime, ok := messageData["client_send_time"].(float64); ok {
-						hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond) // Current time in milliseconds
+						hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
 						oneWayLatency := hostReceiveTime - clientSendTime
-						log.Printf(
-							"[Go/Pion] Keyboard event one-way latency: %.2f ms (Client: %.2f, Host: %.2f)\n",
-							oneWayLatency, clientSendTime, hostReceiveTime,
-						)
+						// No per-message log; only significant latency spikes
+						if oneWayLatency > 100 {
+							log.Printf("[Go/Pion] Keyboard latency high: %.1f ms", oneWayLatency)
+						}
 					}
 				}
 				enqueueMessage(string(msg.Data))
@@ -488,21 +488,15 @@ func createPeerConnectionGo() C.int {
 			})
 
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-				log.Printf(
-					"[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s\n",
-					dc.Label(),
-					idStr,
-					string(msg.Data),
-				)
+				// Throttle noisy logs: only log size and acks
 				var messageData map[string]interface{}
 				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
 					if clientSendTime, ok := messageData["client_send_time"].(float64); ok {
 						hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
 						oneWayLatency := hostReceiveTime - clientSendTime
-						log.Printf(
-							"[Go/Pion] Mouse event one-way latency: %.2f ms (Client: %.2f, Host: %.2f)\n",
-							oneWayLatency, clientSendTime, hostReceiveTime,
-						)
+						if oneWayLatency > 100 {
+							log.Printf("[Go/Pion] Mouse latency high: %.1f ms", oneWayLatency)
+						}
 					}
 				}
 				enqueueMouseEvent(string(msg.Data))
@@ -855,6 +849,29 @@ func createPeerConnectionGo() C.int {
 	})
 
 	log.Println("[Go/Pion] PeerConnection created.")
+	// Periodic RTT anomaly monitor (5s)
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		var lastSample float64
+		for range t.C {
+			pcMutex.Lock()
+			pc := peerConnection
+			pcMutex.Unlock()
+			if pc == nil {
+				continue
+			}
+			lastRttMutex.Lock()
+			rtt := lastRttMs
+			lastRttMutex.Unlock()
+			if lastSample > 0 && rtt > 0 {
+				if rtt > 2*lastSample && rtt > 50 { // spike detection
+					log.Printf("[Go/Pion] RTT anomaly: %.1f ms -> %.1f ms", lastSample, rtt)
+				}
+			}
+			lastSample = rtt
+		}
+	}()
 	pcMutex.Unlock()
 	return 1
 }
