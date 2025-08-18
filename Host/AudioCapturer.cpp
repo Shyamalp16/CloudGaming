@@ -93,7 +93,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     BYTE* pData;
     DWORD flags;
     WAVEFORMATEX* pwfx = NULL;
-    DWORD sleepMs = 10; // polling interval, refined after buffer size known
+    DWORD sleepMs = 10; // polling interval (fallback when event mode is unavailable)
 
     hr = CoInitialize(NULL);
     if (FAILED(hr))
@@ -254,9 +254,11 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                << L"Hz, but Opus encoder expects 48kHz. Resampling may be needed." << std::endl;
                 }
 
+                // Try event-driven mode first for ultra-low latency
+                DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
                 hr = m_pAudioClient->Initialize(
                     AUDCLNT_SHAREMODE_SHARED,
-                    AUDCLNT_STREAMFLAGS_LOOPBACK, // capture render (what-you-hear)
+                    streamFlags,
                     hnsRequestedDuration,
                     0,
                     const_cast<const WAVEFORMATEX*>(pwfx),
@@ -264,8 +266,19 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
                 if (FAILED(hr))
                 {
-                    std::wcerr << L"[AudioCapturer] Unable to initialize audio client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
-                    goto Exit;
+                    std::wcerr << L"[AudioCapturer] Event-driven init failed; retrying in polling mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
+                    // Retry without EVENTCALLBACK
+                    hr = m_pAudioClient->Initialize(
+                        AUDCLNT_SHAREMODE_SHARED,
+                        AUDCLNT_STREAMFLAGS_LOOPBACK,
+                        hnsRequestedDuration,
+                        0,
+                        const_cast<const WAVEFORMATEX*>(pwfx),
+                        NULL);
+                    if (FAILED(hr)) {
+                        std::wcerr << L"[AudioCapturer] Unable to initialize audio client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
+                        goto Exit;
+                    }
                 }
 
                 hr = m_pAudioClient->GetBufferSize(&bufferFrameCount);
@@ -321,6 +334,22 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
     std::wcout << L"[AudioCapturer] Starting audio capture and Opus encoding..." << std::endl;
 
+    // Set up event handle if event-driven mode was enabled
+    bool eventMode = false;
+    if (m_pAudioClient) {
+        // If the client was initialized with EVENTCALLBACK, SetEventHandle will succeed
+        if (!m_hCaptureEvent) {
+            m_hCaptureEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        }
+        if (m_hCaptureEvent) {
+            hr = m_pAudioClient->SetEventHandle(m_hCaptureEvent);
+            if (SUCCEEDED(hr)) {
+                eventMode = true;
+                std::wcout << L"[AudioCapturer] Using event-driven capture." << std::endl;
+            }
+        }
+    }
+
     hr = m_pAudioClient->Start();  // Start recording.
     if (FAILED(hr))
     {
@@ -336,7 +365,14 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
     while (m_stopCapture == false)
     {
-        Sleep(sleepMs);
+        if (eventMode && m_hCaptureEvent) {
+            DWORD wait = WaitForSingleObject(m_hCaptureEvent, 50); // short timeout to be responsive to stop
+            if (wait != WAIT_OBJECT_0) {
+                continue; // timeout or error; loop back
+            }
+        } else {
+            Sleep(sleepMs);
+        }
 
         hr = m_pCaptureClient->GetNextPacketSize(&numFramesAvailable);
         if (FAILED(hr))
@@ -407,6 +443,10 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 Exit:
     std::wcout << L"[AudioCapturer] Audio capture stopped." << std::endl;
 
+    if (m_hCaptureEvent) {
+        CloseHandle(m_hCaptureEvent);
+        m_hCaptureEvent = nullptr;
+    }
     CoTaskMemFree(pwfx);
     if (pSessionControl2) pSessionControl2->Release();
     if (pSessionControl) pSessionControl->Release();

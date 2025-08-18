@@ -45,4 +45,7 @@ private:
     IAudioClient* m_pAudioClient = nullptr;
     IAudioCaptureClient* m_pCaptureClient = nullptr;
     IAudioSessionControl2* m_pSessionControl2 = nullptr;
+
+    // Event-driven capture
+    HANDLE m_hCaptureEvent = nullptr;
 };
