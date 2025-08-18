@@ -2,7 +2,6 @@
 
 #include <d3d11.h>
 #include "D3DHelpers.h"
-#include "FrameCaptureThread.h"
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 

@@ -6,6 +6,8 @@
 #include <string>
 #include <filesystem>
 #include <windows.h>
+#include <queue>
+#include <algorithm>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.DirectX.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
