@@ -10,6 +10,7 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include <wrl/client.h>
 #include "OpusEncoder.h"
 
 class AudioCapturer
@@ -39,12 +40,12 @@ private:
     int64_t m_nextFrameTime;
     uint32_t m_rtpTimestamp;
     
-    // COM interfaces
-    IMMDeviceEnumerator* m_pEnumerator = nullptr;
-    IMMDevice* m_pDevice = nullptr;
-    IAudioClient* m_pAudioClient = nullptr;
-    IAudioCaptureClient* m_pCaptureClient = nullptr;
-    IAudioSessionControl2* m_pSessionControl2 = nullptr;
+    // COM interfaces (smart pointers)
+    Microsoft::WRL::ComPtr<IMMDeviceEnumerator> m_pEnumerator;
+    Microsoft::WRL::ComPtr<IMMDevice> m_pDevice;
+    Microsoft::WRL::ComPtr<IAudioClient> m_pAudioClient;
+    Microsoft::WRL::ComPtr<IAudioCaptureClient> m_pCaptureClient;
+    Microsoft::WRL::ComPtr<IAudioSessionControl2> m_pSessionControl2;
 
     // Event-driven capture
     HANDLE m_hCaptureEvent = nullptr;

@@ -116,7 +116,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     hr = CoCreateInstance(
         CLSID_MMDeviceEnumerator, NULL,
         CLSCTX_ALL, IID_IMMDeviceEnumerator,
-        (void**)&m_pEnumerator);
+        reinterpret_cast<void**>(m_pEnumerator.ReleaseAndGetAddressOf()));
 
     if (FAILED(hr))
     {
@@ -222,12 +222,12 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             {
                 std::wcout << L"[AudioCapturer] Found matching session for target process ID: " << targetProcessId << std::endl;
                 // Found the session for the target process
-                m_pDevice = pDevice; // Keep a reference to the device
-                m_pDevice->AddRef(); // Increment ref count as we're keeping it
-                m_pSessionControl2 = pSessionControl2; // Keep a reference to the session control
-                m_pSessionControl2->AddRef(); // Increment ref count as we're keeping it
+                m_pDevice = pDevice; // ComPtr takes ownership (AddRef)
+                if (pDevice) { pDevice->Release(); pDevice = NULL; }
+                m_pSessionControl2 = pSessionControl2; // ComPtr takes ownership (AddRef)
+                if (pSessionControl2) { pSessionControl2->Release(); pSessionControl2 = NULL; }
                 
-                hr = m_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&m_pAudioClient);
+                hr = m_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, reinterpret_cast<void**>(m_pAudioClient.ReleaseAndGetAddressOf()));
                 if (FAILED(hr))
                 {
                     std::wcerr << L"[AudioCapturer] Unable to activate audio client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
@@ -291,7 +291,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
                 std::wcout << L"[AudioCapturer] Buffer Frame Count: " << bufferFrameCount << std::endl;
 
-                hr = m_pAudioClient->GetService(__uuidof(IAudioCaptureClient), (void**)&m_pCaptureClient);
+                hr = m_pAudioClient->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(m_pCaptureClient.ReleaseAndGetAddressOf()));
                 if (FAILED(hr))
                 {
                     std::wcerr << L"[AudioCapturer] Unable to get capture client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
@@ -453,11 +453,7 @@ Exit:
     if (pSessionEnumerator) pSessionEnumerator->Release();
     if (pSessionManager) pSessionManager->Release();
     if (pCollection) pCollection->Release();
-    if (m_pEnumerator) m_pEnumerator->Release();
-    if (m_pDevice) m_pDevice->Release();
-    if (m_pAudioClient) m_pAudioClient->Release();
-    if (m_pCaptureClient) m_pCaptureClient->Release();
-    if (m_pSessionControl2) m_pSessionControl2->Release();
+    // ComPtr members auto-release
 
     CoUninitialize();
 }
