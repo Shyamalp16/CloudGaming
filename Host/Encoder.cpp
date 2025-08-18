@@ -11,6 +11,7 @@
 #include <libavutil/hwcontext_d3d11va.h>
 #include <d3d11.h>
 #include <wrl.h>
+#include <unordered_map>
 
 // Removed unused software conversion components
 int Encoder::currentWidth = 0;
@@ -49,6 +50,9 @@ static Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> g_vpEnumerator;
 static Microsoft::WRL::ComPtr<ID3D11VideoProcessor> g_videoProcessor;
 static int g_vpWidth = 0;
 static int g_vpHeight = 0;
+// Cached views to avoid per-frame allocations
+static std::unordered_map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView>> g_inputViewCache;
+static std::unordered_map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView>> g_outputViewCache;
 
 // Encoder runtime configuration (overridable from host config)
 static int g_startBitrateBps = 20000000; // 20 Mbps default
@@ -257,6 +261,10 @@ namespace Encoder {
 
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
+
+        // Clear caches when (re)initializing encoder
+        g_inputViewCache.clear();
+        g_outputViewCache.clear();
 
         if (codecCtx) avcodec_free_context(&codecCtx);
         if (hwFrame) av_frame_free(&hwFrame);
@@ -522,23 +530,36 @@ namespace Encoder {
         }
 
         // GPU VideoProcessor BGRA->NV12
+        // Cached input view for the source texture
         Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
-        Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
-        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc{};
-        inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-        inDesc.Texture2D.MipSlice = 0; inDesc.Texture2D.ArraySlice = 0;
-        ID3D11Device* device = (ID3D11Device*)GetD3DDevice().get();
-    if (FAILED(g_videoDevice->CreateVideoProcessorInputView(texture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf()))) {
-            std::cerr << "[Encoder][VP] CreateVideoProcessorInputView failed." << std::endl; return; }
-        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
-        outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
-        outDesc.Texture2D.MipSlice = 0;
-        // Create output view directly on FFmpeg's NV12 texture (hwFrame->data[0]) to avoid extra copy
+        auto itIn = g_inputViewCache.find(texture);
+        if (itIn != g_inputViewCache.end()) {
+            inView = itIn->second;
+        } else {
+            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc{};
+            inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+            inDesc.Texture2D.MipSlice = 0; inDesc.Texture2D.ArraySlice = 0;
+            if (FAILED(g_videoDevice->CreateVideoProcessorInputView(texture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf()))) {
+                std::cerr << "[Encoder][VP] CreateVideoProcessorInputView failed." << std::endl; return; }
+            g_inputViewCache[texture] = inView;
+        }
+
+        // Cached output view for FFmpeg's NV12 texture
         ID3D11Texture2D* ffmpegNV12 = (ID3D11Texture2D*)hwFrame->data[0];
-        if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(ffmpegNV12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) {
-            std::cerr << "[Encoder][VP] CreateVideoProcessorOutputView failed." << std::endl; return; }
+        Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
+        auto itOut = g_outputViewCache.find(ffmpegNV12);
+        if (itOut != g_outputViewCache.end()) {
+            outView = itOut->second;
+        } else {
+            D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
+            outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+            outDesc.Texture2D.MipSlice = 0;
+            if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(ffmpegNV12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) {
+                std::cerr << "[Encoder][VP] CreateVideoProcessorOutputView failed." << std::endl; return; }
+            g_outputViewCache[ffmpegNV12] = outView;
+        }
         D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
-    if (FAILED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream))) {
+        if (FAILED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream))) {
             std::cerr << "[Encoder][VP] VideoProcessorBlt failed." << std::endl; return; }
 
         // No extra copy needed; VP wrote directly into ffmpegNV12 via output view
