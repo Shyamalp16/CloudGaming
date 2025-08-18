@@ -532,6 +532,10 @@
     let netFps = 0; // decoded frames per second (from inbound-rtp)
     let bitrateKbps = 0; // computed from bytesReceived
 
+    // Rendering control
+    let renderActive = false;
+    const useVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+
     canvas.width = 1920;
     canvas.height = 1080;
 
@@ -673,18 +677,16 @@
     }
 
     function renderVideoToCanvas() {
+      if (!renderActive) return;
       if (hiddenVideoElement.videoWidth > 0 && hiddenVideoElement.videoHeight > 0) {
-        // Fill the canvas (cover). Prefer preserving the top edge (no top crop),
-        // so when vertical cropping is needed, anchor to top.
+        // Fill the canvas (cover)
         const vW = hiddenVideoElement.videoWidth;
         const vH = hiddenVideoElement.videoHeight;
         const scale = Math.max(canvas.width / vW, canvas.height / vH);
         const dW = Math.floor(vW * scale);
         const dH = Math.floor(vH * scale);
-        let dx = Math.floor((canvas.width - dW) / 2);
-        let dy = Math.floor((canvas.height - dH) / 2);
-        // Keep vertical centering; remove only actual empty bars by filling background first
-        // and covering the canvas fully. No manual top anchoring to avoid bottom cut.
+        const dx = Math.floor((canvas.width - dW) / 2);
+        const dy = Math.floor((canvas.height - dH) / 2);
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(hiddenVideoElement, 0, 0, vW, vH, dx, dy, dW, dH);
 
@@ -698,6 +700,51 @@
         }
       }
       animationId = requestAnimationFrame(renderVideoToCanvas);
+    }
+
+    function scheduleVideoFrameCallback() {
+      if (!renderActive || !('requestVideoFrameCallback' in hiddenVideoElement)) return;
+      hiddenVideoElement.requestVideoFrameCallback((_now, _metadata) => {
+        if (!renderActive) return;
+        if (hiddenVideoElement.videoWidth > 0 && hiddenVideoElement.videoHeight > 0) {
+          const vW = hiddenVideoElement.videoWidth;
+          const vH = hiddenVideoElement.videoHeight;
+          const scale = Math.max(canvas.width / vW, canvas.height / vH);
+          const dW = Math.floor(vW * scale);
+          const dH = Math.floor(vH * scale);
+          const dx = Math.floor((canvas.width - dW) / 2);
+          const dy = Math.floor((canvas.height - dH) / 2);
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(hiddenVideoElement, 0, 0, vW, vH, dx, dy, dW, dH);
+
+          frameCount++;
+          const currentTime = Date.now();
+          if (currentTime - lastFrameTime >= 1000) {
+            fps = Math.round((frameCount * 1000) / (currentTime - lastFrameTime));
+            frameCount = 0;
+            lastFrameTime = currentTime;
+            updatePerformanceDisplay();
+          }
+        }
+        if (renderActive) scheduleVideoFrameCallback();
+      });
+    }
+
+    function startRenderingLoop() {
+      renderActive = true;
+      if (useVFC) {
+        scheduleVideoFrameCallback();
+      } else {
+        animationId = requestAnimationFrame(renderVideoToCanvas);
+      }
+    }
+
+    function stopRenderingLoop() {
+      renderActive = false;
+      if (animationId) {
+        cancelAnimationFrame(animationId);
+        animationId = null;
+      }
     }
 
     function log(message, level = 'info') {
@@ -835,9 +882,7 @@
       ws.onclose = (event) => {
         log(`WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason || 'N/A'}`, 'warn');
         updateConnectionStatus('disconnected', 'Disconnected');
-        if (animationId) {
-          cancelAnimationFrame(animationId);
-        }
+        stopRenderingLoop();
         // Reset stats on disconnect
         fps = 0; netFps = 0; bitrateKbps = 0;
         updatePerformanceDisplay();
@@ -845,6 +890,20 @@
         peerConnection = null;
         dataChannel = null;
         showLoadingOverlay('Connection Lost', 'Attempting to reconnect...');
+
+        // Exponential backoff reconnect
+        let attempt = 0;
+        const maxDelay = 15000; // 15s
+        const tryReconnect = () => {
+          attempt++;
+          const delay = Math.min(1000 * Math.pow(2, attempt - 1), maxDelay);
+          log(`Reconnecting in ${Math.round(delay/1000)}s...`);
+          setTimeout(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) return;
+            connectToSignalingServer(currentRoomId);
+          }, delay);
+        };
+        tryReconnect();
       };
     }
 
@@ -878,15 +937,7 @@
             hiddenVideoElement.play().then(() => {
               logVideoState('after play() resolved');
               log('Video started playing, beginning canvas rendering...');
-              if (animationId) cancelAnimationFrame(animationId);
-              // Fit canvas to viewport for correct fullscreen scaling
-              const vp = document.getElementById('streamViewport');
-              const rect = vp.getBoundingClientRect();
-              canvas.width = Math.max(1, Math.floor(rect.width));
-              canvas.height = Math.max(1, Math.floor(rect.height));
-              // Enable immersive layout (remove header/top offset and borders)
-              document.body.classList.add('immersive');
-              animationId = requestAnimationFrame(renderVideoToCanvas);
+              startRenderingLoop();
               hideLoadingOverlay();
               updateConnectionStatus('connected', 'Streaming');
             }).catch(e => {
@@ -961,10 +1012,10 @@
           updateConnectionStatus('connected', 'ICE Connected');
         } else if (peerConnection.iceConnectionState === 'disconnected') {
           updateConnectionStatus('disconnected', 'ICE Disconnected');
-          if (animationId) cancelAnimationFrame(animationId);
+          stopRenderingLoop();
           fps = 0; netFps = 0; bitrateKbps = 0; updatePerformanceDisplay();
         } else if (peerConnection.iceConnectionState === 'failed' || peerConnection.iceConnectionState === 'closed') {
-          if (animationId) cancelAnimationFrame(animationId);
+          stopRenderingLoop();
           fps = 0; netFps = 0; bitrateKbps = 0; updatePerformanceDisplay();
         }
       };
@@ -975,7 +1026,7 @@
       peerConnection.onconnectionstatechange = () => {
         log('PeerConnection state changed to: ' + peerConnection.connectionState);
         if (['disconnected','failed','closed'].includes(peerConnection.connectionState)) {
-          if (animationId) cancelAnimationFrame(animationId);
+          stopRenderingLoop();
           fps = 0; netFps = 0; bitrateKbps = 0; updatePerformanceDisplay();
         }
       };

@@ -5,6 +5,7 @@
 #include <wincodec.h>
 #include <string>
 #include <filesystem>
+#include <windows.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.DirectX.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
@@ -38,9 +39,13 @@ struct FrameComparator {
 };
 
 std::priority_queue<FrameData, std::vector<FrameData>, FrameComparator> framePriorityQueue;
+static constexpr size_t kMaxQueuedFrames = 4;
 std::atomic<int> frameSequenceCounter{ 0 }; 
 std::mutex queueMutex;
 std::condition_variable queueCV;
+
+static std::atomic<int> g_targetFps{120};
+void SetCaptureTargetFps(int fps) { if (fps > 0) g_targetFps.store(fps); }
 
 winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface)
@@ -123,6 +128,11 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                 } catch (...) {}
                 {
                     std::lock_guard<std::mutex> lock(queueMutex);
+                    // If the queue is too deep, drop the oldest by replacing top when full
+                    if (framePriorityQueue.size() >= kMaxQueuedFrames) {
+                        // Drop one pending frame to keep latency low
+                        framePriorityQueue.pop();
+                    }
                     framePriorityQueue.push({ sequenceNumber, surface, timestamp });
                 }
                 queueCV.notify_one();
@@ -138,6 +148,11 @@ void ProcessFrames() {
     auto device = GetD3DDevice();
     winrt::com_ptr<ID3D11DeviceContext> context;
     device->GetImmediateContext(context.put());
+
+    // Raise thread priority and enable MMCSS for smoother encoding path
+    HANDLE hThread = GetCurrentThread();
+    SetThreadPriority(hThread, THREAD_PRIORITY_HIGHEST);
+    // Optional: AvSetMmThreadCharacteristics requires linking Avrt.lib; omit if unavailable
 
     // Initialize encoder on first real frame with actual capture size
     static int lastInitW = 0;
@@ -176,7 +191,7 @@ void ProcessFrames() {
             int encW = static_cast<int>(desc.Width & ~1U);
             int encH = static_cast<int>(desc.Height & ~1U);
             if (encW != lastInitW || encH != lastInitH) {
-                Encoder::InitializeEncoder("output.mp4", encW, encH, 120);
+                Encoder::InitializeEncoder("output.mp4", encW, encH, g_targetFps.load());
                 lastInitW = encW;
                 lastInitH = encH;
             }
@@ -213,7 +228,8 @@ void StartCapture() {
     isCapturing.store(true);
     frameSequenceCounter.store(0);
 
-    int numThreads = std::thread::hardware_concurrency();
+    // Use a single processing thread to avoid contention in the encoder
+    int numThreads = 1;
     for (int i = 0; i < numThreads; i++) {
         workerThreads.emplace_back(ProcessFrames);
     }

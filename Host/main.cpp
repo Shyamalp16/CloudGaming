@@ -14,23 +14,6 @@
 #include "Websocket.h"
 #include "AudioCapturer.h"
 #include "ShutdownManager.h"
-
-#include "IdGenerator.h"
-
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Graphics.Capture.h>
-#include <iostream>
-#include <conio.h>
-#include <fstream>
-#include <nlohmann/json.hpp>
-
-#include "D3DHelpers.h"
-#include "WindowHelpers.h"
-#include "CaptureHelpers.h"
-#include "FrameCaptureThread.h"
-#include "Websocket.h"
-#include "AudioCapturer.h"
-#include "ShutdownManager.h"
 #include "IdGenerator.h"
 #include "pion_webrtc.h" 
 #include "Encoder.h"
@@ -39,15 +22,18 @@
 extern "C" void OnPLI();
 
 // RTCP Callback Function
+// min/max bitrate are updated from config in main()
+static int g_cfgMinBitrate = 10000000; // 10 Mbps
+static int g_cfgMaxBitrate = 50000000; // 50 Mbps
 void onRTCP(double packetLoss, double rtt, double jitter) {
     std::wcout << L"[main] RTCP Stats - Packet Loss: " << packetLoss 
                << L", RTT: " << rtt 
                << L", Jitter: " << jitter << std::endl;
 
     // Adaptive bitrate controller (AIMD) with cooldown
-    static int currentBitrate = 25000000;           // start at 30 Mbps
-    static const int minBitrate = 10000000;         // 10 Mbps
-    static const int maxBitrate = 50000000;         // 50 Mbps
+    static int currentBitrate = 25000000;           // start ~25 Mbps; overridden by encoder config
+    static int minBitrate = g_cfgMinBitrate;
+    static int maxBitrate = g_cfgMaxBitrate;
     static int cleanSamples = 0;                    // consecutive good reports
     static auto lastChange = std::chrono::steady_clock::now();
 
@@ -178,9 +164,18 @@ int main()
     if (GetClientAreaSize(hwnd, cW, cH)) {
         std::wcout << L"[main] Initial client area: " << cW << L"x" << cH << std::endl;
     }
-    // If requested resolution is 1920x1080 and client is smaller, resize client area
+    // If requested resolution from config and client is smaller, resize client area
     int targetW = 1920, targetH = 1080;
-    if (cW < targetW || cH < targetH) {
+    bool resizeClient = true;
+    try {
+        if (config.contains("host") && config["host"].contains("window")) {
+            auto wcfg = config["host"]["window"];
+            if (wcfg.contains("targetWidth")) targetW = wcfg["targetWidth"].get<int>();
+            if (wcfg.contains("targetHeight")) targetH = wcfg["targetHeight"].get<int>();
+            if (wcfg.contains("resizeClientArea")) resizeClient = wcfg["resizeClientArea"].get<bool>();
+        }
+    } catch (...) {}
+    if (resizeClient && (cW < targetW || cH < targetH)) {
         if (SetWindowClientAreaSize(hwnd, targetW, targetH)) {
             std::wcout << L"[main] Resized window client area to " << targetW << L"x" << targetH << std::endl;
             // Re-read client rect
@@ -217,6 +212,22 @@ int main()
     auto token = FrameArrivedEventRegistration(framePool);
 
     session.StartCapture();
+    // Configure encoder defaults from config
+    try {
+        if (config.contains("host") && config["host"].contains("video")) {
+            auto vcfg = config["host"]["video"];
+            int fps = vcfg.value("fps", 120);
+            int brStart = vcfg.value("bitrateStart", 20000000);
+            int brMin = vcfg.value("bitrateMin", 10000000);
+            int brMax = vcfg.value("bitrateMax", 50000000);
+            Encoder::SetBitrateConfig(brStart, brMin, brMax);
+            // update RTCP controller bounds
+            g_cfgMinBitrate = brMin;
+            g_cfgMaxBitrate = brMax;
+            // propagate fps to capture/encoder initialization
+            SetCaptureTargetFps(fps);
+        }
+    } catch (...) {}
     StartCapture();
     initWebsocket(roomId);
     AudioCapturer audioCapturer;
@@ -240,7 +251,6 @@ int main()
     try { closePeerConnection(); } catch (...) {}
     stopWebsocket();
     session.Close();
-    framePool.Close();
     // Encoder is finalized inside StopCapture(); avoid flushing/finalizing after free
     closeGo(); 
 

@@ -41,3 +41,6 @@ void StartCapture();
 void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& framePool);
 void PreProcessFrameConversion(winrt::com_ptr<ID3D11Device> device, winrt::com_ptr<ID3D11Texture2D> texture, int sequenceNumber);
 void ProcessFrames();
+
+// Configure capture/encoder target FPS used when initializing the encoder
+void SetCaptureTargetFps(int fps);

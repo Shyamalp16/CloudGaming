@@ -34,6 +34,9 @@ namespace Encoder {
     void AdjustBitrate(int new_bitrate);
     void RequestIDR();
 
+    // Configure encoder bitrate defaults (used on InitializeEncoder)
+    void SetBitrateConfig(int start_bitrate_bps, int min_bitrate_bps, int max_bitrate_bps);
+
     extern "C" int sendVideoSample(uint8_t* data, int size, int64_t durationUs);
 
     extern int currentWidth;

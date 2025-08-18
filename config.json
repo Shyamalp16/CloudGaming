@@ -3,6 +3,17 @@
     "serverUrlBase": "ws://localhost:3002"
   },
   "host": {
-    "targetProcessName": "cs2.exe"
+    "targetProcessName": "chrome.exe",
+    "window": {
+      "resizeClientArea": true,
+      "targetWidth": 1920,
+      "targetHeight": 1080
+    },
+    "video": {
+      "fps": 120,
+      "bitrateStart": 20000000,
+      "bitrateMin": 10000000,
+      "bitrateMax": 50000000
+    }
   }
 }

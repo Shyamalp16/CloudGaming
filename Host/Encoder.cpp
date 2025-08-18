@@ -50,6 +50,11 @@ static Microsoft::WRL::ComPtr<ID3D11VideoProcessor> g_videoProcessor;
 static int g_vpWidth = 0;
 static int g_vpHeight = 0;
 
+// Encoder runtime configuration (overridable from host config)
+static int g_startBitrateBps = 20000000; // 20 Mbps default
+static int g_minBitrateBps = 10000000;   // 10 Mbps default
+static int g_maxBitrateBps = 50000000;   // 50 Mbps default
+
 static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height)
 {
     g_videoDevice.Reset();
@@ -91,6 +96,11 @@ static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height
 }
 
 namespace Encoder {
+    void SetBitrateConfig(int start_bps, int min_bps, int max_bps) {
+        if (start_bps > 0) g_startBitrateBps = start_bps;
+        if (min_bps > 0) g_minBitrateBps = min_bps;
+        if (max_bps > 0) g_maxBitrateBps = max_bps;
+    }
     extern "C" void OnPLI() {
         RequestIDR();
     }
@@ -253,13 +263,13 @@ namespace Encoder {
         codecCtx->framerate = { fps, 1 };
         codecCtx->gop_size = fps * 1; // IDR every ~1 second for fast recovery
         codecCtx->max_b_frames = 0; // low-latency
-        codecCtx->bit_rate = 20000000; // Start ~20 Mbps
+        codecCtx->bit_rate = g_startBitrateBps; // configurable start bitrate
         // Initialize VBV to track target bitrate and avoid pulsing
         codecCtx->rc_max_rate = codecCtx->bit_rate;
         codecCtx->rc_buffer_size = codecCtx->bit_rate * 2;
 
-        // Signal SDR BT.709 limited range to avoid washed/incorrect colors
-        codecCtx->color_range     = AVCOL_RANGE_MPEG;   // limited (broadcast range)
+        // Signal SDR BT.709 full range for desktop capture; match encoder opts below
+        codecCtx->color_range     = AVCOL_RANGE_JPEG;   // full (PC range)
         codecCtx->color_primaries = AVCOL_PRI_BT709;
         codecCtx->color_trc       = AVCOL_TRC_BT709;
         codecCtx->colorspace      = AVCOL_SPC_BT709;
