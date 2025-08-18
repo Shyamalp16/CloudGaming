@@ -137,23 +137,54 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
                       << ", host receive time: " << host_receive_time_ms << std::endl;
         }
         else if (type == "keydown" || type == "keyup" || type == "mousemove" || type == "mousedown" || type == "mouseup") {
-            // Handle input events with timestamps
-            long long client_send_time = message["client_send_time"].get<long long>();
+            // Validate and rate-limit input events
+            static auto lastInputLog = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            auto msSince = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastInputLog).count();
+
+            // Validate timestamp
+            long long client_send_time = 0;
+            if (message.contains("client_send_time") && message["client_send_time"].is_number()) {
+                client_send_time = message["client_send_time"].get<long long>();
+            }
             auto host_receive_time_point = std::chrono::high_resolution_clock::now();
             long long host_receive_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(host_receive_time_point.time_since_epoch()).count();
 
-            long long one_way_latency = host_receive_time_ms - client_send_time;
+            long long one_way_latency = client_send_time > 0 ? (host_receive_time_ms - client_send_time) : -1;
 
-            std::cout << "[Host] Received " << type << " event."
-                      << " Client send time: " << client_send_time
-                      << ", Host receive time: " << host_receive_time_ms
-                      << ", One-way latency: " << one_way_latency << " ms" << std::endl;
+            if (msSince >= 200) { // log at most every 200ms to avoid spam
+                std::cout << "[Host] Received " << type << " event."
+                          << " Client send time: " << client_send_time
+                          << ", Host receive time: " << host_receive_time_ms
+                          << ", One-way latency: " << one_way_latency << " ms" << std::endl;
+                lastInputLog = now;
+            }
 
-            // Continue with your existing input handling logic
-            // For keyboard events, you might call your KeyInputHandler
-            // For mouse events, you might call your MouseInputHandler
-            // Note: The actual handling of key/mouse events (e.g., calling handleKeyInput, handleMouseInput)
-            // is outside the scope of this latency measurement task, but this is where you'd integrate it.
+            // Basic field validation for mouse events
+            if (type == "mousemove" || type == "mousedown" || type == "mouseup") {
+                if (!message.contains("x") || !message["x"].is_number_integer() ||
+                    !message.contains("y") || !message["y"].is_number_integer()) {
+                    std::cerr << "[WebSocket] Invalid mouse event payload: missing or bad x/y" << std::endl;
+                    return;
+                }
+                int x = message["x"].get<int>();
+                int y = message["y"].get<int>();
+                if (x < 0 || y < 0 || x > 8192 || y > 8192) { // simple sanity clamp
+                    std::cerr << "[WebSocket] Mouse coordinates out of expected range" << std::endl;
+                    return;
+                }
+                if ((type == "mousedown" || type == "mouseup")) {
+                    if (!message.contains("button") || !message["button"].is_number_integer()) {
+                        std::cerr << "[WebSocket] Invalid mouse click payload: missing button" << std::endl;
+                        return;
+                    }
+                    int button = message["button"].get<int>();
+                    if (button < 0 || button > 2) {
+                        std::cerr << "[WebSocket] Mouse button out of range" << std::endl;
+                        return;
+                    }
+                }
+            }
         }
         else if (type == "peer-disconnected") {
             std::cout << "[WebSocket] Peer has disconnected. Keeping host alive and closing PeerConnection only." << std::endl;

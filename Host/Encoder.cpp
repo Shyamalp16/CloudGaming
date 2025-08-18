@@ -63,6 +63,8 @@ static int g_increaseIntervalMs = 1000;      // ms
 static int g_currentBitrate = 25000000;      // start ~25 Mbps
 static int g_cleanSamples = 0;
 static std::chrono::steady_clock::time_point g_lastChange = std::chrono::steady_clock::now();
+static std::atomic<bool> g_pendingReopen{false};
+static std::atomic<int> g_reopenTargetBitrate{0};
 
 static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height)
 {
@@ -464,6 +466,22 @@ namespace Encoder {
 
     void EncodeFrame(ID3D11Texture2D* texture, ID3D11DeviceContext* context, int width, int height, int64_t pts) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
+        // If a bitrate reopen was requested and we have a valid context, perform it now
+        if (g_pendingReopen.load() && codecCtx) {
+            int fpsNum = codecCtx->framerate.num > 0 ? codecCtx->framerate.num : 60;
+            int fpsDen = codecCtx->framerate.den > 0 ? codecCtx->framerate.den : 1;
+            int fps = fpsDen != 0 ? fpsNum / fpsDen : 60;
+            if (fps <= 0) fps = 60;
+            int target = g_reopenTargetBitrate.load();
+            std::wcout << L"[Encoder] Reopening encoder to apply bitrate=" << target << L" bps" << std::endl;
+            FlushEncoder();
+            FinalizeEncoder();
+            InitializeEncoder("output.mp4", currentWidth, currentHeight, fps);
+            if (target > 0) {
+                AdjustBitrate(target);
+            }
+            g_pendingReopen.store(false);
+        }
         if (!codecCtx || !hwFrame || !g_videoProcessor) {
             std::cerr << "[Encoder] Encoder/VideoProcessor not initialized." << std::endl;
             return;
@@ -643,9 +661,14 @@ namespace Encoder {
             codecCtx->rc_buffer_size = new_bitrate * 2;
             // Apply encoder-specific runtime controls
             if (codecCtx->priv_data) {
-                av_opt_set_int(codecCtx->priv_data, "bitrate", new_bitrate, 0);
-                av_opt_set_int(codecCtx->priv_data, "maxrate", new_bitrate, 0);
-                av_opt_set_int(codecCtx->priv_data, "bufsize", new_bitrate * 2, 0);
+                int r1 = av_opt_set_int(codecCtx->priv_data, "bitrate", new_bitrate, 0);
+                int r2 = av_opt_set_int(codecCtx->priv_data, "maxrate", new_bitrate, 0);
+                int r3 = av_opt_set_int(codecCtx->priv_data, "bufsize", new_bitrate * 2, 0);
+                if (r1 < 0 || r2 < 0 || r3 < 0) {
+                    std::wcout << L"[Encoder] Runtime bitrate update not fully supported by this codec. Scheduling reopen...\n";
+                    g_pendingReopen.store(true);
+                    g_reopenTargetBitrate.store(new_bitrate);
+                }
             }
             // Force an IDR soon so downstream adapts to new rate quickly
             av_opt_set(codecCtx->priv_data, "force_key_frames", "expr:gte(t,n_forced*1)", 0);
