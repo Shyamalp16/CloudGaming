@@ -66,6 +66,9 @@ var (
 	connectionState       webrtc.PeerConnectionState
 	videoPayloadType      uint8 = 96
 	audioPayloadType      uint8 = 111
+	// Cache latest RTT (ms) from ping/pong to combine with RTCP loss/jitter
+	lastRttMutex sync.Mutex
+	lastRttMs    float64
 )
 
 func init() {
@@ -698,6 +701,9 @@ func createPeerConnectionGo() C.int {
 										rttNano := hostReceiveTime - hostSendTime
 										rttMilli := float64(rttNano) / float64(time.Millisecond)
 										log.Printf("[Go/Pion] [PONG] RTT for frame %d: %.2f ms", frameID, rttMilli)
+										lastRttMutex.Lock()
+										lastRttMs = rttMilli
+										lastRttMutex.Unlock()
 
 										// Send RTT update back to the client
 										rttUpdateMsg := map[string]interface{}{
@@ -765,9 +771,9 @@ func createPeerConnectionGo() C.int {
 		"[Go/Pion] createPeerConnectionGo: OnDataChannel handler has been set up on the PeerConnection.",
 	)
 
-	// Create video track (Sample based)
+	// Create video track (Sample based) with unified profile-level-id (42e033)
 	videoTrack, err = webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"},
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033"},
 		"video",
 		"game-stream",
 	)
@@ -949,6 +955,11 @@ func getAnswerSDP() *C.char {
 		return nil
 	}
 	return C.CString(lastAnswerSDP)
+}
+
+//export freeCString
+func freeCString(p *C.char) {
+	C.free(unsafe.Pointer(p))
 }
 
 //export handleRemoteIceCandidate
@@ -1175,7 +1186,10 @@ func (r *rtcpReaderInterceptor) BindRTCPReader(reader interceptor.RTCPReader) in
 					if rtcpCallback != nil {
 						packetLoss := float64(report.FractionLost) / 256.0
 						jitterSeconds := float64(report.Jitter) / 90000.0
-						C.callRTCPCallback(rtcpCallback, C.double(packetLoss), C.double(0), C.double(jitterSeconds))
+						lastRttMutex.Lock()
+						rttMs := lastRttMs
+						lastRttMutex.Unlock()
+						C.callRTCPCallback(rtcpCallback, C.double(packetLoss), C.double(rttMs), C.double(jitterSeconds))
 					}
 				}
 			case *rtcp.PictureLossIndication:

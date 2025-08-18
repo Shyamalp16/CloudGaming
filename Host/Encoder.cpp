@@ -388,7 +388,7 @@ namespace Encoder {
             av_dict_set(&opts, "preset", "p7", 0);
             av_dict_set(&opts, "rc", "cbr", 0);
             av_dict_set(&opts, "repeat-headers", "1", 0);
-            av_dict_set(&opts, "profile", "main", 0); // use Main profile
+            av_dict_set(&opts, "profile", "baseline", 0); // match Baseline (42e033) in SDP
             av_dict_set(&opts, "rc-lookahead", "0", 0);
             av_dict_set(&opts, "bf", "0", 0);
             // Spatial AQ for detail preservation
@@ -414,6 +414,7 @@ namespace Encoder {
             av_dict_set(&opts, "transfer",  "bt709", 0);
             av_dict_set(&opts, "colormatrix","bt709", 0);
             av_dict_set(&opts, "fullrange", "1", 0); // full range
+            av_dict_set(&opts, "profile", "baseline", 0); // match SDP baseline
             av_dict_set(&opts, "level", "5.1", 0);
         }
         else if (encoderName == "h264_qsv") {

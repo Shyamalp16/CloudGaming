@@ -33,6 +33,7 @@ extern "C" {
      * @return A C-string containing the SDP answer, or NULL if not available. Caller must free the string.
      */
     char* getAnswerSDP();
+    void freeCString(char* p);
 
     /**
      * @brief Adds a remote ICE candidate to the PeerConnection.

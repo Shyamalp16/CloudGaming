@@ -75,7 +75,7 @@ void sendAnswer() {
     answerMsg["sdp"] = std::string(sdp);
     send_message(answerMsg);
     std::cout << "[WebSocket] Answer sent with SDP: " << answerMsg.dump() << "\n";
-    //free(sdp); // Free C string allocated by Go // UNCOMMENTING THIS WILL CRASH AT EVERY RUN 
+    freeCString(sdp); // Free C string allocated by Go via exported helper
 }
 
 void handleOffer(const std::string& offer) {
