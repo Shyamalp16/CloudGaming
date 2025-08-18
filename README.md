@@ -44,7 +44,7 @@ flowchart LR
   CLI["Client (Browser)"]
   HOST["Host (C++)"]
 
-  CLI <--> |"wss://...&token=ROOM_SECRET\n(reconnect backoff on close)"| LB
+  CLI <--> |"wss://...\n(reconnect backoff on close)"| LB
   LB <--> S1
   LB <--> S2
   S1 <--> R
@@ -54,7 +54,7 @@ flowchart LR
 ```
 
 1.  **Host (C++)**: A native Windows application that captures the screen (Windows Graphics Capture), audio (WASAPI), and encodes them into a video stream. It also receives and simulates keyboard/mouse input from the client.
-2.  **Signaling Server (Node.js)**: A lightweight server that acts as a matchmaker. It introduces the Host and Client to each other so they can negotiate a direct WebRTC connection. It does not handle any video or audio data itself.
+2.  **Signaling Server (Node.js)**: A lightweight matchmaker for WebRTC offer/answer and ICE exchange. Supports single-node or scalable, stateless mode via `ScalableSignalingServer.js` with Redis Pub/Sub. It never carries media; only signaling JSON over WS/WSS.
 3.  **Client (HTML/JS)**: A web-based application that connects to the Host, receives the video/audio stream, and sends user input back.
 
 ---
