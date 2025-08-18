@@ -190,6 +190,17 @@ int main()
             if (ccfg.contains("maxQueueDepth")) {
                 SetMaxQueuedFrames(std::max(1, ccfg["maxQueueDepth"].get<int>()));
             }
+            if (ccfg.contains("dropWindowMs") || ccfg.contains("dropMinEvents")) {
+                int w = ccfg.value("dropWindowMs", 200);
+                int m = ccfg.value("dropMinEvents", 2);
+                SetBackpressureDropPolicy(w, m);
+            }
+            if (ccfg.contains("mmcss")) {
+                auto mcfg = ccfg["mmcss"];
+                bool enable = mcfg.value("enable", true);
+                int prio = mcfg.value("priority", 2); // 0..3
+                SetMmcssConfig(enable, prio);
+            }
         }
     } catch (...) {}
     StartCapture();

@@ -55,6 +55,24 @@ void SetMaxQueuedFrames(int maxDepth) {
     g_maxQueuedFrames = static_cast<size_t>(maxDepth);
 }
 
+// Backpressure drop policy defaults
+static std::atomic<int> g_dropWindowMs{200};
+static std::atomic<int> g_dropMinEvents{2};
+void SetBackpressureDropPolicy(int windowMs, int minEvents) {
+    if (windowMs < 1) windowMs = 1;
+    if (minEvents < 1) minEvents = 1;
+    g_dropWindowMs.store(windowMs);
+    g_dropMinEvents.store(minEvents);
+}
+
+// MMCSS config
+static std::atomic<bool> g_enableMmcss{true};
+static std::atomic<int>  g_mmcssPriority{2}; // 2 ~ HIGH
+void SetMmcssConfig(bool enable, int priority) {
+    g_enableMmcss.store(enable);
+    g_mmcssPriority.store(std::clamp(priority, 0, 3));
+}
+
 // Texture pool for copy surfaces (per resolution)
 static std::vector<winrt::com_ptr<ID3D11Texture2D>> g_copyPool;
 static std::vector<bool> g_poolInUse;
@@ -241,23 +259,23 @@ void ProcessFrames() {
     winrt::com_ptr<ID3D11DeviceContext> context;
     device->GetImmediateContext(context.put());
 
-    // Raise thread priority and register with MMCSS (Games profile) dynamically
+    // Raise thread priority and optionally register with MMCSS (Games profile)
     HANDLE hThread = GetCurrentThread();
     SetThreadPriority(hThread, THREAD_PRIORITY_HIGHEST);
-    HMODULE hAvrt = LoadLibraryW(L"Avrt.dll");
-    HANDLE hTask = nullptr;
-    DWORD taskIndex = 0;
-    if (hAvrt) {
-        using PFN_AvSetMmThreadCharacteristicsW = HANDLE (WINAPI *)(LPCWSTR, LPDWORD);
-        using PFN_AvSetMmThreadPriority = BOOL (WINAPI *)(HANDLE, int);
-        using PFN_AvRevertMmThreadCharacteristics = BOOL (WINAPI *)(HANDLE);
-        auto pSetChars = reinterpret_cast<PFN_AvSetMmThreadCharacteristicsW>(GetProcAddress(hAvrt, "AvSetMmThreadCharacteristicsW"));
-        auto pSetPrio  = reinterpret_cast<PFN_AvSetMmThreadPriority>(GetProcAddress(hAvrt, "AvSetMmThreadPriority"));
-        if (pSetChars) {
-            hTask = pSetChars(L"Games", &taskIndex);
-            if (hTask && pSetPrio) {
-                // 2 corresponds to AVRT_PRIORITY_HIGH without needing headers
-                pSetPrio(hTask, 2);
+    HMODULE hAvrt = nullptr; HANDLE hTask = nullptr; DWORD taskIndex = 0;
+    if (g_enableMmcss.load()) {
+        hAvrt = LoadLibraryW(L"Avrt.dll");
+        if (hAvrt) {
+            using PFN_AvSetMmThreadCharacteristicsW = HANDLE (WINAPI *)(LPCWSTR, LPDWORD);
+            using PFN_AvSetMmThreadPriority = BOOL (WINAPI *)(HANDLE, int);
+            auto pSetChars = reinterpret_cast<PFN_AvSetMmThreadCharacteristicsW>(GetProcAddress(hAvrt, "AvSetMmThreadCharacteristicsW"));
+            auto pSetPrio  = reinterpret_cast<PFN_AvSetMmThreadPriority>(GetProcAddress(hAvrt, "AvSetMmThreadPriority"));
+            if (pSetChars) {
+                hTask = pSetChars(L"Games", &taskIndex);
+                if (hTask && pSetPrio) {
+                    int prio = std::clamp(g_mmcssPriority.load(), 0, 3); // 0..3
+                    pSetPrio(hTask, prio);
+                }
             }
         }
     }
@@ -339,16 +357,16 @@ void ProcessFrames() {
                     copyDesc.Width &= ~1U;
                     copyDesc.Height &= ~1U;
                     context->CopyResource(copyTex.get(), texture.get());
-                    if (!Encoder::IsBacklogged(200, 2)) {
+                    if (!Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load())) {
                         Encoder::EncodeFrame(copyTex.get(), context.get(), copyDesc.Width, copyDesc.Height, frameData.timestamp);
                     } // else drop frame to reduce latency
                 } else {
-                    if (!Encoder::IsBacklogged(200, 2)) {
+                    if (!Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load())) {
                         Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
                     }
                 }
             } else {
-                if (!Encoder::IsBacklogged(200, 2)) {
+                if (!Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load())) {
                     Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
                 }
             }

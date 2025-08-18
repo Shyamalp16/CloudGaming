@@ -46,3 +46,9 @@ void SetCaptureTargetFps(int fps);
 
 // Configure maximum queued frames for capture backpressure
 void SetMaxQueuedFrames(int maxDepth);
+
+// Configure encoder backpressure drop policy (window in ms, minimum EAGAIN events)
+void SetBackpressureDropPolicy(int windowMs, int minEvents);
+
+// Configure MMCSS usage and priority (0=LOW,1=NORMAL,2=HIGH,3=CRITICAL)
+void SetMmcssConfig(bool enable, int priority);
