@@ -3,7 +3,7 @@
     "serverUrlBase": "ws://localhost:3002"
   },
   "host": {
-    "targetProcessName": "vlc.exe",
+    "targetProcessName": "cs2.exe",
     "window": {
       "resizeClientArea": true,
       "targetWidth": 1920,
@@ -11,9 +11,9 @@
     },
     "video": {
       "fps": 144,
-      "bitrateStart": 20000000,
-      "bitrateMin": 10000000,
-      "bitrateMax": 50000000
+      "bitrateStart": 45000000,
+      "bitrateMin": 30000000,
+      "bitrateMax": 60000000
     },
     "capture": {
       "maxQueueDepth": 4,
