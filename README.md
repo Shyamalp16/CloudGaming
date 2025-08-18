@@ -6,21 +6,54 @@ This project is a high-performance, peer-to-peer (P2P) solution for cloud gaming
 
 The system is composed of three main components that work together to establish a streaming session:
 
-```
-+-------------+      (1) WebSocket      +-----------------+      (2) WebSocket      +--------+
-|             | <---------------------> |                 | <---------------------> |        |
-|   Client    |      Signaling (JSON)   | Signaling Server|      Signaling (JSON)   |  Host  |
-| (Browser)   |                         |    (Node.js)    |                         |  (C++) |
-|             | <-----------------------------------------------------------------> |        |
-+-------------+                         +-----------------+                         +--------+
-      ^                                                                                 ^
-      |                                                                                 |
-      | (3) WebRTC P2P Connection (Video, Audio, Input Data Channels)                   |
-      +---------------------------------------------------------------------------------+
+```mermaid
+flowchart LR
+  subgraph HOST["Host (C++)"]
+    CAP["Capture (WGC + D3D11)"]
+    ENC["Encoder (FFmpeg H.264)"]
+    subgraph PION["Go/Pion (WebRTC)"]
+    end
+  end
 
+  CLI["Client (Browser)"]
+  SIG["Signaling (WS/WSS)"]
+
+  %% Signaling control path
+  CLI <--> |"WS/WSS (JSON signaling)\n(reconnect backoff on close)"| SIG
+  SIG <--> HOST
+
+  %% Media/Control/Feedback split
+  CLI ==>|"SRTP Video/Audio"| HOST
+  CLI <--> |"DataChannels: Input (→), Ping/Pong (↔)"| HOST
+  CLI --> |"RTCP Receiver Reports (loss/jitter)"| HOST
+
+  %% Internal flow (visual grouping only)
+  CAP --> ENC
+  PION -. signaling/ICE/media .- ENC
 ```
 
-1.  **Host (C++)**: A native Windows application that captures the screen, audio, and encodes them into a video stream. It also receives and simulates keyboard/mouse input from the client.
+Optional scalable signaling topology:
+
+```mermaid
+flowchart LR
+  subgraph LB["Reverse Proxy / LB (WSS)"]
+    S1["Signaling A"]
+    S2["Signaling B"]
+  end
+  R[(Redis Pub/Sub)]
+  CLI["Client (Browser)"]
+  HOST["Host (C++)"]
+
+  CLI <--> |"wss://...&token=ROOM_SECRET\n(reconnect backoff on close)"| LB
+  LB <--> S1
+  LB <--> S2
+  S1 <--> R
+  S2 <--> R
+  S1 <--> HOST
+  S2 <--> HOST
+```
+
+1.  **Host (C++)**: A native Windows application that captures the screen (Windows Graphics Capture), audio (WASAPI), and encodes them into a video stream. It also receives and simulates keyboard/mouse input from the client.
 2.  **Signaling Server (Node.js)**: A lightweight server that acts as a matchmaker. It introduces the Host and Client to each other so they can negotiate a direct WebRTC connection. It does not handle any video or audio data itself.
 3.  **Client (HTML/JS)**: A web-based application that connects to the Host, receives the video/audio stream, and sends user input back.
 
@@ -30,7 +63,7 @@ The system is composed of three main components that work together to establish 
 
 | Module | Language(s) | Key Libraries & Frameworks | Purpose |
 | :--- | :--- | :--- | :--- |
-| **Host** | C++ | **FFmpeg** (Encoding), **Pion WebRTC** (Go), **WinRT/C++**, **DirectX 11 (DXGI)** | Screen/audio capture, H.264 encoding, WebRTC session management. |
+| **Host** | C++ | **FFmpeg** (H.264), **Pion WebRTC** (Go), **WinRT/C++ (WGC)**, **Direct3D 11** | Screen/audio capture, H.264 encoding, WebRTC session management. |
 | **Server** | JavaScript | **Node.js**, **ws** (WebSocket library), **Redis** | Signaling, matchmaking, and ICE candidate exchange. |
 | **Client** | JavaScript | **HTML5**, WebRTC API | Renders video, captures user input, and manages the WebRTC connection. |
 
@@ -43,12 +76,13 @@ The system is composed of three main components that work together to establish 
 The Host is the core of the streaming solution. It runs on the machine with the game or application to be streamed.
 
 **Key Components:**
-*   **`main.cpp`**: Entry point of the application. Initializes all components and reads settings from `config.json`.
-*   **Capture (`FrameCaptureThread.cpp`, `AudioCapturer.cpp`)**: Uses the **DXGI Desktop Duplication API** for high-performance, low-latency screen capture and standard Windows APIs for audio capture. DXGI is chosen for its raw performance in full-screen scenarios.
-*   **Encoding (`Encoder.cpp`)**: Takes raw captured GPU frames (ID3D11Texture2D) and uses the FFmpeg library (`libavcodec`) to encode them into the efficient **H.264** video format. It dynamically selects the best available hardware encoder (NVIDIA's NVENC, AMD's AMF, or Intel's QSV) and performs GPU-accelerated color space conversion (BGRA to NV12).
-*   **WebRTC (`gortc_main/main.go`)**: A Go module, compiled into a C-shared library, that handles all the complexities of the WebRTC protocol using the excellent **Pion** library. It manages the peer connection, data channels, and ICE negotiation. C++ communicates with this Go layer via CGO, using the functions defined in `pion_webrtc.h`.
-*   **Input Handling (`KeyInputHandler`, `MouseInputHandler`)**: Receives keyboard and mouse events from the Client via WebRTC data channels and simulates them locally on the Host machine using `SendInput`.
-*   **Signaling (`Websocket.cpp`)**: Connects to the Node.js Signaling Server to announce its availability and negotiate with a client.
+*   **`main.cpp`**: Entry point. Initializes D3D11, WGC capture, audio, encoder, and signaling. Loads `config.json`.
+*   **Capture (`CaptureHelpers.cpp`)**: Uses **Windows Graphics Capture (WGC)** with a free-threaded frame pool. Frames are copied into a fixed **texture pool** (ID3D11Texture2D) to avoid per-frame allocations.
+*   **Encoding (`Encoder.cpp`)**: Encodes frames with FFmpeg H.264 using the best available hardware (NVENC/QSV/AMF) and **GPU VideoProcessor** for BGRA→NV12. Caches **ID3D11VideoProcessorInput/OutputView** objects to avoid per-frame D3D allocations. Adaptive bitrate control is handled here.
+*   **Audio (`AudioCapturer.cpp`)**: Uses **WASAPI** **event-driven** capture (with fallback) and **IAudioClock** for precise timestamps. Reuses persistent float buffers to minimize heap churn. Opus encoding and send to WebRTC.
+*   **WebRTC (`gortc_main/main.go`)**: Pion-based module (Go, C-shared) for PeerConnection, data channels, and ICE. Provides RTT via video ping/pong and intercepts RTCP Receiver Reports.
+*   **Input Handling (`KeyInputHandler`, `MouseInputHandler`)**: Receives events via data channels and simulates locally using `SendInput`.
+*   **Signaling (`Websocket.cpp`)**: Connects to the Node server; validates inbound input messages, enforces rate limits, and sends/receives SDP/ICE.
 
 ### 2. Signaling Server (`/Server`)
 
@@ -87,7 +121,7 @@ The Client is a simple web page that allows a user to connect to a Host and star
 6.  The **Host** receives the offer, creates an "answer," and sends it back to the **Client** via the server.
 7.  Simultaneously, both Client and Host are gathering **ICE candidates** (potential IP addresses and ports) and exchanging them through the server.
 8.  Once they have exchanged the offer/answer and enough ICE candidates, a direct **P2P connection** is established between the Client and Host.
-9.  The **Host** begins capturing, encoding, and streaming H.264 video frames directly to the **Client**.
+9.  The **Host** begins capturing (WGC), encoding (H.264), and streaming video frames directly to the **Client**.
 10. The **Client** begins receiving the video stream and sending user input back to the Host. The Signaling Server is no longer needed for this session.
 
 ## Peer Disconnection Handling
@@ -101,7 +135,7 @@ The system now properly handles peer disconnection. When a client closes their b
 
 ---
 
-## Dynamic Bitrate for Adaptive Streaming
+## Adaptive Streaming & Bitrate Control
 
 To provide a smooth experience even under changing network conditions, the Host implements a dynamic bitrate system that adapts the video quality in real-time. This prevents stream stuttering and freezing on weaker or unstable networks.
 
@@ -121,25 +155,10 @@ The system works by creating a continuous feedback loop between the Client and t
     *   The Go interceptor then calls a C function pointer that was registered by the C++ application.
     *   This call crosses the language boundary from Go to C++, passing the network statistics as arguments.
 
-4.  **C++ Logic Makes a Decision:**
-    *   The call arrives in `main.cpp` at the `onRTCP` function, which contains the control logic:
-        ```cpp
-        // If packet loss is high, reduce bitrate.
-        if (packetLoss > 0.05) {
-            currentBitrate *= 0.8; // Decrease bitrate by 20%
-            Encoder::AdjustBitrate(currentBitrate);
-        } 
-        // If packet loss is low, increase bitrate for better quality.
-        else if (packetLoss < 0.02) {
-            currentBitrate *= 1.1; // Increase bitrate by 10%
-            Encoder::AdjustBitrate(currentBitrate);
-        }
-        ```
-
-5.  **The Encoder Adjusts its Target:**
-    *   The `onRTCP` function calls `Encoder::AdjustBitrate()`, passing the newly calculated target bitrate.
-    *   Inside `Encoder.cpp`, this function safely updates the `bit_rate` property of the FFmpeg `AVCodecContext`.
-    *   From this point forward, the hardware encoder will compress the video stream to match this new, adjusted bitrate.
+4.  **Encoder-managed AIMD controller:**
+    *   RTCP stats (loss/jitter) are forwarded into `Encoder::OnRtcpFeedback`. RTT is computed from video datachannel ping/pong and combined in the callback.
+    *   An **AIMD** (Additive Increase / Multiplicative Decrease) controller adjusts bitrate within configured min/max bounds.
+    *   If runtime bitrate changes aren’t supported by the current codec, the encoder schedules a safe reopen between frames.
 
 This entire process runs continuously, allowing the stream to adapt to changing network conditions in near real-time, ensuring the best possible quality and smoothness.
 
@@ -179,6 +198,57 @@ node PureSignalingServer.js
 ### 4. Configure and Run the Host
 - Edit `config.json` to specify the target application to capture.
 - Run the compiled `DisplayCaptureProject.exe`. Note the Room ID it prints to the console.
+
+### Configuration (`config.json`)
+
+```json
+{
+  "client": { "serverUrlBase": "ws://localhost:3002" },
+  "host": {
+    "targetProcessName": "chrome.exe",
+    "window": { "resizeClientArea": true, "targetWidth": 1920, "targetHeight": 1080 },
+    "video": { "fps": 120, "bitrateStart": 20000000, "bitrateMin": 10000000, "bitrateMax": 50000000 },
+    "capture": {
+      "maxQueueDepth": 4,
+      "dropWindowMs": 200,
+      "dropMinEvents": 2,
+      "mmcss": { "enable": true, "priority": 2 }
+    }
+  }
+}
+```
+
+Key fields:
+- `video`: encoder FPS and bitrate bounds; the AIMD controller operates within `bitrateMin..bitrateMax`.
+- `capture.maxQueueDepth`: bounded frame queue to keep latency low; older frames are dropped first.
+- `capture.dropWindowMs`/`dropMinEvents`: if the encoder backlogs (EAGAIN) at least `dropMinEvents` times in `dropWindowMs`, the next capture frame is dropped (latency > throughput).
+- `capture.mmcss`: enables Multimedia Class Scheduler (MCSS) “Games” profile for the capture/encode thread with a configurable priority.
+
+### Design & Efficiency Highlights
+
+- **Windows Graphics Capture (WGC) + D3D11**
+  - WGC free-threaded frame pool for low-latency capture.
+  - Copy to a fixed **texture pool** (no per-frame `CreateTexture2D`).
+  - **View caching**: reuse D3D11 VideoProcessor input/output views per pooled texture and per FFmpeg NV12 frame.
+
+- **Backpressure-aware frame dropping**
+  - If FFmpeg encoder returns `EAGAIN` too often in recent window → drop incoming capture frames to avoid multi-frame latency spikes.
+
+- **Audio low-latency path**
+  - WASAPI **event-driven** capture (fallback to polling).
+  - **IAudioClock**-based timestamps to minimize A/V drift.
+  - Persistent float buffers to avoid per-packet allocations.
+
+- **Bitrate adaptation inside the encoder**
+  - AIMD controller uses RTCP loss/jitter plus RTT from datachannel.
+  - If a codec can’t change bitrate live, the encoder does a safe reopen between frames.
+
+- **Input validation & rate limiting**
+  - Host validates key codes against an allowlist, clamps mouse ranges, drops oversized messages, and rate-limits key/mouse events.
+
+- **Prod-ready toggles**
+  - Configurable MMCSS, drop policy, and queue depth via `config.json`.
+  - When exposed to the Internet: enable WSS via reverse proxy and require a room token at the signaling layer.
 
 ### 5. Run the Client
 - Open `Client/html-server/index.html` in a web browser.
