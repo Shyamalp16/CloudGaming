@@ -65,6 +65,8 @@ static int g_cleanSamples = 0;
 static std::chrono::steady_clock::time_point g_lastChange = std::chrono::steady_clock::now();
 static std::atomic<bool> g_pendingReopen{false};
 static std::atomic<int> g_reopenTargetBitrate{0};
+static std::atomic<int> g_eagainCount{0};
+static std::chrono::steady_clock::time_point g_lastEagain = std::chrono::steady_clock::now();
 
 static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height)
 {
@@ -546,6 +548,8 @@ namespace Encoder {
         int ret = avcodec_send_frame(codecCtx, hwFrame);
         if (ret == AVERROR(EAGAIN)) {
             // Encoder output queue full; drain packets and retry once
+            g_eagainCount.fetch_add(1);
+            g_lastEagain = std::chrono::steady_clock::now();
             for (;;) {
                 int rcv = avcodec_receive_packet(codecCtx, packet);
                 if (rcv == AVERROR(EAGAIN) || rcv == AVERROR_EOF) {
@@ -674,5 +678,16 @@ namespace Encoder {
             // Force an IDR soon so downstream adapts to new rate quickly
             av_opt_set(codecCtx->priv_data, "force_key_frames", "expr:gte(t,n_forced*1)", 0);
         }
+    }
+
+    bool IsBacklogged(int recent_window_ms, int min_events) {
+        auto now = std::chrono::steady_clock::now();
+        auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastEagain).count();
+        int cnt = g_eagainCount.load();
+        return (since <= recent_window_ms) && (cnt >= min_events);
+    }
+
+    void GetAndResetBackpressureStats(int &eagainEvents) {
+        eagainEvents = g_eagainCount.exchange(0);
     }
 }

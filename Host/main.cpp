@@ -186,6 +186,12 @@ int main()
                                                1000);     // increase interval
             SetCaptureTargetFps(fps);
         }
+        if (config.contains("host") && config["host"].contains("capture")) {
+            auto ccfg = config["host"]["capture"];
+            if (ccfg.contains("maxQueueDepth")) {
+                SetMaxQueuedFrames(std::max(1, ccfg["maxQueueDepth"].get<int>()));
+            }
+        }
     } catch (...) {}
     StartCapture();
     initWebsocket(roomId);

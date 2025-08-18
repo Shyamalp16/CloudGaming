@@ -44,3 +44,6 @@ void ProcessFrames();
 
 // Configure capture/encoder target FPS used when initializing the encoder
 void SetCaptureTargetFps(int fps);
+
+// Configure maximum queued frames for capture backpressure
+void SetMaxQueuedFrames(int maxDepth);

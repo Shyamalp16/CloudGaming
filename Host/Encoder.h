@@ -46,6 +46,10 @@ namespace Encoder {
                                     int increase_interval_ms);
     void OnRtcpFeedback(double packetLoss, double rtt, double jitter);
 
+    // Backpressure visibility for capture loop
+    bool IsBacklogged(int recent_window_ms, int min_events);
+    void GetAndResetBackpressureStats(int &eagainEvents);
+
     extern "C" int sendVideoSample(uint8_t* data, int size, int64_t durationUs);
 
     extern int currentWidth;

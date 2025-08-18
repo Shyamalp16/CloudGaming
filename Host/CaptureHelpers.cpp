@@ -29,6 +29,7 @@ std::atomic<bool> isCapturing{ false };
 struct FrameData {
     int sequenceNumber;
     winrt::com_ptr<ID3D11Texture2D> texture; // private copy for lifetime safety
+    int poolIndex = -1; // index in texture pool; -1 if not pooled
     int64_t timestamp;
 };
 
@@ -39,13 +40,73 @@ struct FrameComparator {
 };
 
 std::priority_queue<FrameData, std::vector<FrameData>, FrameComparator> framePriorityQueue;
-static constexpr size_t kMaxQueuedFrames = 4;
+static size_t g_maxQueuedFrames = 4;
 std::atomic<int> frameSequenceCounter{ 0 }; 
 std::mutex queueMutex;
 std::condition_variable queueCV;
 
 static std::atomic<int> g_targetFps{120};
 void SetCaptureTargetFps(int fps) { if (fps > 0) g_targetFps.store(fps); }
+
+void SetMaxQueuedFrames(int maxDepth) {
+    if (maxDepth < 1) maxDepth = 1;
+    g_maxQueuedFrames = static_cast<size_t>(maxDepth);
+}
+
+// Texture pool for copy surfaces (per resolution)
+static std::vector<winrt::com_ptr<ID3D11Texture2D>> g_copyPool;
+static std::vector<bool> g_poolInUse;
+static std::mutex g_poolMutex;
+static int g_poolNextIndex = 0;
+static int g_poolW = 0, g_poolH = 0;
+static int g_poolSize = 0;
+
+static void RecreateCopyPool(ID3D11Device* device, int width, int height, DXGI_FORMAT format) {
+    std::lock_guard<std::mutex> lock(g_poolMutex);
+    g_poolW = width & ~1; g_poolH = height & ~1;
+    g_poolSize = static_cast<int>(std::max<size_t>(g_maxQueuedFrames, 4));
+    g_copyPool.clear();
+    g_poolInUse.clear();
+    g_copyPool.resize(g_poolSize);
+    g_poolInUse.resize(g_poolSize);
+    g_poolNextIndex = 0;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = static_cast<UINT>(g_poolW);
+    desc.Height = static_cast<UINT>(g_poolH);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = 0;
+    desc.MiscFlags = 0;
+    for (int i = 0; i < g_poolSize; ++i) {
+        g_poolInUse[i] = false;
+        device->CreateTexture2D(&desc, nullptr, g_copyPool[i].put());
+    }
+}
+
+static int AcquirePoolSlot() {
+    std::lock_guard<std::mutex> lock(g_poolMutex);
+    if (g_copyPool.empty()) return -1;
+    int start = g_poolNextIndex;
+    for (int i = 0; i < g_poolSize; ++i) {
+        int idx = (start + i) % g_poolSize;
+        if (!g_poolInUse[idx]) {
+            g_poolInUse[idx] = true;
+            g_poolNextIndex = (idx + 1) % g_poolSize;
+            return idx;
+        }
+    }
+    return -1; // all busy
+}
+
+static void ReleasePoolSlot(int idx) {
+    if (idx < 0) return;
+    std::lock_guard<std::mutex> lock(g_poolMutex);
+    g_poolInUse[static_cast<size_t>(idx)] = false;
+}
 
 winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface)
@@ -127,28 +188,41 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                     }
                 } catch (...) {}
                 {
-                    // Copy frame to a private texture immediately to avoid lifetime issues
+                    // Copy frame to a private texture using pool to avoid per-frame allocations
                     auto device = GetD3DDevice();
                     winrt::com_ptr<ID3D11DeviceContext> context;
                     device->GetImmediateContext(context.put());
 
                     auto srcTex = GetTextureFromSurface(surface);
-                    D3D11_TEXTURE2D_DESC desc{};
-                    srcTex->GetDesc(&desc);
-                    // Ensure bind flags suitable for CopyResource and SRV reads
-                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                    desc.Usage = D3D11_USAGE_DEFAULT;
-                    desc.CPUAccessFlags = 0;
-                    desc.MiscFlags = 0;
+                    D3D11_TEXTURE2D_DESC srcDesc{};
+                    srcTex->GetDesc(&srcDesc);
 
-                    winrt::com_ptr<ID3D11Texture2D> copyTex;
-                    if (SUCCEEDED(device->CreateTexture2D(&desc, nullptr, copyTex.put()))) {
-                        context->CopyResource(copyTex.get(), srcTex.get());
+                    int evenW = static_cast<int>(srcDesc.Width & ~1U);
+                    int evenH = static_cast<int>(srcDesc.Height & ~1U);
+                    // Recreate pool on size change or first use
+                    if (g_copyPool.empty() || g_poolW != evenW || g_poolH != evenH) {
+                        RecreateCopyPool(device.get(), evenW, evenH, srcDesc.Format);
+                        std::wcout << L"[WGC] Recreated copy pool for " << evenW << L"x" << evenH << std::endl;
+                    }
+
+                    int slot = AcquirePoolSlot();
+                    if (slot >= 0) {
+                        context->CopyResource(g_copyPool[slot].get(), srcTex.get());
                         std::lock_guard<std::mutex> lock(queueMutex);
-                        if (framePriorityQueue.size() >= kMaxQueuedFrames) {
+                        if (framePriorityQueue.size() >= g_maxQueuedFrames) {
                             framePriorityQueue.pop();
+                            static int dropWarnCounter = 0;
+                            if ((++dropWarnCounter % 60) == 0) {
+                                std::wcout << L"[WGC] Dropping frames due to full queue (depth=" << g_maxQueuedFrames << L")" << std::endl;
+                            }
                         }
-                        framePriorityQueue.push({ sequenceNumber, copyTex, timestamp });
+                        framePriorityQueue.push({ sequenceNumber, g_copyPool[slot], slot, timestamp });
+                    } else {
+                        // Pool exhausted: drop to preserve latency
+                        static int poolDropWarn = 0;
+                        if ((++poolDropWarn % 60) == 0) {
+                            std::wcout << L"[WGC] Dropping frame (copy pool exhausted)" << std::endl;
+                        }
                     }
                 }
                 queueCV.notify_one();
@@ -263,12 +337,22 @@ void ProcessFrames() {
                     copyDesc.Width &= ~1U;
                     copyDesc.Height &= ~1U;
                     context->CopyResource(copyTex.get(), texture.get());
-                    Encoder::EncodeFrame(copyTex.get(), context.get(), copyDesc.Width, copyDesc.Height, frameData.timestamp);
+                    if (!Encoder::IsBacklogged(200, 2)) {
+                        Encoder::EncodeFrame(copyTex.get(), context.get(), copyDesc.Width, copyDesc.Height, frameData.timestamp);
+                    } // else drop frame to reduce latency
                 } else {
-                    Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
+                    if (!Encoder::IsBacklogged(200, 2)) {
+                        Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
+                    }
                 }
             } else {
-                Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
+                if (!Encoder::IsBacklogged(200, 2)) {
+                    Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
+                }
+            }
+            // Release pool slot if used
+            if (frameData.poolIndex >= 0) {
+                ReleasePoolSlot(frameData.poolIndex);
             }
         }
     }
