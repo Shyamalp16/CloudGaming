@@ -46,7 +46,12 @@ private:
     Microsoft::WRL::ComPtr<IAudioClient> m_pAudioClient;
     Microsoft::WRL::ComPtr<IAudioCaptureClient> m_pCaptureClient;
     Microsoft::WRL::ComPtr<IAudioSessionControl2> m_pSessionControl2;
+    Microsoft::WRL::ComPtr<IAudioClock> m_pAudioClock;
+    UINT64 m_audioClockFreq = 0;
 
     // Event-driven capture
     HANDLE m_hCaptureEvent = nullptr;
+
+    // Persistent audio float buffer to avoid per-packet allocations
+    std::vector<float> m_floatBuffer;
 };

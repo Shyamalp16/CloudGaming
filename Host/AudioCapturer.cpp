@@ -297,6 +297,15 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     std::wcerr << L"[AudioCapturer] Unable to get capture client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
                     goto Exit;
                 }
+                // Query IAudioClock for precise timestamps
+                hr = m_pAudioClient->GetService(__uuidof(IAudioClock), reinterpret_cast<void**>(m_pAudioClock.ReleaseAndGetAddressOf()));
+                if (SUCCEEDED(hr) && m_pAudioClock) {
+                    UINT64 freq = 0;
+                    if (SUCCEEDED(m_pAudioClock->GetFrequency(&freq))) {
+                        m_audioClockFreq = freq;
+                        std::wcout << L"[AudioCapturer] AudioClock frequency: " << freq << std::endl;
+                    }
+                }
                 
                 // Found and initialized, break out of loops
                 break; 
@@ -397,27 +406,33 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 goto Exit;
             }
 
-            // Convert PCM to float and process for Opus encoding
-            std::vector<float> floatSamples;
+            // Convert PCM to float and process for Opus encoding (reuse persistent buffer)
+            std::vector<float> processedSamples;
+            const size_t totalSamples = static_cast<size_t>(numFramesAvailable) * static_cast<size_t>(pwfx->nChannels);
+            if (m_floatBuffer.size() < totalSamples) m_floatBuffer.resize(totalSamples);
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                // Generate silence in float format
-                const size_t totalSamples = numFramesAvailable * pwfx->nChannels;
-                floatSamples.assign(totalSamples, 0.0f);
+                std::fill(m_floatBuffer.begin(), m_floatBuffer.begin() + totalSamples, 0.0f);
             } else {
-                // Convert PCM data to float
-                if (!ConvertPCMToFloat(pData, numFramesAvailable, static_cast<void*>(pwfx), floatSamples)) {
+                if (!ConvertPCMToFloat(pData, numFramesAvailable, static_cast<void*>(pwfx), m_floatBuffer)) {
                     std::wcerr << L"[AudioCapturer] Failed to convert PCM to float format" << std::endl;
                     goto Exit;
                 }
             }
-            
-            // Preserve stereo (Opus encoder configured for 2 channels). Ensure matching channel count.
-            std::vector<float> processedSamples = std::move(floatSamples);
-            
-            // Calculate timestamp for this audio data
-            auto currentTime = std::chrono::high_resolution_clock::now();
-            auto elapsedTime = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - m_startTime);
-            int64_t timestampUs = elapsedTime.count();
+            processedSamples.assign(m_floatBuffer.begin(), m_floatBuffer.begin() + totalSamples);
+
+            // Calculate timestamp for this audio data using IAudioClock if available
+            int64_t timestampUs = 0;
+            if (m_pAudioClock && m_audioClockFreq > 0) {
+                UINT64 pos = 0;
+                UINT64 qpc = 0;
+                if (SUCCEEDED(m_pAudioClock->GetPosition(&pos, &qpc))) {
+                    timestampUs = static_cast<int64_t>((pos * 1000000ULL) / m_audioClockFreq);
+                }
+            }
+            if (timestampUs == 0) {
+                auto currentTime = std::chrono::high_resolution_clock::now();
+                timestampUs = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - m_startTime).count();
+            }
             
             // Process audio frame for Opus encoding and WebRTC transmission
             ProcessAudioFrame(processedSamples.data(), processedSamples.size(), timestampUs);
