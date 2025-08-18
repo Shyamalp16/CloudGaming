@@ -28,7 +28,7 @@ std::atomic<bool> isCapturing{ false };
 
 struct FrameData {
     int sequenceNumber;
-    winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface;
+    winrt::com_ptr<ID3D11Texture2D> texture; // private copy for lifetime safety
     int64_t timestamp;
 };
 
@@ -127,13 +127,29 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                     }
                 } catch (...) {}
                 {
-                    std::lock_guard<std::mutex> lock(queueMutex);
-                    // If the queue is too deep, drop the oldest by replacing top when full
-                    if (framePriorityQueue.size() >= kMaxQueuedFrames) {
-                        // Drop one pending frame to keep latency low
-                        framePriorityQueue.pop();
+                    // Copy frame to a private texture immediately to avoid lifetime issues
+                    auto device = GetD3DDevice();
+                    winrt::com_ptr<ID3D11DeviceContext> context;
+                    device->GetImmediateContext(context.put());
+
+                    auto srcTex = GetTextureFromSurface(surface);
+                    D3D11_TEXTURE2D_DESC desc{};
+                    srcTex->GetDesc(&desc);
+                    // Ensure bind flags suitable for CopyResource and SRV reads
+                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    desc.Usage = D3D11_USAGE_DEFAULT;
+                    desc.CPUAccessFlags = 0;
+                    desc.MiscFlags = 0;
+
+                    winrt::com_ptr<ID3D11Texture2D> copyTex;
+                    if (SUCCEEDED(device->CreateTexture2D(&desc, nullptr, copyTex.put()))) {
+                        context->CopyResource(copyTex.get(), srcTex.get());
+                        std::lock_guard<std::mutex> lock(queueMutex);
+                        if (framePriorityQueue.size() >= kMaxQueuedFrames) {
+                            framePriorityQueue.pop();
+                        }
+                        framePriorityQueue.push({ sequenceNumber, copyTex, timestamp });
                     }
-                    framePriorityQueue.push({ sequenceNumber, surface, timestamp });
                 }
                 queueCV.notify_one();
             }
@@ -149,10 +165,26 @@ void ProcessFrames() {
     winrt::com_ptr<ID3D11DeviceContext> context;
     device->GetImmediateContext(context.put());
 
-    // Raise thread priority and enable MMCSS for smoother encoding path
+    // Raise thread priority and register with MMCSS (Games profile) dynamically
     HANDLE hThread = GetCurrentThread();
     SetThreadPriority(hThread, THREAD_PRIORITY_HIGHEST);
-    // Optional: AvSetMmThreadCharacteristics requires linking Avrt.lib; omit if unavailable
+    HMODULE hAvrt = LoadLibraryW(L"Avrt.dll");
+    HANDLE hTask = nullptr;
+    DWORD taskIndex = 0;
+    if (hAvrt) {
+        using PFN_AvSetMmThreadCharacteristicsW = HANDLE (WINAPI *)(LPCWSTR, LPDWORD);
+        using PFN_AvSetMmThreadPriority = BOOL (WINAPI *)(HANDLE, int);
+        using PFN_AvRevertMmThreadCharacteristics = BOOL (WINAPI *)(HANDLE);
+        auto pSetChars = reinterpret_cast<PFN_AvSetMmThreadCharacteristicsW>(GetProcAddress(hAvrt, "AvSetMmThreadCharacteristicsW"));
+        auto pSetPrio  = reinterpret_cast<PFN_AvSetMmThreadPriority>(GetProcAddress(hAvrt, "AvSetMmThreadPriority"));
+        if (pSetChars) {
+            hTask = pSetChars(L"Games", &taskIndex);
+            if (hTask && pSetPrio) {
+                // 2 corresponds to AVRT_PRIORITY_HIGH without needing headers
+                pSetPrio(hTask, 2);
+            }
+        }
+    }
 
     // Initialize encoder on first real frame with actual capture size
     static int lastInitW = 0;
@@ -175,8 +207,8 @@ void ProcessFrames() {
 
         if (frameData.sequenceNumber == -1) break;
 
-        if (frameData.surface) {
-            auto texture = GetTextureFromSurface(frameData.surface);
+        if (frameData.texture) {
+            auto texture = frameData.texture;
             D3D11_TEXTURE2D_DESC desc{};
             texture->GetDesc(&desc);
             // Log texture desc size when it changes
@@ -190,10 +222,33 @@ void ProcessFrames() {
             // Ensure even dimensions for H.264
             int encW = static_cast<int>(desc.Width & ~1U);
             int encH = static_cast<int>(desc.Height & ~1U);
-            if (encW != lastInitW || encH != lastInitH) {
+            // Debounce re-initialization: require stability across a few frames and a minimal time gap
+            static int pendingW = 0, pendingH = 0, pendingCount = 0;
+            static auto lastInitTime = std::chrono::steady_clock::now();
+            if (lastInitW == 0 || lastInitH == 0) {
                 Encoder::InitializeEncoder("output.mp4", encW, encH, g_targetFps.load());
                 lastInitW = encW;
                 lastInitH = encH;
+                lastInitTime = std::chrono::steady_clock::now();
+                pendingW = pendingH = pendingCount = 0;
+            } else if (encW != lastInitW || encH != lastInitH) {
+                if (encW == pendingW && encH == pendingH) {
+                    pendingCount++;
+                } else {
+                    pendingW = encW;
+                    pendingH = encH;
+                    pendingCount = 1;
+                }
+                auto now = std::chrono::steady_clock::now();
+                auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastInitTime).count();
+                // Re-init only if the new size is seen in 3 consecutive frames and last init was at least 300ms ago
+                if (pendingCount >= 3 && since >= 300) {
+                    Encoder::InitializeEncoder("output.mp4", encW, encH, g_targetFps.load());
+                    lastInitW = encW;
+                    lastInitH = encH;
+                    lastInitTime = now;
+                    pendingW = pendingH = pendingCount = 0;
+                }
             }
             // Create a Copyable SRV texture if the capture surface is not bindable
             if ((desc.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE)) == 0) {
@@ -216,6 +271,15 @@ void ProcessFrames() {
                 Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
             }
         }
+    }
+
+    // Revert MMCSS and free library before exit
+    if (hAvrt && hTask) {
+        auto pRevert = reinterpret_cast<BOOL (WINAPI *)(HANDLE)>(GetProcAddress(hAvrt, "AvRevertMmThreadCharacteristics"));
+        if (pRevert) { pRevert(hTask); }
+    }
+    if (hAvrt) {
+        FreeLibrary(hAvrt);
     }
 }
 
