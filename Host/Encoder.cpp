@@ -325,7 +325,7 @@ namespace Encoder {
         currentHeight = height;
         codecCtx->time_base = AVRational{ 1, fps };
         codecCtx->framerate = { fps, 1 };
-        codecCtx->gop_size = fps * 1; // IDR every ~1 second for fast recovery
+        codecCtx->gop_size = fps * 2; // IDR every ~2 seconds to reduce keyframe overhead
         codecCtx->max_b_frames = 0; // low-latency
         codecCtx->bit_rate = g_startBitrateBps; // configurable start bitrate
         // Initialize VBV to track target bitrate and avoid pulsing
@@ -395,15 +395,20 @@ namespace Encoder {
 
         AVDictionary* opts = nullptr;
         if (encoderName == "h264_nvenc") {
-            av_dict_set(&opts, "preset", "p7", 0);
+            // Use high-quality preset per your preference, but keep low-latency flags
+            av_dict_set(&opts, "preset", "p7", 0);            // highest quality
+            av_dict_set(&opts, "tune", "ull", 0);             // ultra low latency
             av_dict_set(&opts, "rc", "cbr", 0);
             av_dict_set(&opts, "repeat-headers", "1", 0);
-            av_dict_set(&opts, "profile", "baseline", 0); // match Baseline (42e033) in SDP
+            av_dict_set(&opts, "profile", "baseline", 0);
             av_dict_set(&opts, "rc-lookahead", "0", 0);
             av_dict_set(&opts, "bf", "0", 0);
-            // Spatial AQ for detail preservation
+            // Keep AQ for visual quality while letting NVENC handle perf
             av_dict_set(&opts, "spatial_aq", "1", 0);
             av_dict_set(&opts, "aq-strength", "10", 0);
+            // Reduce queueing depth to help frame pacing
+            av_dict_set(&opts, "async_depth", "1", 0);
+            av_dict_set(&opts, "surfaces", "4", 0);
             // Looser VBV to reduce quality pulsing
             char rateBuf[32];
             char buf2[32];
@@ -416,7 +421,7 @@ namespace Encoder {
             av_dict_set(&opts, "color_primaries", "bt709", 0);
             av_dict_set(&opts, "color_trc", "bt709", 0);
             av_dict_set(&opts, "color_range", "pc", 0); // full range
-            av_dict_set(&opts, "level", "5.1", 0);
+            // Let NVENC pick appropriate level automatically
             // Relax forced IDR (handled by gop_size)
         } else if (encoderName == "libx264") {
             // x264 names differ; set BT.709 SDR limited
@@ -425,7 +430,6 @@ namespace Encoder {
             av_dict_set(&opts, "colormatrix","bt709", 0);
             av_dict_set(&opts, "fullrange", "1", 0); // full range
             av_dict_set(&opts, "profile", "baseline", 0); // match SDP baseline
-            av_dict_set(&opts, "level", "5.1", 0);
         }
         else if (encoderName == "h264_qsv") {
             av_dict_set(&opts, "preset", "veryfast", 0);

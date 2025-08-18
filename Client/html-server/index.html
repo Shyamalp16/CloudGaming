@@ -284,9 +284,9 @@
     .log-level-warn { color: #ffaa00; }
     .log-level-error { color: #ff4444; }
 
-    #hiddenVideo {
-      display: none;
-    }
+    #hiddenVideo { display: none; }
+    /* Fallback: render <video> directly when canvas path misbehaves */
+    #hiddenVideo.bg-video { display: block; position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; z-index: 0; pointer-events: none; }
 
     .fullscreen-mode {
       position: fixed !important;
@@ -497,7 +497,8 @@
         }
 
         document.getElementById('roomSetup').classList.add('hidden');
-        document.getElementById('gameHeader').classList.remove('hidden');
+        // Immersive mode: hide header, remove 50px offset so video fills top
+        document.body.classList.add('immersive');
         document.getElementById('gameContainer').classList.remove('hidden');
 
         connectToSignalingServer(roomId);
@@ -679,7 +680,7 @@
     function renderVideoToCanvas() {
       if (!renderActive) return;
       if (hiddenVideoElement.videoWidth > 0 && hiddenVideoElement.videoHeight > 0) {
-        // Fill the canvas (cover)
+        // Fill the canvas (cover, no pillarbox)
         const vW = hiddenVideoElement.videoWidth;
         const vH = hiddenVideoElement.videoHeight;
         const scale = Math.max(canvas.width / vW, canvas.height / vH);

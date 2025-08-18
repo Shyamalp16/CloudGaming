@@ -10,7 +10,7 @@
       "targetHeight": 1080
     },
     "video": {
-      "fps": 120,
+      "fps": 144,
       "bitrateStart": 20000000,
       "bitrateMin": 10000000,
       "bitrateMax": 50000000
