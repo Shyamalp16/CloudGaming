@@ -154,8 +154,10 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
         std::call_once(g_bucketsInit, [](){ g_keyBucket.init(200, 200); g_mouseBucket.init(500, 500); });
 
         const std::string& payload = msg->get_payload();
-        if (payload.size() > 1024) {
-            std::cerr << "[WebSocket] Dropping oversized message (" << payload.size() << ")" << std::endl;
+        // Hard cap to prevent abuse, but allow large SDP (offers/answers)
+        const size_t kMaxWsPayload = 1024 * 1024; // 1 MB
+        if (payload.size() > kMaxWsPayload) {
+            std::cerr << "[WebSocket] Dropping extremely large message (" << payload.size() << ")" << std::endl;
             return;
         }
         json message = json::parse(payload);
@@ -167,6 +169,14 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
 
         std::string type = message["type"];
         std::cout << "[Host] Received message type: " << type << std::endl;
+
+        // Apply tight payload limits only to input/control events, not SDP signaling
+        if (type == "keydown" || type == "keyup" || type == "mousemove" || type == "mousedown" || type == "mouseup") {
+            if (payload.size() > 1024) {
+                // Ignore oversized input payloads
+                return;
+            }
+        }
 
         if (type == "ping") {
             long long client_timestamp = message["timestamp"].get<long long>();

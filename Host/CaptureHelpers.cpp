@@ -81,6 +81,14 @@ static int g_poolNextIndex = 0;
 static int g_poolW = 0, g_poolH = 0;
 static int g_poolSize = 0;
 
+static DXGI_FORMAT CoerceFormatForVideoProcessor(DXGI_FORMAT fmt) {
+    switch (fmt) {
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM;
+    default: return fmt;
+    }
+}
+
 static void RecreateCopyPool(ID3D11Device* device, int width, int height, DXGI_FORMAT format) {
     std::lock_guard<std::mutex> lock(g_poolMutex);
     g_poolW = width & ~1; g_poolH = height & ~1;
@@ -95,10 +103,10 @@ static void RecreateCopyPool(ID3D11Device* device, int width, int height, DXGI_F
     desc.Height = static_cast<UINT>(g_poolH);
     desc.MipLevels = 1;
     desc.ArraySize = 1;
-    desc.Format = format;
+    desc.Format = CoerceFormatForVideoProcessor(format);
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
     desc.CPUAccessFlags = 0;
     desc.MiscFlags = 0;
     for (int i = 0; i < g_poolSize; ++i) {
@@ -221,7 +229,7 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                     int evenH = static_cast<int>(srcDesc.Height & ~1U);
                     // Recreate pool on size change or first use
                     if (g_copyPool.empty() || g_poolW != evenW || g_poolH != evenH) {
-                        RecreateCopyPool(device.get(), evenW, evenH, srcDesc.Format);
+                        RecreateCopyPool(device.get(), evenW, evenH, CoerceFormatForVideoProcessor(srcDesc.Format));
                         std::wcout << L"[WGC] Recreated copy pool for " << evenW << L"x" << evenH << std::endl;
                     }
 

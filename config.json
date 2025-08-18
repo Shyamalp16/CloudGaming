@@ -3,7 +3,7 @@
     "serverUrlBase": "ws://localhost:3002"
   },
   "host": {
-    "targetProcessName": "chrome.exe",
+    "targetProcessName": "vlc.exe",
     "window": {
       "resizeClientArea": true,
       "targetWidth": 1920,

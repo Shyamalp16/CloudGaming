@@ -536,11 +536,26 @@ namespace Encoder {
         if (itIn != g_inputViewCache.end()) {
             inView = itIn->second;
         } else {
+            // Validate format support for input
+            D3D11_TEXTURE2D_DESC inTexDesc{};
+            texture->GetDesc(&inTexDesc);
+            UINT support = 0;
+            HRESULT chk = g_vpEnumerator->CheckVideoProcessorFormat(inTexDesc.Format, &support);
+            if (FAILED(chk) || (support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0) {
+                std::wcerr << L"[Encoder][VP] Input format not supported by VideoProcessor. HRESULT=0x"
+                           << std::hex << chk << L" format=" << inTexDesc.Format << std::endl;
+                return;
+            }
+
             D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc{};
             inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
             inDesc.Texture2D.MipSlice = 0; inDesc.Texture2D.ArraySlice = 0;
-            if (FAILED(g_videoDevice->CreateVideoProcessorInputView(texture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf()))) {
-                std::cerr << "[Encoder][VP] CreateVideoProcessorInputView failed." << std::endl; return; }
+            HRESULT hrIV = g_videoDevice->CreateVideoProcessorInputView(texture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf());
+            if (FAILED(hrIV)) {
+                std::wcerr << L"[Encoder][VP] CreateVideoProcessorInputView failed. HRESULT=0x" << std::hex << hrIV
+                           << L" W=" << inTexDesc.Width << L" H=" << inTexDesc.Height << L" Format=" << inTexDesc.Format << std::endl;
+                return;
+            }
             g_inputViewCache[texture] = inView;
         }
 
@@ -551,11 +566,25 @@ namespace Encoder {
         if (itOut != g_outputViewCache.end()) {
             outView = itOut->second;
         } else {
+            // Validate output format support (NV12)
+            D3D11_TEXTURE2D_DESC outTexDesc{};
+            ffmpegNV12->GetDesc(&outTexDesc);
+            UINT supportOut = 0;
+            HRESULT chkOut = g_vpEnumerator->CheckVideoProcessorFormat(outTexDesc.Format, &supportOut);
+            if (FAILED(chkOut) || (supportOut & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0) {
+                std::wcerr << L"[Encoder][VP] Output format not supported by VideoProcessor. HRESULT=0x"
+                           << std::hex << chkOut << L" format=" << outTexDesc.Format << std::endl;
+                return;
+            }
             D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
             outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
             outDesc.Texture2D.MipSlice = 0;
-            if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(ffmpegNV12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) {
-                std::cerr << "[Encoder][VP] CreateVideoProcessorOutputView failed." << std::endl; return; }
+            HRESULT hrOV = g_videoDevice->CreateVideoProcessorOutputView(ffmpegNV12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf());
+            if (FAILED(hrOV)) {
+                std::wcerr << L"[Encoder][VP] CreateVideoProcessorOutputView failed. HRESULT=0x" << std::hex << hrOV
+                           << L" W=" << outTexDesc.Width << L" H=" << outTexDesc.Height << L" Format=" << outTexDesc.Format << std::endl;
+                return;
+            }
             g_outputViewCache[ffmpegNV12] = outView;
         }
         D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();

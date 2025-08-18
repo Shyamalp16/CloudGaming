@@ -66,6 +66,8 @@ var (
 	connectionState       webrtc.PeerConnectionState
 	videoPayloadType      uint8 = 96
 	audioPayloadType      uint8 = 111
+	// Buffer remote ICE candidates received before remote SDP is set
+	pendingRemoteCandidates []webrtc.ICECandidateInit
 	// Cache latest RTT (ms) from ping/pong to combine with RTCP loss/jitter
 	lastRttMutex sync.Mutex
 	lastRttMs    float64
@@ -251,6 +253,7 @@ func createPeerConnectionGo() C.int {
 		messageQueue = []string{}
 		mouseQueue = []string{}
 		lastAnswerSDP = ""
+		pendingRemoteCandidates = nil
 		pingTimestamps = make(map[uint64]int64) // Initialize/clear the map
 		log.Println(
 			"[Go/Pion] createPeerConnectionGo: Closed previous PeerConnection and reset state.",
@@ -917,6 +920,16 @@ func handleOffer(offerSDP *C.char) {
 	log.Println(
 		"[Go/Pion] handleOffer: Remote description (offer) set successfully. If offer had a DataChannel, OnDataChannel should have triggered.",
 	)
+	// Drain any remote ICE candidates that arrived early
+	if len(pendingRemoteCandidates) > 0 {
+		log.Printf("[Go/Pion] handleOffer: Adding %d buffered remote ICE candidates", len(pendingRemoteCandidates))
+		for _, c := range pendingRemoteCandidates {
+			if err := peerConnection.AddICECandidate(c); err != nil {
+				log.Printf("[Go/Pion] Error adding buffered ICE candidate: %v", err)
+			}
+		}
+		pendingRemoteCandidates = nil
+	}
 
 	answer, err := peerConnection.CreateAnswer(nil)
 	if err != nil {
@@ -993,6 +1006,11 @@ func handleRemoteIceCandidate(candidateStr *C.char) {
 	log.Printf("[Go/Pion] handleRemoteIceCandidate: %s\n", cGoStr)
 
 	candidate := webrtc.ICECandidateInit{Candidate: cGoStr}
+	if peerConnection.RemoteDescription() == nil {
+		pendingRemoteCandidates = append(pendingRemoteCandidates, candidate)
+		log.Println("[Go/Pion] Buffered ICE candidate (remote description not set yet)")
+		return
+	}
 	if err := peerConnection.AddICECandidate(candidate); err != nil {
 		log.Printf("[Go/Pion] Error adding ICE candidate: %v\n", err)
 	} else {
