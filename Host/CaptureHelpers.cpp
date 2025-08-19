@@ -73,6 +73,12 @@ void SetMmcssConfig(bool enable, int priority) {
     g_mmcssPriority.store(std::clamp(priority, 0, 3));
 }
 
+// Session options
+static std::atomic<bool> g_cursorCaptureEnabled{true};
+static std::atomic<bool> g_borderRequired{true};
+void SetCursorCaptureEnabled(bool enable) { g_cursorCaptureEnabled.store(enable); }
+void SetBorderRequired(bool required) { g_borderRequired.store(required); }
+
 // Texture pool for copy surfaces (per resolution)
 static std::vector<winrt::com_ptr<ID3D11Texture2D>> g_copyPool;
 static std::vector<bool> g_poolInUse;
@@ -186,7 +192,9 @@ GraphicsCaptureSession createCaptureSession(
     try
     {
         session = framePool.CreateCaptureSession(item);
-	session.IsCursorCaptureEnabled(true);
+        session.IsCursorCaptureEnabled(g_cursorCaptureEnabled.load());
+        // Best-effort: some OS versions expose IsBorderRequired
+        try { session.IsBorderRequired(g_borderRequired.load()); } catch (...) {}
     }
     catch (const winrt::hresult_error& e)
     {
@@ -220,6 +228,18 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                 if (timestamp <= 0) {
                     // Fallback to steady_clock if SRT unavailable
                     timestamp = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+                }
+                // --- Debug: capture fps ---
+                {
+                    static int capCount = 0;
+                    static int64_t lastTs = 0;
+                    capCount++;
+                    if (lastTs == 0) lastTs = timestamp;
+                    if (timestamp - lastTs >= 1000000) { // 1s
+                        std::wcout << L"[WGC] frames/s: " << capCount << std::endl;
+                        capCount = 0;
+                        lastTs = timestamp;
+                    }
                 }
                 // Log ContentSize when it changes
                 try {
@@ -367,6 +387,16 @@ void ProcessFrames() {
         if (frameData.sequenceNumber == -1) break;
 
         if (frameData.texture) {
+            // --- Debug: encode submit rate ---
+            static auto lastLog = std::chrono::steady_clock::now();
+            static int submitCount = 0;
+            submitCount++;
+            auto nowDbg = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(nowDbg - lastLog).count() >= 1) {
+                std::wcout << L"[Encode] submits/s: " << submitCount << std::endl;
+                submitCount = 0;
+                lastLog = nowDbg;
+            }
             auto texture = frameData.texture;
             D3D11_TEXTURE2D_DESC desc{};
             texture->GetDesc(&desc);

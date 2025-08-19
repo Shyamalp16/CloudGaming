@@ -75,6 +75,10 @@ var (
 	lastEnqueueLog    time.Time
 	msgEnqueueCount   int
 	mouseEnqueueCount int
+
+	// send rate logging
+	sendLastLog time.Time
+	sendCount   int
 )
 
 func init() {
@@ -135,6 +139,14 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 
 	if err := videoTrack.WriteSample(media.Sample{Data: buf, Duration: dur}); err != nil {
 		return -1
+	}
+
+	// Debug: log send rate once per second (use globals to persist across calls)
+	sendCount++
+	if time.Since(sendLastLog) >= time.Second {
+		log.Printf("[Pion] send samples/s: %d", sendCount)
+		sendCount = 0
+		sendLastLog = time.Now()
 	}
 
 	// Optional RTT ping to client (unchanged):

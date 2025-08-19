@@ -55,3 +55,9 @@ void SetBackpressureDropPolicy(int windowMs, int minEvents);
 
 // Configure MMCSS usage and priority (0=LOW,1=NORMAL,2=HIGH,3=CRITICAL)
 void SetMmcssConfig(bool enable, int priority);
+
+// Configure cursor visibility for capture session
+void SetCursorCaptureEnabled(bool enable);
+
+// Configure border requirement for capture session (visual border)
+void SetBorderRequired(bool required);

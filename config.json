@@ -14,21 +14,23 @@
       "bitrateStart": 45000000,
       "bitrateMin": 30000000,
       "bitrateMax": 60000000,
-      "hwFramePoolSize": 4,
+      "hwFramePoolSize": 6,
       "fullRange": false,
       "preset": "p7",
       "rc": "cbr",
       "bf": 0,
       "rcLookahead": 0,
-      "asyncDepth": 2,
-      "surfaces": 8
+      "asyncDepth": 8,
+      "surfaces": 16
     },
     "capture": {
-      "maxQueueDepth": 4,
-      "framePoolBuffers": 3,
-      "dropWindowMs": 200,
-      "dropMinEvents": 2,
-      "mmcss": { "enable": true, "priority": 2 }
+      "maxQueueDepth": 12,
+      "framePoolBuffers": 8,
+      "dropWindowMs": 50,
+      "dropMinEvents": 1,
+      "mmcss": { "enable": true, "priority": 2 },
+      "cursor": false,
+      "borderRequired": false
     }
   }
 }

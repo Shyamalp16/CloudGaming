@@ -35,6 +35,13 @@ void monitorConnection() {
 
 int main()
 {
+    // Set process priority to HIGH for better performance
+    if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS)) {
+        std::wcerr << L"[main] Warning: Failed to set HIGH_PRIORITY_CLASS" << std::endl;
+    } else {
+        std::wcout << L"[main] Process priority set to HIGH" << std::endl;
+    }
+
     // Ensure the process is DPI-aware so WGC item.Size() is not DPI-virtualized (which shrinks sizes)
     if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
         SetProcessDPIAware();
@@ -210,6 +217,14 @@ int main()
                 SetFramePoolBuffers(std::max(1, ccfg["framePoolBuffers"].get<int>()));
             } else if (ccfg.contains("numberOfBuffers")) {
                 SetFramePoolBuffers(std::max(1, ccfg["numberOfBuffers"].get<int>()));
+            }
+            if (ccfg.contains("cursor")) {
+                bool cursor = ccfg.value("cursor", true);
+                SetCursorCaptureEnabled(cursor);
+            }
+            if (ccfg.contains("borderRequired")) {
+                bool border = ccfg.value("borderRequired", true);
+                SetBorderRequired(border);
             }
             if (ccfg.contains("dropWindowMs") || ccfg.contains("dropMinEvents")) {
                 int w = ccfg.value("dropWindowMs", 200);
