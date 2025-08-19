@@ -75,7 +75,7 @@ static std::atomic<bool> g_pendingReopen{false};
 static std::atomic<int> g_reopenTargetBitrate{0};
 static std::atomic<int> g_eagainCount{0};
 static std::chrono::steady_clock::time_point g_lastEagain = std::chrono::steady_clock::now();
-static bool g_fullRangeColor = true; // default PC range
+static bool g_fullRangeColor = false; // default to limited (TV) range
 
 static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height)
 {
@@ -451,7 +451,8 @@ namespace Encoder {
         else if (encoderName == "libx264") {
             av_dict_set(&opts, "preset", "ultrafast", 0);
             av_dict_set(&opts, "tune", "zerolatency", 0);
-            av_dict_set(&opts, "x264-params", "repeat-headers=1", 0);
+            // Constrained Baseline: disable CABAC, ensure HRD CBR signaling, CFR, and repeat headers
+            av_dict_set(&opts, "x264-params", "repeat-headers=1:no-cabac=1:nal-hrd=cbr:force-cfr=1", 0);
         }
 
         // Ensure Annex B where supported (NVENC/libx264 use AVCodecContext flags instead of option)
