@@ -244,16 +244,11 @@ namespace Encoder {
             std::wcout << L"[Encoder] framerate num/den: " << fpsNum << L"/" << fpsDen << L" (~" << fpsVal << L" fps)\n";
             loggedFps = true;
         }
-        // Prefer delta PTS if available, else derive from nominal FPS
-        static int64_t lastPtsUs = -1;
-        int64_t ptsUs = av_rescale_q(packet->pts, codecCtx->time_base, AVRational{1, 1000000});
-        int64_t frameDurationUs;
-        if (lastPtsUs > 0 && ptsUs > lastPtsUs) {
-            frameDurationUs = ptsUs - lastPtsUs;
-        } else {
-            frameDurationUs = static_cast<int64_t>(1000000.0 / (fpsVal > 1.0 ? fpsVal : 60.0));
+        // Pace samples strictly by configured FPS to avoid drift-induced slowdown
+        int64_t frameDurationUs = 0;
+        if (fpsNum > 0) {
+            frameDurationUs = static_cast<int64_t>( (1000000.0 * (fpsDen > 0 ? fpsDen : 1)) / static_cast<double>(fpsNum) );
         }
-        lastPtsUs = ptsUs;
         if (frameDurationUs <= 0) frameDurationUs = 8333; // ~120fps fallback
         int result = sendVideoSample(packet->data, packet->size, frameDurationUs);
         if (result != 0) {
