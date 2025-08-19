@@ -147,11 +147,18 @@ winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(
     return texture;
 }
 
+static std::atomic<int> g_framePoolBuffers{3};
+void SetFramePoolBuffers(int bufferCount) {
+    if (bufferCount < 1) bufferCount = 1;
+    if (bufferCount > 8) bufferCount = 8;
+    g_framePoolBuffers.store(bufferCount);
+}
+
 Direct3D11CaptureFramePool createFreeThreadedFramePool(
     Direct3D11::IDirect3DDevice d3dDevice,
     winrt::Windows::Graphics::SizeInt32 size)
 {
-    int numberOfBuffers = 2; // lower buffering to reduce latency
+    int numberOfBuffers = g_framePoolBuffers.load();
     auto pixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
     Direct3D11CaptureFramePool framePool = nullptr;
     try

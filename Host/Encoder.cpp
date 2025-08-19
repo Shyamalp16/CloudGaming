@@ -76,6 +76,13 @@ static std::atomic<int> g_reopenTargetBitrate{0};
 static std::atomic<int> g_eagainCount{0};
 static std::chrono::steady_clock::time_point g_lastEagain = std::chrono::steady_clock::now();
 static bool g_fullRangeColor = false; // default to limited (TV) range
+// NVENC configurable options
+static std::string g_nvPreset = "p5"; // faster low-latency default
+static std::string g_nvRc = "cbr";
+static int g_nvBf = 0;
+static int g_nvRcLookahead = 0;
+static int g_nvAsyncDepth = 2;
+static int g_nvSurfaces = 8;
 
 static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height)
 {
@@ -118,6 +125,19 @@ static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height
 }
 
 namespace Encoder {
+    void SetNvencOptions(const char* preset,
+                         const char* rc,
+                         int bf,
+                         int rc_lookahead,
+                         int async_depth,
+                         int surfaces) {
+        if (preset && *preset) g_nvPreset = preset;
+        if (rc && *rc) g_nvRc = rc;
+        if (bf >= 0) g_nvBf = bf;
+        if (rc_lookahead >= 0) g_nvRcLookahead = rc_lookahead;
+        if (async_depth >= 0) g_nvAsyncDepth = async_depth;
+        if (surfaces >= 1) g_nvSurfaces = surfaces;
+    }
     void SetFullRangeColor(bool enable_full_range) {
         g_fullRangeColor = enable_full_range;
     }
@@ -396,20 +416,36 @@ namespace Encoder {
 
         AVDictionary* opts = nullptr;
         if (encoderName == "h264_nvenc") {
-            // Use high-quality preset per your preference, but keep low-latency flags
-            av_dict_set(&opts, "preset", "p7", 0);            // highest quality
-            av_dict_set(&opts, "tune", "ull", 0);             // ultra low latency
-            av_dict_set(&opts, "rc", "cbr", 0);
+            // Low-latency, faster preset configurable
+            av_dict_set(&opts, "preset", g_nvPreset.c_str(), 0); // e.g. p4/p5
+            av_dict_set(&opts, "tune", "ull", 0);
+            av_dict_set(&opts, "rc", g_nvRc.c_str(), 0);         // cbr/cbr_hq
             av_dict_set(&opts, "repeat-headers", "1", 0);
             av_dict_set(&opts, "profile", "baseline", 0);
-            av_dict_set(&opts, "rc-lookahead", "0", 0);
-            av_dict_set(&opts, "bf", "0", 0);
-            // Keep AQ for visual quality while letting NVENC handle perf
+            {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%d", g_nvRcLookahead);
+                av_dict_set(&opts, "rc-lookahead", buf, 0);
+            }
+            {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%d", g_nvBf);
+                av_dict_set(&opts, "bf", buf, 0);
+            }
+            // AQ for visual quality
             av_dict_set(&opts, "spatial_aq", "1", 0);
             av_dict_set(&opts, "aq-strength", "10", 0);
-            // Reduce queueing depth to help frame pacing
-            av_dict_set(&opts, "async_depth", "1", 0);
-            av_dict_set(&opts, "surfaces", "4", 0);
+            // Queue/pool sizes for throughput
+            {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%d", g_nvAsyncDepth);
+                av_dict_set(&opts, "async_depth", buf, 0);
+            }
+            {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%d", g_nvSurfaces);
+                av_dict_set(&opts, "surfaces", buf, 0);
+            }
             // Looser VBV to reduce quality pulsing
             char rateBuf[32];
             char buf2[32];

@@ -192,11 +192,24 @@ int main()
                 int pool = vcfg["hwFramePoolSize"].get<int>();
                 Encoder::SetHwFramePoolSize(pool);
             }
+            // Optional: NVENC tuning knobs
+            std::string preset = vcfg.value("preset", std::string("p5"));
+            std::string rc     = vcfg.value("rc", std::string("cbr"));
+            int bf             = vcfg.value("bf", 0);
+            int rcLookahead    = vcfg.value("rcLookahead", 0);
+            int asyncDepth     = vcfg.value("asyncDepth", 2);
+            int surfaces       = vcfg.value("surfaces", 8);
+            Encoder::SetNvencOptions(preset.c_str(), rc.c_str(), bf, rcLookahead, asyncDepth, surfaces);
         }
         if (config.contains("host") && config["host"].contains("capture")) {
             auto ccfg = config["host"]["capture"];
             if (ccfg.contains("maxQueueDepth")) {
                 SetMaxQueuedFrames(std::max(1, ccfg["maxQueueDepth"].get<int>()));
+            }
+            if (ccfg.contains("framePoolBuffers")) {
+                SetFramePoolBuffers(std::max(1, ccfg["framePoolBuffers"].get<int>()));
+            } else if (ccfg.contains("numberOfBuffers")) {
+                SetFramePoolBuffers(std::max(1, ccfg["numberOfBuffers"].get<int>()));
             }
             if (ccfg.contains("dropWindowMs") || ccfg.contains("dropMinEvents")) {
                 int w = ccfg.value("dropWindowMs", 200);

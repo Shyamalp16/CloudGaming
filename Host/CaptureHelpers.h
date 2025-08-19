@@ -20,6 +20,9 @@ createFreeThreadedFramePool(
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice d3dDevice,
     winrt::Windows::Graphics::SizeInt32 size);
 
+// Configure number of buffers in the WGC free-threaded frame pool
+void SetFramePoolBuffers(int bufferCount);
+
 //Create CaptureSession
 winrt::Windows::Graphics::Capture::GraphicsCaptureSession
 createCaptureSession(

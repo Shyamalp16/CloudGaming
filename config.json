@@ -15,10 +15,17 @@
       "bitrateMin": 30000000,
       "bitrateMax": 60000000,
       "hwFramePoolSize": 4,
-      "fullRange": false
+      "fullRange": false,
+      "preset": "p7",
+      "rc": "cbr",
+      "bf": 0,
+      "rcLookahead": 0,
+      "asyncDepth": 2,
+      "surfaces": 8
     },
     "capture": {
       "maxQueueDepth": 4,
+      "framePoolBuffers": 3,
       "dropWindowMs": 200,
       "dropMinEvents": 2,
       "mmcss": { "enable": true, "priority": 2 }

@@ -43,6 +43,14 @@ namespace Encoder {
     // Configure whether to signal full range (PC) or limited range (TV) in color metadata
     void SetFullRangeColor(bool enable_full_range);
 
+    // Configure NVENC runtime options
+    void SetNvencOptions(const char* preset,
+                         const char* rc,
+                         int bf,
+                         int rc_lookahead,
+                         int async_depth,
+                         int surfaces);
+
     // RTCP-driven bitrate control (in-encoder strategy)
     void ConfigureBitrateController(int min_bps,
                                     int max_bps,
