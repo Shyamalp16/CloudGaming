@@ -14,7 +14,8 @@
       "bitrateStart": 45000000,
       "bitrateMin": 30000000,
       "bitrateMax": 60000000,
-      "hwFramePoolSize": 4
+      "hwFramePoolSize": 4,
+      "fullRange": false
     },
     "capture": {
       "maxQueueDepth": 4,

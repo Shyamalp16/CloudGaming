@@ -184,6 +184,9 @@ int main()
                                                3,         // clean samples required
                                                1000);     // increase interval
             SetCaptureTargetFps(fps);
+            // Optional color range control (default full range true)
+            bool fullRange = vcfg.value("fullRange", true);
+            Encoder::SetFullRangeColor(fullRange);
             // Optional: configure encoder hardware frame pool size
             if (vcfg.contains("hwFramePoolSize")) {
                 int pool = vcfg["hwFramePoolSize"].get<int>();

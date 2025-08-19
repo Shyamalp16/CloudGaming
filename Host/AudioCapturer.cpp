@@ -249,11 +249,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     << L", wBitsPerSample=" << pwfx->wBitsPerSample
                     << L", cbSize=" << pwfx->cbSize << std::endl;
                 
-                // Verify format compatibility for Opus encoding
-                if (pwfx->nSamplesPerSec != 48000) {
-                    std::wcout << L"[AudioCapturer] WARNING: Audio format is " << pwfx->nSamplesPerSec 
-                               << L"Hz, but Opus encoder expects 48kHz. Resampling may be needed." << std::endl;
-                }
+                // Note: We'll resample to 48kHz if needed
 
                 // Try event-driven mode first for ultra-low latency
                 DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
@@ -419,6 +415,14 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 }
             }
             processedSamples.assign(m_floatBuffer.begin(), m_floatBuffer.begin() + totalSamples);
+
+            // Resample to 48kHz if source rate differs
+            if (pwfx->nSamplesPerSec != 48000) {
+                std::vector<float> resampled;
+                uint32_t channels = pwfx->nChannels;
+                ResampleTo48k(processedSamples.data(), numFramesAvailable, pwfx->nSamplesPerSec, channels, resampled);
+                processedSamples.swap(resampled);
+            }
 
             // Calculate timestamp for this audio data using IAudioClock if available
             int64_t timestampUs = 0;
@@ -598,4 +602,61 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
 }
 
 
+
+void AudioCapturer::ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out)
+{
+    if (inRate == 0 || channels == 0) { out.clear(); return; }
+    if (inRate == 48000) {
+        out.assign(in, in + inFrames * channels);
+        return;
+    }
+
+    // Linear interpolation per channel with persistent phase
+    double ratio = 48000.0 / static_cast<double>(inRate);
+    size_t outFrames = static_cast<size_t>(std::ceil((inFrames) * ratio));
+    out.resize(outFrames * channels);
+
+    // For continuity across calls when rates remain the same
+    if (m_lastInputRate != inRate) {
+        m_resamplePhase = 0.0;
+        m_resampleRemainder.assign(channels, 0.0f);
+        m_lastInputRate = inRate;
+    }
+
+    // Start with previous remainder sample for interpolation continuity
+    std::vector<float> prev(channels, 0.0f);
+    if (!m_resampleRemainder.empty()) {
+        prev = m_resampleRemainder;
+    }
+
+    size_t inIndex = 0; // frame index
+    for (size_t o = 0; o < outFrames; ++o) {
+        double srcPos = (o / ratio);
+        size_t i0 = static_cast<size_t>(srcPos);
+        double frac = srcPos - static_cast<double>(i0);
+
+        for (uint32_t ch = 0; ch < channels; ++ch) {
+            float s0, s1;
+            if (i0 == 0) {
+                s0 = prev[ch];
+            } else {
+                s0 = in[(i0 - 1) * channels + ch];
+            }
+            if (i0 < inFrames) {
+                s1 = in[i0 * channels + ch];
+            } else {
+                s1 = in[(inFrames - 1) * channels + ch];
+            }
+            out[o * channels + ch] = s0 + static_cast<float>(frac) * (s1 - s0);
+        }
+    }
+
+    // Save last input sample as remainder for continuity
+    if (inFrames > 0) {
+        m_resampleRemainder.resize(channels);
+        for (uint32_t ch = 0; ch < channels; ++ch) {
+            m_resampleRemainder[ch] = in[(inFrames - 1) * channels + ch];
+        }
+    }
+}
 

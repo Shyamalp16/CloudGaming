@@ -40,6 +40,9 @@ namespace Encoder {
     // Configure hardware frame pool size (ring of input D3D11 frames)
     void SetHwFramePoolSize(int pool_size);
 
+    // Configure whether to signal full range (PC) or limited range (TV) in color metadata
+    void SetFullRangeColor(bool enable_full_range);
+
     // RTCP-driven bitrate control (in-encoder strategy)
     void ConfigureBitrateController(int min_bps,
                                     int max_bps,

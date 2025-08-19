@@ -75,6 +75,7 @@ static std::atomic<bool> g_pendingReopen{false};
 static std::atomic<int> g_reopenTargetBitrate{0};
 static std::atomic<int> g_eagainCount{0};
 static std::chrono::steady_clock::time_point g_lastEagain = std::chrono::steady_clock::now();
+static bool g_fullRangeColor = true; // default PC range
 
 static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height)
 {
@@ -117,6 +118,9 @@ static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height
 }
 
 namespace Encoder {
+    void SetFullRangeColor(bool enable_full_range) {
+        g_fullRangeColor = enable_full_range;
+    }
     void SetHwFramePoolSize(int pool_size) {
         // Keep within sensible bounds
         if (pool_size < 2) pool_size = 2;
@@ -333,8 +337,8 @@ namespace Encoder {
         codecCtx->rc_max_rate = codecCtx->bit_rate;
         codecCtx->rc_buffer_size = codecCtx->bit_rate * 2;
 
-        // Signal SDR BT.709 full range for desktop capture; match encoder opts below
-        codecCtx->color_range     = AVCOL_RANGE_JPEG;   // full (PC range)
+        // Signal SDR BT.709 range for desktop capture; configurable full/limited
+        codecCtx->color_range     = g_fullRangeColor ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
         codecCtx->color_primaries = AVCOL_PRI_BT709;
         codecCtx->color_trc       = AVCOL_TRC_BT709;
         codecCtx->colorspace      = AVCOL_SPC_BT709;
@@ -422,7 +426,7 @@ namespace Encoder {
             av_dict_set(&opts, "colorspace", "bt709", 0);
             av_dict_set(&opts, "color_primaries", "bt709", 0);
             av_dict_set(&opts, "color_trc", "bt709", 0);
-            av_dict_set(&opts, "color_range", "pc", 0); // full range
+            av_dict_set(&opts, "color_range", g_fullRangeColor ? "pc" : "tv", 0);
             // Let NVENC pick appropriate level automatically
             // Relax forced IDR (handled by gop_size)
         } else if (encoderName == "libx264") {
@@ -430,7 +434,7 @@ namespace Encoder {
             av_dict_set(&opts, "colorprim", "bt709", 0);
             av_dict_set(&opts, "transfer",  "bt709", 0);
             av_dict_set(&opts, "colormatrix","bt709", 0);
-            av_dict_set(&opts, "fullrange", "1", 0); // full range
+            av_dict_set(&opts, "fullrange", g_fullRangeColor ? "1" : "0", 0);
             av_dict_set(&opts, "profile", "baseline", 0); // match SDP baseline
         }
         else if (encoderName == "h264_qsv") {

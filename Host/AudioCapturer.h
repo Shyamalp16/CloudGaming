@@ -26,6 +26,7 @@ private:
     void CaptureThread(DWORD processId);
     bool ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, void* format, std::vector<float>& floatData);
     void ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs);
+    void ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out);
     
     std::thread m_captureThread;
     std::atomic<bool> m_stopCapture;
@@ -54,4 +55,9 @@ private:
 
     // Persistent audio float buffer to avoid per-packet allocations
     std::vector<float> m_floatBuffer;
+
+    // Simple resampler state for linear interpolation between callbacks
+    std::vector<float> m_resampleRemainder; // per-channel remainder sample
+    double m_resamplePhase = 0.0;
+    uint32_t m_lastInputRate = 0;
 };
