@@ -37,6 +37,9 @@ namespace Encoder {
     // Configure encoder bitrate defaults (used on InitializeEncoder)
     void SetBitrateConfig(int start_bitrate_bps, int min_bitrate_bps, int max_bitrate_bps);
 
+    // Configure hardware frame pool size (ring of input D3D11 frames)
+    void SetHwFramePoolSize(int pool_size);
+
     // RTCP-driven bitrate control (in-encoder strategy)
     void ConfigureBitrateController(int min_bps,
                                     int max_bps,
@@ -61,7 +64,6 @@ namespace Encoder {
     extern AVCodecContext* codecCtx;
     extern AVStream* videoStream;
     extern AVPacket* packet;
-    extern AVFrame* hwFrame;
     extern AVBufferRef* hwDeviceCtx;
     extern AVBufferRef* hwFramesCtx;
     extern int frameCounter;

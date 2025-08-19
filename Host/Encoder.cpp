@@ -24,7 +24,6 @@ AVFormatContext* Encoder::formatCtx = nullptr;
 AVCodecContext* Encoder::codecCtx = nullptr;
 AVStream* Encoder::videoStream = nullptr;
 AVPacket* Encoder::packet = nullptr;
-AVFrame* Encoder::hwFrame = nullptr;
 AVBufferRef* Encoder::hwDeviceCtx = nullptr;
 AVBufferRef* Encoder::hwFramesCtx = nullptr;
 int Encoder::frameCounter = 0;
@@ -53,6 +52,11 @@ static int g_vpHeight = 0;
 // Cached views to avoid per-frame allocations
 static std::unordered_map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView>> g_inputViewCache;
 static std::unordered_map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView>> g_outputViewCache;
+
+// Hardware frame ring
+static std::vector<AVFrame*> g_hwFrames;
+static int g_hwFrameIndex = 0;
+static int g_hwFramePoolSize = 4; // default to NVENC surfaces; >= async_depth
 
 // Encoder runtime configuration (overridable from host config)
 static int g_startBitrateBps = 20000000; // 20 Mbps default
@@ -113,6 +117,12 @@ static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height
 }
 
 namespace Encoder {
+    void SetHwFramePoolSize(int pool_size) {
+        // Keep within sensible bounds
+        if (pool_size < 2) pool_size = 2;
+        if (pool_size > 32) pool_size = 32;
+        g_hwFramePoolSize = pool_size;
+    }
     void SetBitrateConfig(int start_bps, int min_bps, int max_bps) {
         if (start_bps > 0) g_startBitrateBps = start_bps;
         if (min_bps > 0) g_minBitrateBps = min_bps;
@@ -221,20 +231,7 @@ namespace Encoder {
 
     void pushPacketToWebRTC(AVPacket* packet) {
         //std::wcout << L"[WebRTC] Pushing encoded packets (PTS: " << packet->pts << L") to WebRTC module.\n";
-        {
-            std::lock_guard<std::mutex> lock(g_frameMutex);
-            g_latestFrameData.assign(packet->data, packet->data + packet->size);
-            // Convert packet PTS from codec time_base to microseconds for downstream RTP timestamping
-            int64_t pts_us = av_rescale_q(packet->pts, codecCtx->time_base, AVRational{1, 1000000});
-            g_latestPTS = pts_us;
-            g_frameReady = true;
-        }
-        g_frameAvailable.notify_one();
-
-        logNALUnits(packet->data, packet->size);
-
-        // Pass PTS in microseconds to Go layer
-        // Provide frame duration from current encoder FPS for paced sending
+        // Directly send to WebRTC without extra copy/queue. Compute duration from codec framerate
         static bool loggedFps = false;
         int fpsNum = codecCtx ? codecCtx->framerate.num : 60;
         int fpsDen = codecCtx ? codecCtx->framerate.den : 1;
@@ -243,15 +240,16 @@ namespace Encoder {
             std::wcout << L"[Encoder] framerate num/den: " << fpsNum << L"/" << fpsDen << L" (~" << fpsVal << L" fps)\n";
             loggedFps = true;
         }
-        // Fallback to measured delta between successive frames if needed
+        // Prefer delta PTS if available, else derive from nominal FPS
         static int64_t lastPtsUs = -1;
+        int64_t ptsUs = av_rescale_q(packet->pts, codecCtx->time_base, AVRational{1, 1000000});
         int64_t frameDurationUs;
-        if (lastPtsUs > 0 && g_latestPTS > lastPtsUs) {
-            frameDurationUs = g_latestPTS - lastPtsUs;
+        if (lastPtsUs > 0 && ptsUs > lastPtsUs) {
+            frameDurationUs = ptsUs - lastPtsUs;
         } else {
             frameDurationUs = static_cast<int64_t>(1000000.0 / (fpsVal > 1.0 ? fpsVal : 60.0));
         }
-        lastPtsUs = g_latestPTS;
+        lastPtsUs = ptsUs;
         if (frameDurationUs <= 0) frameDurationUs = 8333; // ~120fps fallback
         int result = sendVideoSample(packet->data, packet->size, frameDurationUs);
         if (result != 0) {
@@ -265,9 +263,12 @@ namespace Encoder {
         // Clear caches when (re)initializing encoder
         g_inputViewCache.clear();
         g_outputViewCache.clear();
+        // Free any existing hardware frame ring
+        for (AVFrame* f : g_hwFrames) { if (f) av_frame_free(&f); }
+        g_hwFrames.clear();
+        g_hwFrameIndex = 0;
 
         if (codecCtx) avcodec_free_context(&codecCtx);
-        if (hwFrame) av_frame_free(&hwFrame);
         if (hwFramesCtx) av_buffer_unref(&hwFramesCtx);
         if (hwDeviceCtx) av_buffer_unref(&hwDeviceCtx);
         if (formatCtx) {
@@ -375,17 +376,18 @@ namespace Encoder {
             }
             codecCtx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
 
-            hwFrame = av_frame_alloc();
-            if (av_hwframe_get_buffer(codecCtx->hw_frames_ctx, hwFrame, 0) < 0) {
-                // Retry with larger pool and explicit bind flags
-                AVHWFramesContext* retryCtx = (AVHWFramesContext*)hwFramesCtx->data;
-                retryCtx->initial_pool_size = 16;
-                AVD3D11VAFramesContext* hw = (AVD3D11VAFramesContext*)retryCtx->hwctx;
-                if (hw) hw->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-                if (av_hwframe_ctx_init(hwFramesCtx) < 0 || av_hwframe_get_buffer(codecCtx->hw_frames_ctx, hwFrame, 0) < 0) {
-                    std::cerr << "[Encoder] Failed to alloc hwFrame after retry." << std::endl;
-                    return;
+            // Create a ring of hardware frames
+            g_hwFrames.clear();
+            g_hwFrameIndex = 0;
+            // Use pool size at least as large as encoder async depth/surfaces
+            int desiredPool = std::max(g_hwFramePoolSize, 8);
+            for (int i = 0; i < desiredPool; ++i) {
+                AVFrame* f = av_frame_alloc();
+                if (!f) { std::cerr << "[Encoder] av_frame_alloc failed for hw frame." << std::endl; return; }
+                if (av_hwframe_get_buffer(codecCtx->hw_frames_ctx, f, 0) < 0) {
+                    std::cerr << "[Encoder] av_hwframe_get_buffer failed for hw frame " << i << std::endl; return;
                 }
+                g_hwFrames.push_back(f);
             }
 
             InitializeVideoProcessor((ID3D11Device*)GetD3DDevice().get(), width, height);
@@ -497,7 +499,7 @@ namespace Encoder {
             }
             g_pendingReopen.store(false);
         }
-        if (!codecCtx || !hwFrame || !g_videoProcessor) {
+        if (!codecCtx || g_hwFrames.empty() || !g_videoProcessor) {
             std::cerr << "[Encoder] Encoder/VideoProcessor not initialized." << std::endl;
             return;
         }
@@ -509,7 +511,7 @@ namespace Encoder {
         int srcH = (int)(srcDesc.Height & ~1U);
         if (srcW != currentWidth || srcH != currentHeight) {
             // Reconfigure hw frames and video processor for new size
-            if (hwFrame) { av_frame_free(&hwFrame); hwFrame = nullptr; }
+            // Recreate hardware frame pool for new size
             if (hwFramesCtx) { av_buffer_unref(&hwFramesCtx); hwFramesCtx = nullptr; }
             currentWidth = srcW; currentHeight = srcH;
             hwFramesCtx = av_hwframe_ctx_alloc(hwDeviceCtx);
@@ -528,8 +530,17 @@ namespace Encoder {
             if (av_hwframe_ctx_init(hwFramesCtx) < 0) return;
             if (codecCtx->hw_frames_ctx) av_buffer_unref(&codecCtx->hw_frames_ctx);
             codecCtx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
-            hwFrame = av_frame_alloc();
-            if (av_hwframe_get_buffer(codecCtx->hw_frames_ctx, hwFrame, 0) < 0) return;
+            // Rebuild hw frame ring
+            for (AVFrame* f : g_hwFrames) { if (f) av_frame_free(&f); }
+            g_hwFrames.clear();
+            g_hwFrameIndex = 0;
+            int desiredPool = std::max(g_hwFramePoolSize, 8);
+            for (int i = 0; i < desiredPool; ++i) {
+                AVFrame* f = av_frame_alloc();
+                if (!f) return;
+                if (av_hwframe_get_buffer(codecCtx->hw_frames_ctx, f, 0) < 0) return;
+                g_hwFrames.push_back(f);
+            }
             InitializeVideoProcessor((ID3D11Device*)GetD3DDevice().get(), currentWidth, currentHeight);
         }
 
@@ -563,8 +574,10 @@ namespace Encoder {
             g_inputViewCache[texture] = inView;
         }
 
-        // Cached output view for FFmpeg's NV12 texture
-        ID3D11Texture2D* ffmpegNV12 = (ID3D11Texture2D*)hwFrame->data[0];
+        // Cached output view for FFmpeg's NV12 texture from ring
+        AVFrame* hwFrameLocal = g_hwFrames[g_hwFrameIndex];
+        g_hwFrameIndex = (g_hwFrameIndex + 1) % static_cast<int>(g_hwFrames.size());
+        ID3D11Texture2D* ffmpegNV12 = (ID3D11Texture2D*)hwFrameLocal->data[0];
         Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
         auto itOut = g_outputViewCache.find(ffmpegNV12);
         if (itOut != g_outputViewCache.end()) {
@@ -597,9 +610,9 @@ namespace Encoder {
 
         // No extra copy needed; VP wrote directly into ffmpegNV12 via output view
 
-        hwFrame->pts = av_rescale_q(pts, { 1, 1000000 }, codecCtx->time_base);
+        hwFrameLocal->pts = av_rescale_q(pts, { 1, 1000000 }, codecCtx->time_base);
 
-        int ret = avcodec_send_frame(codecCtx, hwFrame);
+        int ret = avcodec_send_frame(codecCtx, hwFrameLocal);
         if (ret == AVERROR(EAGAIN)) {
             // Encoder output queue full; drain packets and retry once
             g_eagainCount.fetch_add(1);
@@ -619,7 +632,7 @@ namespace Encoder {
                 av_packet_unref(packet);
             }
             // Retry once after draining
-            ret = avcodec_send_frame(codecCtx, hwFrame);
+            ret = avcodec_send_frame(codecCtx, hwFrameLocal);
         }
 
         if (ret < 0) {
@@ -692,14 +705,10 @@ namespace Encoder {
             avformat_free_context(formatCtx);
             formatCtx = nullptr;
         }
-        if (packet) {
-            av_packet_free(&packet);
-            packet = nullptr;
-        }
-        if (hwFrame) {
-            av_frame_free(&hwFrame);
-            hwFrame = nullptr;
-        }
+        if (packet) { av_packet_free(&packet); packet = nullptr; }
+        // Free hw frame ring
+        for (AVFrame* f : g_hwFrames) { if (f) av_frame_free(&f); }
+        g_hwFrames.clear();
         if (hwFramesCtx) {
             av_buffer_unref(&hwFramesCtx);
             hwFramesCtx = nullptr;

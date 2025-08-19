@@ -184,6 +184,11 @@ int main()
                                                3,         // clean samples required
                                                1000);     // increase interval
             SetCaptureTargetFps(fps);
+            // Optional: configure encoder hardware frame pool size
+            if (vcfg.contains("hwFramePoolSize")) {
+                int pool = vcfg["hwFramePoolSize"].get<int>();
+                Encoder::SetHwFramePoolSize(pool);
+            }
         }
         if (config.contains("host") && config["host"].contains("capture")) {
             auto ccfg = config["host"]["capture"];
