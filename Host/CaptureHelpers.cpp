@@ -292,18 +292,58 @@ void ProcessFrames() {
     static int lastInitW = 0;
     static int lastInitH = 0;
 
+    // Simple frame pacing: encode at target FPS, prefer the freshest frame per slot
+    static auto nextEncodeTime = std::chrono::steady_clock::now();
     while (true) {
         FrameData frameData;
 
         {
             std::unique_lock<std::mutex> lock(queueMutex);
+            // Wait for frames or shutdown, but also align to pacing time
             queueCV.wait(lock, [&]() { return !framePriorityQueue.empty() || !isCapturing.load(); });
-
             if (!isCapturing.load() && framePriorityQueue.empty()) break;
 
-            if (!framePriorityQueue.empty()) {
-                frameData = framePriorityQueue.top();
-                framePriorityQueue.pop();
+            // Determine pacing deadline
+            auto now = std::chrono::steady_clock::now();
+            auto intervalUs = std::max(1, 1000000 / std::max(1, g_targetFps.load()));
+            auto interval = std::chrono::microseconds(intervalUs);
+            if (nextEncodeTime.time_since_epoch().count() == 0) {
+                nextEncodeTime = now;
+            }
+
+            // If we're early, keep only the latest frame in the queue and wait until the encode slot
+            if (now < nextEncodeTime) {
+                while (framePriorityQueue.size() > 1) {
+                    auto drop = framePriorityQueue.top();
+                    framePriorityQueue.pop();
+                    // release any texture pool slot used by dropped frame
+                    if (drop.poolIndex >= 0) {
+                        ReleasePoolSlot(drop.poolIndex);
+                    }
+                }
+                // Timed wait until the next encode slot or until a new frame arrives
+                queueCV.wait_until(lock, nextEncodeTime, [&]() { return !framePriorityQueue.empty() || !isCapturing.load(); });
+            }
+
+            // Recompute time and slot; catch up if we're late
+            now = std::chrono::steady_clock::now();
+            while (now > nextEncodeTime + interval) {
+                nextEncodeTime += interval; // skip overdue slots
+            }
+            if (now >= nextEncodeTime) {
+                // Pick the freshest frame (drop older ones)
+                while (framePriorityQueue.size() > 1) {
+                    auto drop = framePriorityQueue.top();
+                    framePriorityQueue.pop();
+                    if (drop.poolIndex >= 0) {
+                        ReleasePoolSlot(drop.poolIndex);
+                    }
+                }
+                if (!framePriorityQueue.empty()) {
+                    frameData = framePriorityQueue.top();
+                    framePriorityQueue.pop();
+                }
+                nextEncodeTime += interval;
             }
         }
 
