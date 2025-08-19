@@ -203,7 +203,17 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
 
                 int sequenceNumber = frameSequenceCounter++;
                 // Timestamp in microseconds for encoder/Go layer
-                int64_t timestamp = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+                // Prefer WGC SystemRelativeTime (100ns units) for stable, system-aligned timestamps
+                int64_t timestamp = 0;
+                try {
+                    auto srt = frame.SystemRelativeTime();
+                    // Convert 100ns units to microseconds
+                    timestamp = static_cast<int64_t>(srt.count() / 10);
+                } catch (...) {}
+                if (timestamp <= 0) {
+                    // Fallback to steady_clock if SRT unavailable
+                    timestamp = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+                }
                 // Log ContentSize when it changes
                 try {
                     auto cs = frame.ContentSize();
