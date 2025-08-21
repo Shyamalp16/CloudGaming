@@ -463,7 +463,7 @@ namespace Encoder {
             av_dict_set(&opts, "tune", "ull", 0);
             av_dict_set(&opts, "rc", g_nvRc.c_str(), 0);         // cbr/cbr_hq
             av_dict_set(&opts, "repeat-headers", "1", 0);
-            av_dict_set(&opts, "profile", "baseline", 0);
+            av_dict_set(&opts, "profile", "high", 0);
             {
                 char buf[16];
                 snprintf(buf, sizeof(buf), "%d", g_nvRcLookahead);
@@ -508,18 +508,18 @@ namespace Encoder {
             av_dict_set(&opts, "transfer",  "bt709", 0);
             av_dict_set(&opts, "colormatrix","bt709", 0);
             av_dict_set(&opts, "fullrange", g_fullRangeColor ? "1" : "0", 0);
-            av_dict_set(&opts, "profile", "baseline", 0); // match SDP baseline
+            av_dict_set(&opts, "profile", "high", 0); // match SDP high
         }
         else if (encoderName == "h264_qsv") {
             av_dict_set(&opts, "preset", "veryfast", 0);
             av_dict_set(&opts, "zerolatency", "1", 0);
             av_dict_set(&opts, "repeat-headers", "1", 0);
-            av_dict_set(&opts, "profile", "baseline", 0);
+            av_dict_set(&opts, "profile", "high", 0);
         }
         else if (encoderName == "h264_amf") {
             av_dict_set(&opts, "usage", "lowlatency_high_quality", 0);
             av_dict_set(&opts, "repeat-headers", "1", 0);
-            av_dict_set(&opts, "profile", "baseline", 0);
+            av_dict_set(&opts, "profile", "high", 0);
         }
         else if (encoderName == "libx264") {
             av_dict_set(&opts, "preset", "ultrafast", 0);

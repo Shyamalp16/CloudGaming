@@ -83,6 +83,12 @@ static std::atomic<bool> g_cursorCaptureEnabled{true};
 static std::atomic<bool> g_borderRequired{true};
 void SetCursorCaptureEnabled(bool enable) { g_cursorCaptureEnabled.store(enable); }
 void SetBorderRequired(bool required) { g_borderRequired.store(required); }
+// MinUpdateInterval (100ns units). 0 means not set
+static std::atomic<long long> g_minUpdateInterval100ns{0};
+void SetMinUpdateInterval100ns(long long interval100ns) {
+    if (interval100ns < 0) interval100ns = 0;
+    g_minUpdateInterval100ns.store(interval100ns);
+}
 
 // Texture pool for copy surfaces (per resolution)
 static std::vector<winrt::com_ptr<ID3D11Texture2D>> g_copyPool;
@@ -208,6 +214,14 @@ GraphicsCaptureSession createCaptureSession(
         session.IsCursorCaptureEnabled(g_cursorCaptureEnabled.load());
         // Best-effort: some OS versions expose IsBorderRequired
         try { session.IsBorderRequired(g_borderRequired.load()); } catch (...) {}
+        // Configure MinUpdateInterval if requested
+        try {
+            auto val = g_minUpdateInterval100ns.load();
+            if (val > 0) {
+                session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ val });
+                std::wcout << L"[WGC] MinUpdateInterval set to " << val << L" (100ns units)" << std::endl;
+            }
+        } catch (...) {}
     }
     catch (const winrt::hresult_error& e)
     {

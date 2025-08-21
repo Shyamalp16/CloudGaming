@@ -251,6 +251,11 @@ int main()
                 int prio = mcfg.value("priority", 2); // 0..3
                 SetMmcssConfig(enable, prio);
             }
+            if (ccfg.contains("minUpdateInterval100ns")) {
+                long long interval = 0;
+                try { interval = ccfg["minUpdateInterval100ns"].get<long long>(); } catch (...) { interval = 0; }
+                SetMinUpdateInterval100ns(interval);
+            }
         }
     } catch (...) {}
     StartCapture();

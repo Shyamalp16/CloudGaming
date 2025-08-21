@@ -64,3 +64,6 @@ void SetBorderRequired(bool required);
 
 // Configure copy texture pool size (number of pooled textures for CopyResource)
 void SetCopyPoolSize(int poolSize);
+
+// Configure WGC session MinUpdateInterval in 100ns units (0 disables)
+void SetMinUpdateInterval100ns(long long interval100ns);

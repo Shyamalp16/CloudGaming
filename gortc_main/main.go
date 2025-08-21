@@ -286,11 +286,20 @@ func createPeerConnectionGo() C.int {
 		log.Printf("[Go/Pion] Error registering default interceptors: %v\n", err)
 		return 0
 	}
+	// codec := webrtc.RTPCodecParameters{
+	// 	RTPCodecCapability: webrtc.RTPCodecCapability{
+	// 		MimeType:    "video/h264",
+	// 		ClockRate:   90000,
+	// 		SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033",
+	// 	},
+	// 	PayloadType: 96,
+	// }
+
 	codec := webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:    "video/h264",
 			ClockRate:   90000,
-			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033",
+			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c33",
 		},
 		PayloadType: 96,
 	}
@@ -781,8 +790,14 @@ func createPeerConnectionGo() C.int {
 	)
 
 	// Create video track (Sample based) with unified profile-level-id (42e033)
+	// videoTrack, err = webrtc.NewTrackLocalStaticSample(
+	// 	webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033"},
+	// 	"video",
+	// 	"game-stream",
+	// )
+
 	videoTrack, err = webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033"},
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c33"},
 		"video",
 		"game-stream",
 	)

@@ -10,10 +10,10 @@
       "targetHeight": 1080
     },
     "video": {
-      "fps": 240,
-      "pacingFixedUs": 4167,
+      "fps": 200,
+      "pacingFixedUs": 5000,
       "bitrateStart": 45000000,
-      "bitrateMin": 15000000,
+      "bitrateMin": 30000000,
       "bitrateMax": 60000000,
       "hwFramePoolSize": 16,
       "fullRange": false,
@@ -35,7 +35,8 @@
       "dropMinEvents": 3,
       "mmcss": { "enable": true, "priority": 2 },
       "cursor": false,
-      "borderRequired": false
+      "borderRequired": false,
+      "minUpdateInterval100ns": 50000
     }
   }
 }
