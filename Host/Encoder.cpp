@@ -77,6 +77,14 @@ static std::atomic<int> g_eagainCount{0};
 static std::chrono::steady_clock::time_point g_lastEagain = std::chrono::steady_clock::now();
 static bool g_fullRangeColor = false; // default to limited (TV) range
 // NVENC configurable options
+// Pacing config
+static std::atomic<int> g_pacingFps{0};
+static std::atomic<int> g_pacingFixedUs{0};
+// PLI policy
+static std::atomic<bool> g_ignorePli{false};
+static std::atomic<int> g_minPliIntervalMs{500};
+static std::atomic<double> g_minPliLossThreshold{0.03};
+static std::chrono::steady_clock::time_point g_lastPliTime = std::chrono::steady_clock::now() - std::chrono::seconds(10);
 static std::string g_nvPreset = "p5"; // faster low-latency default
 static std::string g_nvRc = "cbr";
 static int g_nvBf = 0;
@@ -125,6 +133,20 @@ static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height
 }
 
 namespace Encoder {
+    void SetPacingFps(int fps) {
+        g_pacingFps.store(fps);
+        if (fps > 0) g_pacingFixedUs.store(0);
+    }
+    void SetPacingFixedUs(int duration_us) {
+        g_pacingFixedUs.store(duration_us);
+        if (duration_us > 0) g_pacingFps.store(0);
+    }
+
+    void ConfigurePliPolicy(bool ignorePli, int minIntervalMs, double minLossThreshold) {
+        g_ignorePli.store(ignorePli);
+        if (minIntervalMs >= 0) g_minPliIntervalMs.store(minIntervalMs);
+        if (minLossThreshold >= 0.0) g_minPliLossThreshold.store(minLossThreshold);
+    }
     void SetNvencOptions(const char* preset,
                          const char* rc,
                          int bf,
@@ -172,7 +194,7 @@ namespace Encoder {
         auto now = std::chrono::steady_clock::now();
         auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastChange).count();
 
-        if (packetLoss >= 0.03) { // >= 3% loss
+        if (packetLoss >= g_minPliLossThreshold.load()) { // configurable loss trigger
             if (since >= g_decreaseCooldownMs) {
                 double factor = (packetLoss >= 0.10) ? 0.6 : 0.8;
                 int target = static_cast<int>(g_currentBitrate * factor);
@@ -196,6 +218,11 @@ namespace Encoder {
         }
     }
     extern "C" void OnPLI() {
+        if (g_ignorePli.load()) return;
+        auto now = std::chrono::steady_clock::now();
+        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastPliTime).count();
+        if (elapsedMs < g_minPliIntervalMs.load()) return;
+        g_lastPliTime = now;
         RequestIDR();
     }
 
@@ -264,12 +291,26 @@ namespace Encoder {
             std::wcout << L"[Encoder] framerate num/den: " << fpsNum << L"/" << fpsDen << L" (~" << fpsVal << L" fps)\n";
             loggedFps = true;
         }
-        // Pace samples strictly by configured FPS to avoid drift-induced slowdown
+        // Prefer fixed pacing to avoid drift: fixed microseconds or fixed FPS
+        int fixedUs = g_pacingFixedUs.load();
+        int cfgFps = g_pacingFps.load();
         int64_t frameDurationUs = 0;
-        if (fpsNum > 0) {
-            frameDurationUs = static_cast<int64_t>( (1000000.0 * (fpsDen > 0 ? fpsDen : 1)) / static_cast<double>(fpsNum) );
+        if (fixedUs > 0) {
+            frameDurationUs = fixedUs;
+        } else if (cfgFps > 0) {
+            frameDurationUs = static_cast<int64_t>(1000000.0 / static_cast<double>(cfgFps));
+        } else {
+            // fallback to encoder framerate if no explicit pacing
+            frameDurationUs = (fpsNum > 0) ? static_cast<int64_t>((1000000.0 * (fpsDen > 0 ? fpsDen : 1)) / static_cast<double>(fpsNum)) : 8333;
         }
         if (frameDurationUs <= 0) frameDurationUs = 8333; // ~120fps fallback
+        // Optional debug
+        static auto lastDurLog = std::chrono::steady_clock::now();
+        auto nowDur = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(nowDur - lastDurLog).count() >= 5) {
+            std::wcout << L"[Encoder] pacing durationUs=" << frameDurationUs << std::endl;
+            lastDurLog = nowDur;
+        }
         int result = sendVideoSample(packet->data, packet->size, frameDurationUs);
         if (result != 0) {
             std::wcerr << L"[WebRTC] Failed to send video packet to WebRTC module. Error code: " << result << L"\n";

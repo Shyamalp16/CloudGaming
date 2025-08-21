@@ -61,3 +61,6 @@ void SetCursorCaptureEnabled(bool enable);
 
 // Configure border requirement for capture session (visual border)
 void SetBorderRequired(bool required);
+
+// Configure copy texture pool size (number of pooled textures for CopyResource)
+void SetCopyPoolSize(int poolSize);

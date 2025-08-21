@@ -194,6 +194,17 @@ int main()
             // Optional color range control (default full range true)
             bool fullRange = vcfg.value("fullRange", true);
             Encoder::SetFullRangeColor(fullRange);
+            // Optional fixed pacing
+            if (vcfg.contains("pacingFixedUs")) {
+                Encoder::SetPacingFixedUs(std::max(1, vcfg["pacingFixedUs"].get<int>()));
+            } else if (vcfg.contains("pacingFps")) {
+                Encoder::SetPacingFps(std::max(1, vcfg["pacingFps"].get<int>()));
+            }
+            // Optional PLI policy
+            bool ignorePli = vcfg.value("ignorePli", false);
+            int minPliIntervalMs = vcfg.value("minPliIntervalMs", 500);
+            double minLossThreshold = vcfg.value("minPliLossThreshold", 0.03);
+            Encoder::ConfigurePliPolicy(ignorePli, minPliIntervalMs, minLossThreshold);
             // Optional: configure encoder hardware frame pool size
             if (vcfg.contains("hwFramePoolSize")) {
                 int pool = vcfg["hwFramePoolSize"].get<int>();
@@ -212,6 +223,9 @@ int main()
             auto ccfg = config["host"]["capture"];
             if (ccfg.contains("maxQueueDepth")) {
                 SetMaxQueuedFrames(std::max(1, ccfg["maxQueueDepth"].get<int>()));
+            }
+            if (ccfg.contains("copyPoolSize")) {
+                SetCopyPoolSize(std::max(2, ccfg["copyPoolSize"].get<int>()));
             }
             if (ccfg.contains("framePoolBuffers")) {
                 SetFramePoolBuffers(std::max(1, ccfg["framePoolBuffers"].get<int>()));

@@ -33,6 +33,7 @@ struct FrameData {
     winrt::com_ptr<ID3D11Texture2D> texture; // private copy for lifetime safety
     int poolIndex = -1; // index in texture pool; -1 if not pooled
     int64_t timestamp;
+    winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface{ nullptr }; // deferred copy source
 };
 
 struct FrameComparator {
@@ -41,11 +42,15 @@ struct FrameComparator {
     };
 };
 
-std::priority_queue<FrameData, std::vector<FrameData>, FrameComparator> framePriorityQueue;
+// Two-stage queues: surfaces from WGC callback -> copy worker -> encode queue
+static std::priority_queue<FrameData, std::vector<FrameData>, FrameComparator> g_surfaceQueue;
+static std::priority_queue<FrameData, std::vector<FrameData>, FrameComparator> g_encodeQueue;
 static size_t g_maxQueuedFrames = 8;
 std::atomic<int> frameSequenceCounter{ 0 }; 
-std::mutex queueMutex;
-std::condition_variable queueCV;
+static std::mutex g_surfaceMutex;
+static std::condition_variable g_surfaceCV;
+static std::mutex g_encodeMutex;
+static std::condition_variable g_encodeCV;
 
 static std::atomic<int> g_targetFps{120};
 void SetCaptureTargetFps(int fps) { if (fps > 0) g_targetFps.store(fps); }
@@ -98,7 +103,7 @@ static DXGI_FORMAT CoerceFormatForVideoProcessor(DXGI_FORMAT fmt) {
 static void RecreateCopyPool(ID3D11Device* device, int width, int height, DXGI_FORMAT format) {
     std::lock_guard<std::mutex> lock(g_poolMutex);
     g_poolW = width & ~1; g_poolH = height & ~1;
-    g_poolSize = static_cast<int>(std::max<size_t>(g_maxQueuedFrames, 4));
+    g_poolSize = static_cast<int>(std::max<size_t>(g_maxQueuedFrames, 12));
     g_copyPool.clear();
     g_poolInUse.clear();
     g_copyPool.resize(g_poolSize);
@@ -119,6 +124,7 @@ static void RecreateCopyPool(ID3D11Device* device, int width, int height, DXGI_F
         g_poolInUse[i] = false;
         device->CreateTexture2D(&desc, nullptr, g_copyPool[i].put());
     }
+    std::wcout << L"[WGC] Created texture pool with " << g_poolSize << L" slots for " << g_poolW << L"x" << g_poolH << std::endl;
 }
 
 static int AcquirePoolSlot() {
@@ -142,6 +148,13 @@ static void ReleasePoolSlot(int idx) {
     g_poolInUse[static_cast<size_t>(idx)] = false;
 }
 
+void SetCopyPoolSize(int poolSize) {
+    if (poolSize < 2) poolSize = 2;
+    if (poolSize > 16) poolSize = 16;
+    std::lock_guard<std::mutex> lock(g_poolMutex);
+    g_poolSize = poolSize;
+}
+
 winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface)
 {
@@ -156,7 +169,7 @@ winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(
 static std::atomic<int> g_framePoolBuffers{3};
 void SetFramePoolBuffers(int bufferCount) {
     if (bufferCount < 1) bufferCount = 1;
-    if (bufferCount > 8) bufferCount = 8;
+    if (bufferCount > 16) bufferCount = 16;
     g_framePoolBuffers.store(bufferCount);
 }
 
@@ -252,45 +265,19 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                         lastLoggedH.store(cs.Height);
                     }
                 } catch (...) {}
+                // Ultra-light: defer copy to worker thread; push surface + timestamp
                 {
-                    // Copy frame to a private texture using pool to avoid per-frame allocations
-                    auto device = GetD3DDevice();
-                    winrt::com_ptr<ID3D11DeviceContext> context;
-                    device->GetImmediateContext(context.put());
-
-                    auto srcTex = GetTextureFromSurface(surface);
-                    D3D11_TEXTURE2D_DESC srcDesc{};
-                    srcTex->GetDesc(&srcDesc);
-
-                    int evenW = static_cast<int>(srcDesc.Width & ~1U);
-                    int evenH = static_cast<int>(srcDesc.Height & ~1U);
-                    // Recreate pool on size change or first use
-                    if (g_copyPool.empty() || g_poolW != evenW || g_poolH != evenH) {
-                        RecreateCopyPool(device.get(), evenW, evenH, CoerceFormatForVideoProcessor(srcDesc.Format));
-                        std::wcout << L"[WGC] Recreated copy pool for " << evenW << L"x" << evenH << std::endl;
+                    std::lock_guard<std::mutex> lock(g_surfaceMutex);
+                    if (g_surfaceQueue.size() >= g_maxQueuedFrames) {
+                        g_surfaceQueue.pop();
                     }
-
-                    int slot = AcquirePoolSlot();
-                    if (slot >= 0) {
-                        context->CopyResource(g_copyPool[slot].get(), srcTex.get());
-                        std::lock_guard<std::mutex> lock(queueMutex);
-                        if (framePriorityQueue.size() >= g_maxQueuedFrames) {
-                            framePriorityQueue.pop();
-                            static int dropWarnCounter = 0;
-                            if ((++dropWarnCounter % 60) == 0) {
-                                std::wcout << L"[WGC] Dropping frames due to full queue (depth=" << g_maxQueuedFrames << L")" << std::endl;
-                            }
-                        }
-                        framePriorityQueue.push({ sequenceNumber, g_copyPool[slot], slot, timestamp });
-                    } else {
-                        // Pool exhausted: drop to preserve latency
-                        static int poolDropWarn = 0;
-                        if ((++poolDropWarn % 60) == 0) {
-                            std::wcout << L"[WGC] Dropping frame (copy pool exhausted)" << std::endl;
-                        }
-                    }
+                    FrameData fd{};
+                    fd.sequenceNumber = sequenceNumber;
+                    fd.timestamp = timestamp;
+                    fd.surface = surface; // keep alive for worker copy
+                    g_surfaceQueue.push(fd);
                 }
-                queueCV.notify_one();
+                g_surfaceCV.notify_one();
             }
             catch (const std::exception& e) {
                 std::wcerr << L"[FrameArrived] Exception: " << e.what() << L"\n";
@@ -335,10 +322,10 @@ void ProcessFrames() {
         FrameData frameData;
 
         {
-            std::unique_lock<std::mutex> lock(queueMutex);
+            std::unique_lock<std::mutex> lock(g_surfaceMutex);
             // Wait for frames or shutdown
-            queueCV.wait(lock, [&]() { return !framePriorityQueue.empty() || !isCapturing.load(); });
-            if (!isCapturing.load() && framePriorityQueue.empty()) break;
+            g_surfaceCV.wait(lock, [&]() { return !g_surfaceQueue.empty() || !isCapturing.load(); });
+            if (!isCapturing.load() && g_surfaceQueue.empty()) break;
 
             // Calculate precise frame interval
             auto now = std::chrono::steady_clock::now();
@@ -355,9 +342,9 @@ void ProcessFrames() {
             // If we're ahead of schedule, wait for the exact next slot
             if (now < nextEncodeTime) {
                 // Keep only the most recent frame to reduce latency
-                while (framePriorityQueue.size() > 1) {
-                    auto drop = framePriorityQueue.top();
-                    framePriorityQueue.pop();
+                while (g_surfaceQueue.size() > 1) {
+                    auto drop = g_surfaceQueue.top();
+                    g_surfaceQueue.pop();
                     if (drop.poolIndex >= 0) {
                         ReleasePoolSlot(drop.poolIndex);
                     }
@@ -365,8 +352,8 @@ void ProcessFrames() {
 
                 // Wait until it's time to encode
                 auto waitUntil = nextEncodeTime;
-                queueCV.wait_until(lock, waitUntil, [&]() {
-                    return !framePriorityQueue.empty() || !isCapturing.load();
+                g_surfaceCV.wait_until(lock, waitUntil, [&]() {
+                    return !g_surfaceQueue.empty() || !isCapturing.load();
                 });
             }
 
@@ -376,17 +363,17 @@ void ProcessFrames() {
             // If we're at or past the encode time, process the frame
             if (now >= nextEncodeTime) {
                 // Drop older frames to keep only the freshest
-                while (framePriorityQueue.size() > 1) {
-                    auto drop = framePriorityQueue.top();
-                    framePriorityQueue.pop();
+                while (g_surfaceQueue.size() > 1) {
+                    auto drop = g_surfaceQueue.top();
+                    g_surfaceQueue.pop();
                     if (drop.poolIndex >= 0) {
                         ReleasePoolSlot(drop.poolIndex);
                     }
                 }
 
-                if (!framePriorityQueue.empty()) {
-                    frameData = framePriorityQueue.top();
-                    framePriorityQueue.pop();
+                if (!g_surfaceQueue.empty()) {
+                    frameData = g_surfaceQueue.top();
+                    g_surfaceQueue.pop();
                 }
 
                 // Schedule next frame precisely
@@ -401,14 +388,48 @@ void ProcessFrames() {
 
         if (frameData.sequenceNumber == -1) break;
 
-        if (frameData.texture) {
+        if (frameData.texture || frameData.surface) {
+            // If we deferred the copy, perform it now into the pool
+            if (frameData.surface && !frameData.texture) {
+                auto device = GetD3DDevice();
+                winrt::com_ptr<ID3D11DeviceContext> context;
+                device->GetImmediateContext(context.put());
+
+                auto srcTex = GetTextureFromSurface(frameData.surface);
+                D3D11_TEXTURE2D_DESC srcDesc{};
+                srcTex->GetDesc(&srcDesc);
+                int evenW = static_cast<int>(srcDesc.Width & ~1U);
+                int evenH = static_cast<int>(srcDesc.Height & ~1U);
+                if (g_copyPool.empty() || g_poolW != evenW || g_poolH != evenH) {
+                    RecreateCopyPool(device.get(), evenW, evenH, CoerceFormatForVideoProcessor(srcDesc.Format));
+                    std::wcout << L"[WGC] Recreated copy pool for " << evenW << L"x" << evenH << std::endl;
+                }
+                int slot = AcquirePoolSlot();
+                if (slot >= 0) {
+                    // Use a deferred context to reduce immediate-context contention
+                    static thread_local winrt::com_ptr<ID3D11DeviceContext> deferred;
+                    if (!deferred) {
+                        winrt::check_hresult(device->CreateDeferredContext(0, deferred.put()));
+                    }
+                    deferred->CopyResource(g_copyPool[slot].get(), srcTex.get());
+                    winrt::com_ptr<ID3D11CommandList> commandList;
+                    winrt::check_hresult(deferred->FinishCommandList(FALSE, commandList.put()));
+                    context->ExecuteCommandList(commandList.get(), FALSE);
+
+                    frameData.texture = g_copyPool[slot];
+                    frameData.poolIndex = slot;
+                } else {
+                    // Cannot copy now; drop this frame quickly to preserve latency
+                    continue;
+                }
+            }
             // --- Debug: encode submit rate ---
             static auto lastLog = std::chrono::steady_clock::now();
             static int submitCount = 0;
             submitCount++;
             auto nowDbg = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::seconds>(nowDbg - lastLog).count() >= 1) {
-                std::wcout << L"[Encode] submits/s: " << submitCount << std::endl;
+                std::wcout << L"[Encode] submits/s: " << submitCount << L" (Target: " << g_targetFps.load() << L" FPS)" << std::endl;
                 submitCount = 0;
                 lastLog = nowDbg;
             }
@@ -473,11 +494,33 @@ void ProcessFrames() {
                 } else {
                     if (!Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load())) {
                         Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
+                    } else {
+                        // Log when encoder is backlogged
+                        static auto lastBacklogLog = std::chrono::steady_clock::now();
+                        static int backlogCount = 0;
+                        backlogCount++;
+                        auto now = std::chrono::steady_clock::now();
+                        if (std::chrono::duration_cast<std::chrono::seconds>(now - lastBacklogLog).count() >= 5) {
+                            std::wcout << L"[Encoder] Backlogged - dropped " << backlogCount << L" frames in last 5s" << std::endl;
+                            backlogCount = 0;
+                            lastBacklogLog = now;
+                        }
                     }
                 }
             } else {
                 if (!Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load())) {
                     Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
+                } else {
+                    // Log when encoder is backlogged
+                    static auto lastBacklogLog2 = std::chrono::steady_clock::now();
+                    static int backlogCount2 = 0;
+                    backlogCount2++;
+                    auto now2 = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::seconds>(now2 - lastBacklogLog2).count() >= 5) {
+                        std::wcout << L"[Encoder] Backlogged - dropped " << backlogCount2 << L" frames in last 5s" << std::endl;
+                        backlogCount2 = 0;
+                        lastBacklogLog2 = now2;
+                    }
                 }
             }
             // Release pool slot if used
@@ -506,32 +549,34 @@ void StartCapture() {
     isCapturing.store(true);
     frameSequenceCounter.store(0);
 
-    // Use multiple processing threads for better high-FPS performance
-    int numThreads = 2;
-    for (int i = 0; i < numThreads; i++) {
-        workerThreads.emplace_back(ProcessFrames);
-    }
+    // Launch one processing thread
+    workerThreads.emplace_back(ProcessFrames);
 }
 
 void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& framePool) {
     isCapturing.store(false);
-    queueCV.notify_all();
+    g_surfaceCV.notify_all();
+    g_encodeCV.notify_all();
 
     {
-        std::lock_guard<std::mutex> lock(queueMutex);
-        for (size_t i = 0; i < workerThreads.size(); i++) {
-            framePriorityQueue.push({-1, nullptr, 0});
-        }
+        std::lock_guard<std::mutex> lock(g_surfaceMutex);
+        g_surfaceQueue.push({-1, nullptr, 0});
     }
-    queueCV.notify_all();
+    g_surfaceCV.notify_all();
 
     for (auto& thread : workerThreads) {
         if (thread.joinable()) thread.join();
     }
     workerThreads.clear();
 
-    std::lock_guard<std::mutex> lock(queueMutex);
-    while (!framePriorityQueue.empty()) framePriorityQueue.pop();
+    {
+        std::lock_guard<std::mutex> l1(g_surfaceMutex);
+        while (!g_surfaceQueue.empty()) g_surfaceQueue.pop();
+    }
+    {
+        std::lock_guard<std::mutex> l2(g_encodeMutex);
+        while (!g_encodeQueue.empty()) g_encodeQueue.pop();
+    }
 
     framePool.FrameArrived(token);
     framePool.Close();

@@ -43,6 +43,13 @@ namespace Encoder {
     // Configure whether to signal full range (PC) or limited range (TV) in color metadata
     void SetFullRangeColor(bool enable_full_range);
 
+    // Configure pacing: fixed FPS or fixed duration (microseconds)
+    void SetPacingFps(int fps);
+    void SetPacingFixedUs(int duration_us);
+
+    // Configure PLI policy: ignore flag, min interval (ms), and min loss threshold
+    void ConfigurePliPolicy(bool ignorePli, int minIntervalMs, double minLossThreshold);
+
     // Configure NVENC runtime options
     void SetNvencOptions(const char* preset,
                          const char* rc,
