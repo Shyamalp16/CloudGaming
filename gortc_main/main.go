@@ -1032,7 +1032,29 @@ func handleRemoteIceCandidate(candidateStr *C.char) {
 
 //export sendVideoPacket
 func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
-	// Deprecated path (kept for compatibility); prefer sendVideoSample
+	pcMutex.Lock()
+	defer pcMutex.Unlock()
+
+	if peerConnection == nil || videoTrack == nil {
+		return -1
+	}
+	if connectionState != webrtc.PeerConnectionStateConnected {
+		return 0
+	}
+
+	buf := C.GoBytes(data, size)
+	// For testing pacing effects: write with zero duration (no pacing)
+	if err := videoTrack.WriteSample(media.Sample{Data: buf, Duration: 0}); err != nil {
+		return -1
+	}
+
+	// Debug: log send rate once per second (shared counters)
+	sendCount++
+	if time.Since(sendLastLog) >= time.Second {
+		log.Printf("[Pion] send samples/s: %d", sendCount)
+		sendCount = 0
+		sendLastLog = time.Now()
+	}
 	return 0
 }
 

@@ -147,6 +147,7 @@ namespace Encoder {
         if (minIntervalMs >= 0) g_minPliIntervalMs.store(minIntervalMs);
         if (minLossThreshold >= 0.0) g_minPliLossThreshold.store(minLossThreshold);
     }
+
     void SetNvencOptions(const char* preset,
                          const char* rc,
                          int bf,
