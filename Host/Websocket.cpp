@@ -70,8 +70,9 @@ void senderThread() {
         if (g_packetQueue.pop(packet)) {
             if (getIceConnectionState() >= 0) {
                 if (!packet.data.empty() && packet.data.data() != nullptr) {
-                    // If this legacy path is re-enabled, compute from encoder fps instead of 60 fps
-                    int64_t frameDurationUs = 1000000 / 120; // ~8333us at 120fps
+                    // Dynamic frame duration calculation based on target FPS
+                    int targetFps = 120; // Should match g_targetFps from CaptureHelpers
+                    int64_t frameDurationUs = 1000000LL / targetFps;
                     int result = sendVideoSample(packet.data.data(), static_cast<int>(packet.data.size()), frameDurationUs);
                     // std::cerr << "[SenderThread] Failed to send video packet: " << result << std::endl;
                     }

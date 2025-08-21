@@ -42,7 +42,7 @@ struct FrameComparator {
 };
 
 std::priority_queue<FrameData, std::vector<FrameData>, FrameComparator> framePriorityQueue;
-static size_t g_maxQueuedFrames = 4;
+static size_t g_maxQueuedFrames = 8;
 std::atomic<int> frameSequenceCounter{ 0 }; 
 std::mutex queueMutex;
 std::condition_variable queueCV;
@@ -329,46 +329,53 @@ void ProcessFrames() {
     static int lastInitW = 0;
     static int lastInitH = 0;
 
-    // Simple frame pacing: encode at target FPS, prefer the freshest frame per slot
+    // Fixed frame pacing: use high-resolution steady clock for precise timing
     static auto nextEncodeTime = std::chrono::steady_clock::now();
     while (true) {
         FrameData frameData;
 
         {
             std::unique_lock<std::mutex> lock(queueMutex);
-            // Wait for frames or shutdown, but also align to pacing time
+            // Wait for frames or shutdown
             queueCV.wait(lock, [&]() { return !framePriorityQueue.empty() || !isCapturing.load(); });
             if (!isCapturing.load() && framePriorityQueue.empty()) break;
 
-            // Determine pacing deadline
+            // Calculate precise frame interval
             auto now = std::chrono::steady_clock::now();
-            auto intervalUs = std::max(1, 1000000 / std::max(1, g_targetFps.load()));
+            auto targetFps = g_targetFps.load();
+            if (targetFps <= 0) targetFps = 120; // safety fallback
+            auto intervalUs = 1000000LL / targetFps; // microseconds per frame
             auto interval = std::chrono::microseconds(intervalUs);
+
+            // Initialize next encode time if not set
             if (nextEncodeTime.time_since_epoch().count() == 0) {
                 nextEncodeTime = now;
             }
 
-            // If we're early, keep only the latest frame in the queue and wait until the encode slot
+            // If we're ahead of schedule, wait for the exact next slot
             if (now < nextEncodeTime) {
+                // Keep only the most recent frame to reduce latency
                 while (framePriorityQueue.size() > 1) {
                     auto drop = framePriorityQueue.top();
                     framePriorityQueue.pop();
-                    // release any texture pool slot used by dropped frame
                     if (drop.poolIndex >= 0) {
                         ReleasePoolSlot(drop.poolIndex);
                     }
                 }
-                // Timed wait until the next encode slot or until a new frame arrives
-                queueCV.wait_until(lock, nextEncodeTime, [&]() { return !framePriorityQueue.empty() || !isCapturing.load(); });
+
+                // Wait until it's time to encode
+                auto waitUntil = nextEncodeTime;
+                queueCV.wait_until(lock, waitUntil, [&]() {
+                    return !framePriorityQueue.empty() || !isCapturing.load();
+                });
             }
 
-            // Recompute time and slot; catch up if we're late
+            // Recalculate timing after potential wait
             now = std::chrono::steady_clock::now();
-            while (now > nextEncodeTime + interval) {
-                nextEncodeTime += interval; // skip overdue slots
-            }
+
+            // If we're at or past the encode time, process the frame
             if (now >= nextEncodeTime) {
-                // Pick the freshest frame (drop older ones)
+                // Drop older frames to keep only the freshest
                 while (framePriorityQueue.size() > 1) {
                     auto drop = framePriorityQueue.top();
                     framePriorityQueue.pop();
@@ -376,11 +383,19 @@ void ProcessFrames() {
                         ReleasePoolSlot(drop.poolIndex);
                     }
                 }
+
                 if (!framePriorityQueue.empty()) {
                     frameData = framePriorityQueue.top();
                     framePriorityQueue.pop();
                 }
+
+                // Schedule next frame precisely
                 nextEncodeTime += interval;
+
+                // If we've fallen behind, catch up by scheduling from now
+                if (nextEncodeTime <= now) {
+                    nextEncodeTime = now + interval;
+                }
             }
         }
 
@@ -491,8 +506,8 @@ void StartCapture() {
     isCapturing.store(true);
     frameSequenceCounter.store(0);
 
-    // Use a single processing thread to avoid contention in the encoder
-    int numThreads = 1;
+    // Use multiple processing threads for better high-FPS performance
+    int numThreads = 2;
     for (int i = 0; i < numThreads; i++) {
         workerThreads.emplace_back(ProcessFrames);
     }

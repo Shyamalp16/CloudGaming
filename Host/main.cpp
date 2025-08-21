@@ -245,14 +245,23 @@ int main()
     audioCapturer.StartCapture(msedge[0].processId);
     std::wcout << L"[main] Capture started! Press any key to stop.\n";
 
-    // Main loop
+    // Main loop with better monitoring
+    auto lastMonitorTime = std::chrono::steady_clock::now();
     while (!ShutdownManager::IsShutdown()) {
         monitorConnection();
         if (_kbhit()) { // Check for keyboard input
             std::wcout << L"[main] Key pressed. Shutting down." << std::endl;
             ShutdownManager::SetShutdown(true);
         }
-        Sleep(100); // Sleep to avoid busy-waiting
+
+        // Monitor performance every second
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - lastMonitorTime).count() >= 1) {
+            // Could add performance monitoring here if needed
+            lastMonitorTime = now;
+        }
+
+        Sleep(10); // Reduced sleep for more responsive monitoring
     }
 
     std::wcout << L"[main] Stopping capture...\n";

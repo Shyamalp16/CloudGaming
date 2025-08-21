@@ -10,24 +10,24 @@
       "targetHeight": 1080
     },
     "video": {
-      "fps": 200,
+      "fps": 120,
       "bitrateStart": 45000000,
       "bitrateMin": 30000000,
       "bitrateMax": 60000000,
-      "hwFramePoolSize": 6,
+      "hwFramePoolSize": 8,
       "fullRange": false,
-      "preset": "p7",
+      "preset": "p4",
       "rc": "cbr",
       "bf": 0,
       "rcLookahead": 0,
-      "asyncDepth": 8,
-      "surfaces": 16
+      "asyncDepth": 4,
+      "surfaces": 12
     },
     "capture": {
-      "maxQueueDepth": 12,
-      "framePoolBuffers": 8,
-      "dropWindowMs": 50,
-      "dropMinEvents": 1,
+      "maxQueueDepth": 16,
+      "framePoolBuffers": 12,
+      "dropWindowMs": 100,
+      "dropMinEvents": 2,
       "mmcss": { "enable": true, "priority": 2 },
       "cursor": false,
       "borderRequired": false
