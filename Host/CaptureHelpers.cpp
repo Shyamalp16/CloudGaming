@@ -51,6 +51,10 @@ static std::mutex g_surfaceMutex;
 static std::condition_variable g_surfaceCV;
 static std::mutex g_encodeMutex;
 static std::condition_variable g_encodeCV;
+// Submit queue and sync for single submitter thread
+static std::mutex g_submitMutex;
+static std::condition_variable g_submitCV;
+static std::queue<FrameData> g_submitQueue;
 
 static std::atomic<int> g_targetFps{120};
 void SetCaptureTargetFps(int fps) { if (fps > 0) g_targetFps.store(fps); }
@@ -97,6 +101,13 @@ static std::mutex g_poolMutex;
 static int g_poolNextIndex = 0;
 static int g_poolW = 0, g_poolH = 0;
 static int g_poolSize = 0;
+// Allow temporary bursts before dropping oldest frames when encoder is not backlogged
+static std::atomic<int> g_pacingMaxBurstFrames{8};
+void SetPacingMaxBurstFrames(int frames) {
+    if (frames < 1) frames = 1;
+    if (frames > 128) frames = 128;
+    g_pacingMaxBurstFrames.store(frames);
+}
 
 static DXGI_FORMAT CoerceFormatForVideoProcessor(DXGI_FORMAT fmt) {
     switch (fmt) {
@@ -341,206 +352,41 @@ void ProcessFrames() {
             g_surfaceCV.wait(lock, [&]() { return !g_surfaceQueue.empty() || !isCapturing.load(); });
             if (!isCapturing.load() && g_surfaceQueue.empty()) break;
 
-            // Calculate precise frame interval
-            auto now = std::chrono::steady_clock::now();
-            auto targetFps = g_targetFps.load();
-            if (targetFps <= 0) targetFps = 120; // safety fallback
-            auto intervalUs = 1000000LL / targetFps; // microseconds per frame
-            auto interval = std::chrono::microseconds(intervalUs);
-
-            // Initialize next encode time if not set
-            if (nextEncodeTime.time_since_epoch().count() == 0) {
-                nextEncodeTime = now;
-            }
-
-            // If we're ahead of schedule, wait for the exact next slot
-            if (now < nextEncodeTime) {
-                // Keep only the most recent frame to reduce latency
-                while (g_surfaceQueue.size() > 1) {
+            // Hard pacing disabled: drop older frames and process newest immediately
+            // Drop policy: allow bursts up to g_pacingMaxBurstFrames when not backlogged
+            {
+                bool backlogged = Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load());
+                size_t maxDepth = backlogged ? 1 : static_cast<size_t>(g_pacingMaxBurstFrames.load());
+                while (g_surfaceQueue.size() > maxDepth) {
                     auto drop = g_surfaceQueue.top();
                     g_surfaceQueue.pop();
                     if (drop.poolIndex >= 0) {
                         ReleasePoolSlot(drop.poolIndex);
                     }
                 }
-
-                // Wait until it's time to encode
-                auto waitUntil = nextEncodeTime;
-                g_surfaceCV.wait_until(lock, waitUntil, [&]() {
-                    return !g_surfaceQueue.empty() || !isCapturing.load();
-                });
             }
-
-            // Recalculate timing after potential wait
-            now = std::chrono::steady_clock::now();
-
-            // If we're at or past the encode time, process the frame
-            if (now >= nextEncodeTime) {
-                // Drop older frames to keep only the freshest
-                while (g_surfaceQueue.size() > 1) {
-                    auto drop = g_surfaceQueue.top();
-                    g_surfaceQueue.pop();
-                    if (drop.poolIndex >= 0) {
-                        ReleasePoolSlot(drop.poolIndex);
-                    }
+            while (g_surfaceQueue.size() > 1) {
+                auto drop = g_surfaceQueue.top();
+                g_surfaceQueue.pop();
+                if (drop.poolIndex >= 0) {
+                    ReleasePoolSlot(drop.poolIndex);
                 }
-
-                if (!g_surfaceQueue.empty()) {
-                    frameData = g_surfaceQueue.top();
-                    g_surfaceQueue.pop();
-                }
-
-                // Schedule next frame precisely
-                nextEncodeTime += interval;
-
-                // If we've fallen behind, catch up by scheduling from now
-                if (nextEncodeTime <= now) {
-                    nextEncodeTime = now + interval;
-                }
+            }
+            if (!g_surfaceQueue.empty()) {
+                frameData = g_surfaceQueue.top();
+                g_surfaceQueue.pop();
             }
         }
 
         if (frameData.sequenceNumber == -1) break;
 
         if (frameData.texture || frameData.surface) {
-            // If we deferred the copy, perform it now into the pool
-            if (frameData.surface && !frameData.texture) {
-                auto device = GetD3DDevice();
-                winrt::com_ptr<ID3D11DeviceContext> context;
-                device->GetImmediateContext(context.put());
-
-                auto srcTex = GetTextureFromSurface(frameData.surface);
-                D3D11_TEXTURE2D_DESC srcDesc{};
-                srcTex->GetDesc(&srcDesc);
-                int evenW = static_cast<int>(srcDesc.Width & ~1U);
-                int evenH = static_cast<int>(srcDesc.Height & ~1U);
-                if (g_copyPool.empty() || g_poolW != evenW || g_poolH != evenH) {
-                    RecreateCopyPool(device.get(), evenW, evenH, CoerceFormatForVideoProcessor(srcDesc.Format));
-                    std::wcout << L"[WGC] Recreated copy pool for " << evenW << L"x" << evenH << std::endl;
-                }
-                int slot = AcquirePoolSlot();
-                if (slot >= 0) {
-                    // Use a deferred context to reduce immediate-context contention
-                    static thread_local winrt::com_ptr<ID3D11DeviceContext> deferred;
-                    if (!deferred) {
-                        winrt::check_hresult(device->CreateDeferredContext(0, deferred.put()));
-                    }
-                    deferred->CopyResource(g_copyPool[slot].get(), srcTex.get());
-                    winrt::com_ptr<ID3D11CommandList> commandList;
-                    winrt::check_hresult(deferred->FinishCommandList(FALSE, commandList.put()));
-                    context->ExecuteCommandList(commandList.get(), FALSE);
-
-                    frameData.texture = g_copyPool[slot];
-                    frameData.poolIndex = slot;
-                } else {
-                    // Cannot copy now; drop this frame quickly to preserve latency
-                    continue;
-                }
+            // Push to submit queue; VPBlt and encoder submission are done on submitter thread
+            {
+                std::lock_guard<std::mutex> ql(g_submitMutex);
+                g_submitQueue.push(frameData);
             }
-            // --- Debug: encode submit rate ---
-            static auto lastLog = std::chrono::steady_clock::now();
-            static int submitCount = 0;
-            submitCount++;
-            auto nowDbg = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::seconds>(nowDbg - lastLog).count() >= 1) {
-                std::wcout << L"[Encode] submits/s: " << submitCount << L" (Target: " << g_targetFps.load() << L" FPS)" << std::endl;
-                submitCount = 0;
-                lastLog = nowDbg;
-            }
-            auto texture = frameData.texture;
-            D3D11_TEXTURE2D_DESC desc{};
-            texture->GetDesc(&desc);
-            // Log texture desc size when it changes
-            static int lastDescW = 0;
-            static int lastDescH = 0;
-            if ((int)desc.Width != lastDescW || (int)desc.Height != lastDescH) {
-                std::wcout << L"[WGC] TextureDesc size: " << desc.Width << L"x" << desc.Height << std::endl;
-                lastDescW = (int)desc.Width;
-                lastDescH = (int)desc.Height;
-            }
-            // Ensure even dimensions for H.264
-            int encW = static_cast<int>(desc.Width & ~1U);
-            int encH = static_cast<int>(desc.Height & ~1U);
-            // Debounce re-initialization: require stability across a few frames and a minimal time gap
-            static int pendingW = 0, pendingH = 0, pendingCount = 0;
-            static auto lastInitTime = std::chrono::steady_clock::now();
-            if (lastInitW == 0 || lastInitH == 0) {
-                Encoder::InitializeEncoder("output.mp4", encW, encH, g_targetFps.load());
-                lastInitW = encW;
-                lastInitH = encH;
-                lastInitTime = std::chrono::steady_clock::now();
-                pendingW = pendingH = pendingCount = 0;
-            } else if (encW != lastInitW || encH != lastInitH) {
-                if (encW == pendingW && encH == pendingH) {
-                    pendingCount++;
-                } else {
-                    pendingW = encW;
-                    pendingH = encH;
-                    pendingCount = 1;
-                }
-                auto now = std::chrono::steady_clock::now();
-                auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastInitTime).count();
-                // Re-init only if the new size is seen in 3 consecutive frames and last init was at least 300ms ago
-                if (pendingCount >= 3 && since >= 300) {
-                    Encoder::InitializeEncoder("output.mp4", encW, encH, g_targetFps.load());
-                    lastInitW = encW;
-                    lastInitH = encH;
-                    lastInitTime = now;
-                    pendingW = pendingH = pendingCount = 0;
-                }
-            }
-            // Create a Copyable SRV texture if the capture surface is not bindable
-            if ((desc.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE)) == 0) {
-                D3D11_TEXTURE2D_DESC copyDesc = desc;
-                copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                copyDesc.MiscFlags = 0;
-                copyDesc.Usage = D3D11_USAGE_DEFAULT;
-                copyDesc.CPUAccessFlags = 0;
-                winrt::com_ptr<ID3D11Texture2D> copyTex;
-                if (SUCCEEDED(GetD3DDevice()->CreateTexture2D(&copyDesc, nullptr, copyTex.put()))) {
-                    // Ensure even dimensions
-                    copyDesc.Width &= ~1U;
-                    copyDesc.Height &= ~1U;
-                    context->CopyResource(copyTex.get(), texture.get());
-                    if (!Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load())) {
-                        Encoder::EncodeFrame(copyTex.get(), context.get(), copyDesc.Width, copyDesc.Height, frameData.timestamp);
-                    } // else drop frame to reduce latency
-                } else {
-                    if (!Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load())) {
-                        Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
-                    } else {
-                        // Log when encoder is backlogged
-                        static auto lastBacklogLog = std::chrono::steady_clock::now();
-                        static int backlogCount = 0;
-                        backlogCount++;
-                        auto now = std::chrono::steady_clock::now();
-                        if (std::chrono::duration_cast<std::chrono::seconds>(now - lastBacklogLog).count() >= 5) {
-                            std::wcout << L"[Encoder] Backlogged - dropped " << backlogCount << L" frames in last 5s" << std::endl;
-                            backlogCount = 0;
-                            lastBacklogLog = now;
-                        }
-                    }
-                }
-            } else {
-                if (!Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load())) {
-                    Encoder::EncodeFrame(texture.get(), context.get(), desc.Width, desc.Height, frameData.timestamp);
-                } else {
-                    // Log when encoder is backlogged
-                    static auto lastBacklogLog2 = std::chrono::steady_clock::now();
-                    static int backlogCount2 = 0;
-                    backlogCount2++;
-                    auto now2 = std::chrono::steady_clock::now();
-                    if (std::chrono::duration_cast<std::chrono::seconds>(now2 - lastBacklogLog2).count() >= 5) {
-                        std::wcout << L"[Encoder] Backlogged - dropped " << backlogCount2 << L" frames in last 5s" << std::endl;
-                        backlogCount2 = 0;
-                        lastBacklogLog2 = now2;
-                    }
-                }
-            }
-            // Release pool slot if used
-            if (frameData.poolIndex >= 0) {
-                ReleasePoolSlot(frameData.poolIndex);
-            }
+            g_submitCV.notify_one();
         }
     }
 
@@ -563,8 +409,65 @@ void StartCapture() {
     isCapturing.store(true);
     frameSequenceCounter.store(0);
 
-    // Launch one processing thread
-    workerThreads.emplace_back(ProcessFrames);
+    // Launch multiple processing threads and a submitter thread
+    int numWorkers = 3;
+    for (int i = 0; i < numWorkers; ++i) {
+        workerThreads.emplace_back(ProcessFrames);
+    }
+    workerThreads.emplace_back([](){
+        auto device = GetD3DDevice();
+        winrt::com_ptr<ID3D11DeviceContext> context;
+        device->GetImmediateContext(context.put());
+
+        static int lastInitW = 0;
+        static int lastInitH = 0;
+        static auto lastLog = std::chrono::steady_clock::now();
+        static int submitCount = 0;
+
+        while (isCapturing.load()) {
+            FrameData job{};
+            {
+                std::unique_lock<std::mutex> lock(g_submitMutex);
+                g_submitCV.wait(lock, [] { return !g_submitQueue.empty() || !isCapturing.load(); });
+                if (!isCapturing.load() && g_submitQueue.empty()) break;
+                if (g_submitQueue.empty()) continue;
+                job = g_submitQueue.front();
+                g_submitQueue.pop();
+            }
+            if (!job.texture && !job.surface) continue;
+
+            winrt::com_ptr<ID3D11Texture2D> tex = job.texture;
+            if (!tex && job.surface) {
+                tex = GetTextureFromSurface(job.surface);
+            }
+            if (!tex) continue;
+
+            D3D11_TEXTURE2D_DESC desc{};
+            tex->GetDesc(&desc);
+            int encW = static_cast<int>(desc.Width & ~1U);
+            int encH = static_cast<int>(desc.Height & ~1U);
+            if (lastInitW == 0 || lastInitH == 0) {
+                Encoder::InitializeEncoder("output.mp4", encW, encH, g_targetFps.load());
+                lastInitW = encW; lastInitH = encH;
+            }
+
+            if (!Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load())) {
+                // Direct VPBlt to NV12 and submit
+                int slot = -1; ID3D11Texture2D* nv12 = nullptr;
+                if (Encoder::AcquireHwInputSurface(slot, &nv12) && Encoder::VideoProcessorBltToSlot(tex.get(), slot)) {
+                    Encoder::SubmitHwFrame(slot, job.timestamp);
+                    submitCount++;
+                }
+            }
+
+            auto nowDbg = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(nowDbg - lastLog).count() >= 1) {
+                std::wcout << L"[Stats] Encode=" << submitCount << L"/s, Target=" << g_targetFps.load() << L" fps" << std::endl;
+                submitCount = 0;
+                lastLog = nowDbg;
+            }
+        }
+    });
 }
 
 void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& framePool) {

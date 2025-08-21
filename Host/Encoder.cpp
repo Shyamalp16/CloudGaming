@@ -133,6 +133,74 @@ static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height
 }
 
 namespace Encoder {
+    bool AcquireHwInputSurface(int &slotIndexOut, ID3D11Texture2D** nv12TextureOut) {
+        std::lock_guard<std::mutex> lock(g_encoderMutex);
+        if (!codecCtx || g_hwFrames.empty()) return false;
+        slotIndexOut = g_hwFrameIndex;
+        g_hwFrameIndex = (g_hwFrameIndex + 1) % static_cast<int>(g_hwFrames.size());
+        AVFrame* hw = g_hwFrames[slotIndexOut];
+        *nv12TextureOut = (ID3D11Texture2D*)hw->data[0];
+        return (*nv12TextureOut != nullptr);
+    }
+
+    bool VideoProcessorBltToSlot(ID3D11Texture2D* bgraSrcTexture, int slotIndex) {
+        std::lock_guard<std::mutex> lock(g_encoderMutex);
+        if (!codecCtx || !g_videoProcessor || slotIndex < 0 || slotIndex >= (int)g_hwFrames.size()) return false;
+        AVFrame* hw = g_hwFrames[slotIndex];
+        ID3D11Texture2D* nv12 = (ID3D11Texture2D*)hw->data[0];
+
+        // Create/reuse views
+        Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
+        auto itIn = g_inputViewCache.find(bgraSrcTexture);
+        if (itIn != g_inputViewCache.end()) inView = itIn->second; else {
+            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc{};
+            inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+            inDesc.Texture2D.MipSlice = 0; inDesc.Texture2D.ArraySlice = 0;
+            if (FAILED(g_videoDevice->CreateVideoProcessorInputView(bgraSrcTexture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf()))) return false;
+            g_inputViewCache[bgraSrcTexture] = inView;
+        }
+        Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
+        auto itOut = g_outputViewCache.find(nv12);
+        if (itOut != g_outputViewCache.end()) outView = itOut->second; else {
+            D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
+            outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D; outDesc.Texture2D.MipSlice = 0;
+            if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(nv12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) return false;
+            g_outputViewCache[nv12] = outView;
+        }
+        D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
+        return SUCCEEDED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream));
+    }
+
+    bool SubmitHwFrame(int slotIndex, int64_t timestampUs) {
+        std::lock_guard<std::mutex> lock(g_encoderMutex);
+        if (!codecCtx || slotIndex < 0 || slotIndex >= (int)g_hwFrames.size()) return false;
+        AVFrame* hw = g_hwFrames[slotIndex];
+        hw->pts = av_rescale_q(timestampUs, {1, 1000000}, codecCtx->time_base);
+        int ret = avcodec_send_frame(codecCtx, hw);
+        if (ret == AVERROR(EAGAIN)) {
+            g_eagainCount.fetch_add(1);
+            g_lastEagain = std::chrono::steady_clock::now();
+            for (;;) {
+                int r = avcodec_receive_packet(codecCtx, packet);
+                if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) break;
+                else if (r < 0) break;
+                packet->stream_index = videoStream->index;
+                pushPacketToWebRTC(packet);
+                av_packet_unref(packet);
+            }
+            ret = avcodec_send_frame(codecCtx, hw);
+        }
+        if (ret < 0) return false;
+        for (;;) {
+            int r = avcodec_receive_packet(codecCtx, packet);
+            if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) break;
+            else if (r < 0) return false;
+            packet->stream_index = videoStream->index;
+            pushPacketToWebRTC(packet);
+            av_packet_unref(packet);
+        }
+        return true;
+    }
     void SetPacingFps(int fps) {
         g_pacingFps.store(fps);
         if (fps > 0) g_pacingFixedUs.store(0);

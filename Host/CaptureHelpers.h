@@ -67,3 +67,6 @@ void SetCopyPoolSize(int poolSize);
 
 // Configure WGC session MinUpdateInterval in 100ns units (0 disables)
 void SetMinUpdateInterval100ns(long long interval100ns);
+
+// Configure pacing burst size before dropping oldest frames when backlogged
+void SetPacingMaxBurstFrames(int frames);

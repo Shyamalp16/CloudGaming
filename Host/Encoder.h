@@ -94,4 +94,12 @@ namespace Encoder {
     extern std::vector<uint8_t> g_latestFrameData;
     extern int64_t g_latestPTS;
     extern bool g_frameReady;
+
+    // New direct NV12 path helpers
+    // Acquire next NV12 encoder surface from the HW frame ring; returns slot index and NV12 texture pointer
+    bool AcquireHwInputSurface(int &slotIndexOut, ID3D11Texture2D** nv12TextureOut);
+    // Perform BGRA->NV12 on the given slot using the D3D11 VideoProcessor
+    bool VideoProcessorBltToSlot(ID3D11Texture2D* bgraSrcTexture, int slotIndex);
+    // Submit the prepared HW frame at slot to the encoder with timestamp (us)
+    bool SubmitHwFrame(int slotIndex, int64_t timestampUs);
 }
