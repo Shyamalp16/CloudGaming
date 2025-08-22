@@ -52,6 +52,7 @@ static int g_vpHeight = 0;
 // Cached views to avoid per-frame allocations
 static std::unordered_map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView>> g_inputViewCache;
 static std::unordered_map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView>> g_outputViewCache;
+static constexpr size_t kMaxViewCacheEntries = 512; // cap to avoid unbounded growth
 
 // Hardware frame ring
 static std::vector<AVFrame*> g_hwFrames;
@@ -157,6 +158,9 @@ namespace Encoder {
             inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
             inDesc.Texture2D.MipSlice = 0; inDesc.Texture2D.ArraySlice = 0;
             if (FAILED(g_videoDevice->CreateVideoProcessorInputView(bgraSrcTexture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf()))) return false;
+            if (g_inputViewCache.size() >= kMaxViewCacheEntries) {
+                g_inputViewCache.clear();
+            }
             g_inputViewCache[bgraSrcTexture] = inView;
         }
         Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
@@ -165,6 +169,9 @@ namespace Encoder {
             D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
             outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D; outDesc.Texture2D.MipSlice = 0;
             if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(nv12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) return false;
+            if (g_outputViewCache.size() >= kMaxViewCacheEntries) {
+                g_outputViewCache.clear();
+            }
             g_outputViewCache[nv12] = outView;
         }
         D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
@@ -600,15 +607,21 @@ namespace Encoder {
         av_dict_set(&opts, "annexb", "1", 0);
         codecCtx->flags &= ~AV_CODEC_FLAG_GLOBAL_HEADER; // carry SPS/PPS in-band
 
-        if (avcodec_open2(codecCtx, codec, &opts) < 0) {
-            std::cerr << "[Encoder] Failed to open codec." << std::endl;
+        int openResult = avcodec_open2(codecCtx, codec, &opts);
+        if (openResult < 0) {
+            char errbuf[128];
+            av_strerror(openResult, errbuf, sizeof(errbuf));
+            std::cerr << "[Encoder] Failed to open codec: " << errbuf << std::endl;
             av_dict_free(&opts);
             return;
         }
         av_dict_free(&opts);
 
-        if (avformat_alloc_output_context2(&formatCtx, nullptr, "null", nullptr) < 0) {
-            std::cerr << "[Encoder] Failed to allocate format context." << std::endl;
+        int fmtRes = avformat_alloc_output_context2(&formatCtx, nullptr, "null", nullptr);
+        if (fmtRes < 0) {
+            char errbuf[128];
+            av_strerror(fmtRes, errbuf, sizeof(errbuf));
+            std::cerr << "[Encoder] Failed to allocate format context: " << errbuf << std::endl;
             return;
         }
         videoStream = avformat_new_stream(formatCtx, nullptr);

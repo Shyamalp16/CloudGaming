@@ -58,13 +58,26 @@ int main()
     nlohmann::json config;
     try {
         std::ifstream configFile("config.json");
+        if (!configFile.is_open()) {
+            std::wcerr << L"[main] Error opening config.json" << std::endl;
+            return -1;
+        }
         configFile >> config;
     } catch (const std::exception& e) {
         std::wcerr << L"[main] Error reading config.json: " << e.what() << std::endl;
         return -1;
     }
 
-    std::string targetProcessName = config["host"]["targetProcessName"].get<std::string>();
+    std::string targetProcessName = "";
+    try {
+        if (config.contains("host") && config["host"].contains("targetProcessName") && config["host"]["targetProcessName"].is_string()) {
+            targetProcessName = config["host"]["targetProcessName"].get<std::string>();
+        }
+    } catch (...) {}
+    if (targetProcessName.empty()) {
+        std::wcerr << L"[main] Missing host.targetProcessName in config.json" << std::endl;
+        return -1;
+    }
     std::wstring wideTargetProcessName(targetProcessName.begin(), targetProcessName.end());
 
     // --- Room ID Generation ---

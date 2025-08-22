@@ -64,15 +64,15 @@ void on_close(client* c, websocketpp::connection_hdl hdl);
 void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg);
 void send_message(const json& message);
 
+static constexpr int kSenderTargetFps = 120; // must match capture target unless re-wired
 void senderThread() {
     while (!ShutdownManager::IsShutdown()) {
         Packet packet;
         if (g_packetQueue.pop(packet)) {
             if (getIceConnectionState() >= 0) {
                 if (!packet.data.empty() && packet.data.data() != nullptr) {
-                    // Dynamic frame duration calculation based on target FPS
-                    int targetFps = 120; // Should match g_targetFps from CaptureHelpers
-                    int64_t frameDurationUs = 1000000LL / targetFps;
+                    // Fixed frame duration based on target FPS constant
+                    int64_t frameDurationUs = 1000000LL / kSenderTargetFps;
                     int result = sendVideoSample(packet.data.data(), static_cast<int>(packet.data.size()), frameDurationUs);
                     // std::cerr << "[SenderThread] Failed to send video packet: " << result << std::endl;
                     }

@@ -78,10 +78,7 @@ bool AudioCapturer::StartCapture(DWORD processId)
 void AudioCapturer::StopCapture()
 {
     m_stopCapture = true;
-    if (m_captureThread.joinable())
-    {
-        m_captureThread.join();
-    }
+    if (m_captureThread.joinable()) { m_captureThread.join(); }
 }
 
 void AudioCapturer::CaptureThread(DWORD targetProcessId)
@@ -462,11 +459,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 Exit:
     std::wcout << L"[AudioCapturer] Audio capture stopped." << std::endl;
 
-    if (m_hCaptureEvent) {
-        CloseHandle(m_hCaptureEvent);
-        m_hCaptureEvent = nullptr;
-    }
-    CoTaskMemFree(pwfx);
+    if (m_hCaptureEvent) { CloseHandle(m_hCaptureEvent); m_hCaptureEvent = nullptr; }
+    if (pwfx) { CoTaskMemFree(pwfx); pwfx = nullptr; }
     if (pSessionControl2) pSessionControl2->Release();
     if (pSessionControl) pSessionControl->Release();
     if (pSessionEnumerator) pSessionEnumerator->Release();

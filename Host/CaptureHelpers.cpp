@@ -16,6 +16,14 @@
 #include <winrt/base.h>
 #include "Encoder.h"
 
+// Constants to replace magic numbers
+static constexpr int kDefaultFramePoolBuffers = 3;
+static constexpr int kMaxFramePoolBuffers = 16;
+static constexpr int kDefaultTargetFps = 120;
+static constexpr int kMaxQueuedFramesDefault = 8;
+static constexpr int kPacingMaxBurstFramesDefault = 8;
+static constexpr int kOneSecondUs = 1000000;
+
 using namespace std::chrono;
 using namespace winrt;
 using namespace winrt::Windows::Graphics::Capture;
@@ -37,26 +45,23 @@ struct FrameData {
 };
 
 struct FrameComparator {
-    bool operator()(const FrameData& a, FrameData& b) {
+    bool operator()(const FrameData& a, const FrameData& b) const {
         return a.sequenceNumber > b.sequenceNumber;
     };
 };
 
 // Two-stage queues: surfaces from WGC callback -> copy worker -> encode queue
 static std::priority_queue<FrameData, std::vector<FrameData>, FrameComparator> g_surfaceQueue;
-static std::priority_queue<FrameData, std::vector<FrameData>, FrameComparator> g_encodeQueue;
-static size_t g_maxQueuedFrames = 8;
+static size_t g_maxQueuedFrames = kMaxQueuedFramesDefault;
 std::atomic<int> frameSequenceCounter{ 0 }; 
 static std::mutex g_surfaceMutex;
 static std::condition_variable g_surfaceCV;
-static std::mutex g_encodeMutex;
-static std::condition_variable g_encodeCV;
 // Submit queue and sync for single submitter thread
 static std::mutex g_submitMutex;
 static std::condition_variable g_submitCV;
 static std::queue<FrameData> g_submitQueue;
 
-static std::atomic<int> g_targetFps{120};
+static std::atomic<int> g_targetFps{kDefaultTargetFps};
 void SetCaptureTargetFps(int fps) { if (fps > 0) g_targetFps.store(fps); }
 
 void SetMaxQueuedFrames(int maxDepth) {
@@ -102,7 +107,7 @@ static int g_poolNextIndex = 0;
 static int g_poolW = 0, g_poolH = 0;
 static int g_poolSize = 0;
 // Allow temporary bursts before dropping oldest frames when encoder is not backlogged
-static std::atomic<int> g_pacingMaxBurstFrames{8};
+static std::atomic<int> g_pacingMaxBurstFrames{kPacingMaxBurstFramesDefault};
 void SetPacingMaxBurstFrames(int frames) {
     if (frames < 1) frames = 1;
     if (frames > 128) frames = 128;
@@ -139,7 +144,11 @@ static void RecreateCopyPool(ID3D11Device* device, int width, int height, DXGI_F
     desc.MiscFlags = 0;
     for (int i = 0; i < g_poolSize; ++i) {
         g_poolInUse[i] = false;
-        device->CreateTexture2D(&desc, nullptr, g_copyPool[i].put());
+        HRESULT hr = device->CreateTexture2D(&desc, nullptr, g_copyPool[i].put());
+        if (FAILED(hr)) {
+            g_copyPool[i] = nullptr;
+            std::wcerr << L"[WGC] CreateTexture2D failed for pool slot " << i << L" hr=0x" << std::hex << hr << std::dec << std::endl;
+        }
     }
     std::wcout << L"[WGC] Created texture pool with " << g_poolSize << L" slots for " << g_poolW << L"x" << g_poolH << std::endl;
 }
@@ -195,6 +204,8 @@ Direct3D11CaptureFramePool createFreeThreadedFramePool(
     winrt::Windows::Graphics::SizeInt32 size)
 {
     int numberOfBuffers = g_framePoolBuffers.load();
+    if (numberOfBuffers < 1) numberOfBuffers = 1;
+    if (numberOfBuffers > kMaxFramePoolBuffers) numberOfBuffers = kMaxFramePoolBuffers;
     auto pixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
     Direct3D11CaptureFramePool framePool = nullptr;
     try
@@ -273,7 +284,7 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                     static int64_t lastTs = 0;
                     capCount++;
                     if (lastTs == 0) lastTs = timestamp;
-                    if (timestamp - lastTs >= 1000000) { // 1s
+                    if (timestamp - lastTs >= kOneSecondUs) { // 1s
                         std::wcout << L"[WGC] frames/s: " << capCount << std::endl;
                         capCount = 0;
                         lastTs = timestamp;
@@ -341,8 +352,6 @@ void ProcessFrames() {
     static int lastInitW = 0;
     static int lastInitH = 0;
 
-    // Fixed frame pacing: use high-resolution steady clock for precise timing
-    static auto nextEncodeTime = std::chrono::steady_clock::now();
     while (true) {
         FrameData frameData;
 
@@ -473,7 +482,6 @@ void StartCapture() {
 void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& framePool) {
     isCapturing.store(false);
     g_surfaceCV.notify_all();
-    g_encodeCV.notify_all();
 
     {
         std::lock_guard<std::mutex> lock(g_surfaceMutex);
@@ -490,10 +498,7 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
         std::lock_guard<std::mutex> l1(g_surfaceMutex);
         while (!g_surfaceQueue.empty()) g_surfaceQueue.pop();
     }
-    {
-        std::lock_guard<std::mutex> l2(g_encodeMutex);
-        while (!g_encodeQueue.empty()) g_encodeQueue.pop();
-    }
+    // Removed unused encode queue cleanup
 
     framePool.FrameArrived(token);
     framePool.Close();
