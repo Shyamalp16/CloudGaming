@@ -257,61 +257,63 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
     auto handler = TypedEventHandler<Direct3D11CaptureFramePool, winrt::Windows::Foundation::IInspectable>(
         [](Direct3D11CaptureFramePool sender, winrt::Windows::Foundation::IInspectable) {
             try {
-                auto frame = sender.TryGetNextFrame();
-                if (!frame) return;
+                for (;;) {
+                    auto frame = sender.TryGetNextFrame();
+                    if (!frame) break;
 
-                // (Removed) pool Recreate; revert to previous behavior
+                    // (Removed) pool Recreate; revert to previous behavior
 
-                auto surface = frame.Surface();
-                if (!surface) return;
+                    auto surface = frame.Surface();
+                    if (!surface) continue;
 
-                int sequenceNumber = frameSequenceCounter++;
-                // Timestamp in microseconds for encoder/Go layer
-                // Prefer WGC SystemRelativeTime (100ns units) for stable, system-aligned timestamps
-                int64_t timestamp = 0;
-                try {
-                    auto srt = frame.SystemRelativeTime();
-                    // Convert 100ns units to microseconds
-                    timestamp = static_cast<int64_t>(srt.count() / 10);
-                } catch (...) {}
-                if (timestamp <= 0) {
-                    // Fallback to steady_clock if SRT unavailable
-                    timestamp = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
-                }
-                // --- Debug: capture fps ---
-                {
-                    static int capCount = 0;
-                    static int64_t lastTs = 0;
-                    capCount++;
-                    if (lastTs == 0) lastTs = timestamp;
-                    if (timestamp - lastTs >= kOneSecondUs) { // 1s
-                        std::wcout << L"[WGC] frames/s: " << capCount << std::endl;
-                        capCount = 0;
-                        lastTs = timestamp;
+                    int sequenceNumber = frameSequenceCounter++;
+                    // Timestamp in microseconds for encoder/Go layer
+                    // Prefer WGC SystemRelativeTime (100ns units) for stable, system-aligned timestamps
+                    int64_t timestamp = 0;
+                    try {
+                        auto srt = frame.SystemRelativeTime();
+                        // Convert 100ns units to microseconds
+                        timestamp = static_cast<int64_t>(srt.count() / 10);
+                    } catch (...) {}
+                    if (timestamp <= 0) {
+                        // Fallback to steady_clock if SRT unavailable
+                        timestamp = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
                     }
-                }
-                // Log ContentSize when it changes
-                try {
-                    auto cs = frame.ContentSize();
-                    static std::atomic<int> lastLoggedW{ 0 };
-                    static std::atomic<int> lastLoggedH{ 0 };
-                    if (cs.Width != lastLoggedW.load() || cs.Height != lastLoggedH.load()) {
-                        std::wcout << L"[WGC] ContentSize changed: " << cs.Width << L"x" << cs.Height << std::endl;
-                        lastLoggedW.store(cs.Width);
-                        lastLoggedH.store(cs.Height);
+                    // --- Debug: capture fps ---
+                    {
+                        static int capCount = 0;
+                        static int64_t lastTs = 0;
+                        capCount++;
+                        if (lastTs == 0) lastTs = timestamp;
+                        if (timestamp - lastTs >= kOneSecondUs) { // 1s
+                            std::wcout << L"[WGC] frames/s: " << capCount << std::endl;
+                            capCount = 0;
+                            lastTs = timestamp;
+                        }
                     }
-                } catch (...) {}
-                // Ultra-light: defer copy to worker thread; push surface + timestamp
-                {
-                    std::lock_guard<std::mutex> lock(g_surfaceMutex);
-                    if (g_surfaceQueue.size() >= g_maxQueuedFrames) {
-                        g_surfaceQueue.pop();
+                    // Log ContentSize when it changes
+                    try {
+                        auto cs = frame.ContentSize();
+                        static std::atomic<int> lastLoggedW{ 0 };
+                        static std::atomic<int> lastLoggedH{ 0 };
+                        if (cs.Width != lastLoggedW.load() || cs.Height != lastLoggedH.load()) {
+                            std::wcout << L"[WGC] ContentSize changed: " << cs.Width << L"x" << cs.Height << std::endl;
+                            lastLoggedW.store(cs.Width);
+                            lastLoggedH.store(cs.Height);
+                        }
+                    } catch (...) {}
+                    // Ultra-light: defer copy to worker thread; push surface + timestamp
+                    {
+                        std::lock_guard<std::mutex> lock(g_surfaceMutex);
+                        if (g_surfaceQueue.size() >= g_maxQueuedFrames) {
+                            g_surfaceQueue.pop();
+                        }
+                        FrameData fd{};
+                        fd.sequenceNumber = sequenceNumber;
+                        fd.timestamp = timestamp;
+                        fd.surface = surface; // keep alive for worker copy
+                        g_surfaceQueue.push(fd);
                     }
-                    FrameData fd{};
-                    fd.sequenceNumber = sequenceNumber;
-                    fd.timestamp = timestamp;
-                    fd.surface = surface; // keep alive for worker copy
-                    g_surfaceQueue.push(fd);
                 }
                 g_surfaceCV.notify_one();
             }
@@ -460,13 +462,11 @@ void StartCapture() {
                 lastInitW = encW; lastInitH = encH;
             }
 
-            if (!Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load())) {
-                // Direct VPBlt to NV12 and submit
-                int slot = -1; ID3D11Texture2D* nv12 = nullptr;
-                if (Encoder::AcquireHwInputSurface(slot, &nv12) && Encoder::VideoProcessorBltToSlot(tex.get(), slot)) {
-                    Encoder::SubmitHwFrame(slot, job.timestamp);
-                    submitCount++;
-                }
+            // Always attempt submit; encoder internally drains on EAGAIN
+            int slot = -1; ID3D11Texture2D* nv12 = nullptr;
+            if (Encoder::AcquireHwInputSurface(slot, &nv12) && Encoder::VideoProcessorBltToSlot(tex.get(), slot)) {
+                Encoder::SubmitHwFrame(slot, job.timestamp);
+                submitCount++;
             }
 
             auto nowDbg = std::chrono::steady_clock::now();

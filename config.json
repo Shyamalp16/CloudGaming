@@ -3,7 +3,7 @@
     "serverUrlBase": "ws://localhost:3002"
   },
   "host": {
-    "targetProcessName": "cs2.exe",
+    "targetProcessName": "vlc.exe",
     "window": {
       "resizeClientArea": true,
       "targetWidth": 1920,
@@ -36,7 +36,7 @@
       "mmcss": { "enable": true, "priority": 2 },
       "cursor": false,
       "borderRequired": false,
-      "minUpdateInterval100ns": 50000
+      "minUpdateInterval100ns": 0
     }
   }
 }
