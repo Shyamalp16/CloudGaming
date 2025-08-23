@@ -7,7 +7,6 @@ const { logger } = require('./logger');
 const { startHealthServer } = require('./health');
 const { validateSignalingMessage } = require('./validation');
 const { RateLimiter } = require('./rateLimiter');
-const { atomicJoin, atomicLeave } = require('./redisScripts');
 const {
 	setActiveConnections,
 	setLocalRooms,
@@ -15,11 +14,11 @@ const {
 	incSchemaRejects,
 	incRateLimitDrops,
 	incBackpressureCloses,
-	observeRedisLatency,
-	observeFanoutLatency,
 	startRedisTimer,
 	startFanoutTimer,
 } = require('./metrics');
+const jwt = require('jsonwebtoken');
+const { createRemoteJWKSet, jwtVerify } = require('jose');
 
 // =============================
 // Logging helper (pino-backed)
@@ -418,7 +417,7 @@ async function handleDisconnection(ws, roomKey) {
 	// Redis cleanup and notify peers
 	try {
 		const end = startRedisTimer();
-		const remaining = await atomicLeave(redisClient, roomKey, clientId, config.roomTtlSeconds);
+		await atomicLeave(redisClient, roomKey, clientId, config.roomTtlSeconds);
 		end();
 		noteRedisSuccess();
 		await redisClient.publish(roomKey, JSON.stringify({ senderId: clientId, data: { type: 'peer-disconnected' } }));
@@ -501,8 +500,8 @@ async function shutdown() {
 				setTimeout(done, Math.min(1000, config.drainTimeoutMs));
 			});
 			closePromises.push((async () => {
-				try { await redisClient.sRem(roomKey, ws.clientId); } catch (_) {}
-				try { await redisClient.publish(roomKey, JSON.stringify({ senderId: ws.clientId, data: { type: 'peer-disconnected' } })); } catch (_) {}
+				try { let e1 = startRedisTimer(); await redisClient.sRem(roomKey, ws.clientId); e1(); } catch (_) {}
+				try { let e2 = startRedisTimer(); await redisClient.publish(roomKey, JSON.stringify({ senderId: ws.clientId, data: { type: 'peer-disconnected' } })); e2(); } catch (_) {}
 				await waitForClose;
 			})());
 		});
