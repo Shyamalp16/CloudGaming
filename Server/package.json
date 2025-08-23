@@ -1,9 +1,24 @@
 {
+  "name": "scalable-signaling-server",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node ScalableSignalingServer.js",
+    "dev": "cross-env PRETTY_LOGS=true node ScalableSignalingServer.js",
+    "health": "node -e \"require('./health').startHealthServer({})\"",
+    "lint": "echo 'No lint configured'",
+    "test": "echo 'No tests yet' && exit 0",
+    "ci": "npm ci && npm run lint && npm test"
+  },
   "dependencies": {
-    "express": "^4.21.2",
+    "dotenv": "^16.4.5",
+    "pino": "^9.2.0",
+    "pino-pretty": "^11.2.2",
     "redis": "^5.6.0",
-    "socketio": "^1.0.0",
-    "wrtc": "^0.4.7",
-    "ws": "^8.0.0"
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3"
   }
 }

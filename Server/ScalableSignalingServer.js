@@ -2,35 +2,16 @@ const WebSocket = require('ws');
 const url = require('url');
 const crypto = require('crypto');
 const { createClient } = require('redis');
+const { config } = require('./config');
+const { logger } = require('./logger');
+const { startHealthServer } = require('./health');
 
 // =============================
-// Configuration (env-driven)
-// =============================
-const envInt = (name, def) => {
-	const raw = process.env[name];
-	if (!raw) return def;
-	const n = Number(raw);
-	return Number.isFinite(n) ? n : def;
-};
-
-const WEBSOCKET_PORT = envInt('WS_PORT', 3002);
-const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-const ROOM_CAPACITY = envInt('ROOM_CAPACITY', 2);
-const ROOM_TTL_SECONDS = envInt('ROOM_TTL_SECONDS', 120);
-const MESSAGE_MAX_BYTES = envInt('MESSAGE_MAX_BYTES', 256 * 1024); // 256KB
-const BACKPRESSURE_CLOSE_THRESHOLD_BYTES = envInt('BACKPRESSURE_CLOSE_THRESHOLD_BYTES', 5 * 1024 * 1024); // 5MB
-const HEARTBEAT_INTERVAL_MS = envInt('HEARTBEAT_INTERVAL_MS', 15000);
-const RATE_LIMIT_MESSAGES_PER_10S = envInt('RATE_LIMIT_MESSAGES_PER_10S', 200);
-const ROOM_ID_MAX_LENGTH = envInt('ROOM_ID_MAX_LENGTH', 64);
-
-// =============================
-// Logging helpers
+// Logging helper (pino-backed)
 // =============================
 function log(level, message, context) {
-	const base = { level, time: new Date().toISOString(), message };
-	console[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log'](
-		JSON.stringify(context ? { ...base, ...context } : base)
-	);
+	const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info';
+	logger[method](context || {}, message);
 }
 
 // =============================
@@ -49,7 +30,7 @@ function createRedis(urlString) {
 }
 
 // Need two clients: one for commands, one for subscriber mode
-const redisClient = createRedis(REDIS_URL);
+const redisClient = createRedis(config.redisUrl);
 const subscriber = redisClient.duplicate();
 
 redisClient.on('error', (err) => log('error', 'Redis client error', { err: String(err && err.message || err) }));
@@ -58,7 +39,7 @@ subscriber.on('error', (err) => log('error', 'Redis subscriber error', { err: St
 // =============================
 // WebSocket Server
 // =============================
-const server = new WebSocket.Server({ port: WEBSOCKET_PORT, maxPayload: MESSAGE_MAX_BYTES });
+const server = new WebSocket.Server({ port: config.wsPort, maxPayload: config.messageMaxBytes });
 
 // In-memory map for clients connected to THIS server instance.
 // Map<roomId, Set<WebSocket>>
@@ -70,7 +51,7 @@ const localRooms = new Map();
 const ROOM_ID_REGEX = /^[A-Za-z0-9_\-:.]+$/;
 function validateRoomId(roomId) {
 	if (typeof roomId !== 'string') return false;
-	if (roomId.length === 0 || roomId.length > ROOM_ID_MAX_LENGTH) return false;
+	if (roomId.length === 0 || roomId.length > config.roomIdMaxLength) return false;
 	return ROOM_ID_REGEX.test(roomId);
 }
 
@@ -140,7 +121,7 @@ async function handleNewConnection(ws, request) {
 		try {
 			await redisClient.sAdd(roomKey, clientId);
 			const size = await redisClient.sCard(roomKey);
-			if (size > ROOM_CAPACITY) {
+			if (size > config.roomCapacity) {
 				await redisClient.sRem(roomKey, clientId);
 				log('info', 'Room is full, rejecting connection', { roomId, clientId, size });
 				ws.close(1000, 'Room is full');
@@ -162,7 +143,7 @@ async function handleNewConnection(ws, request) {
 		ws.roomId = roomId;
 		ws.clientId = clientId;
 		ws.isAlive = true;
-		ws._rate = { tokens: RATE_LIMIT_MESSAGES_PER_10S, lastRefill: Date.now() };
+		ws._rate = { tokens: config.rateLimitMessagesPer10s, lastRefill: Date.now() };
 
 		// Register locally
 		if (!localRooms.has(roomId)) localRooms.set(roomId, new Set());
@@ -180,7 +161,7 @@ async function handleNewConnection(ws, request) {
 			}
 			ws.isAlive = false;
 			try { ws.ping(); } catch (_) {}
-		}, HEARTBEAT_INTERVAL_MS);
+		}, config.heartbeatIntervalMs);
 		ws._heartbeat = heartbeat;
 		ws.on('pong', () => { ws.isAlive = true; });
 
@@ -200,20 +181,20 @@ function refillTokens(rate) {
 	const now = Date.now();
 	const elapsed = now - rate.lastRefill;
 	if (elapsed <= 0) return;
-	const tokensToAdd = Math.floor((RATE_LIMIT_MESSAGES_PER_10S / 10000) * elapsed);
-	rate.tokens = Math.min(RATE_LIMIT_MESSAGES_PER_10S, rate.tokens + tokensToAdd);
+	const tokensToAdd = Math.floor((config.rateLimitMessagesPer10s / 10000) * elapsed);
+	rate.tokens = Math.min(config.rateLimitMessagesPer10s, rate.tokens + tokensToAdd);
 	rate.lastRefill = now;
 }
 
 async function handleMessage(ws, roomKey, message) {
 	try {
 		if (typeof message === 'string') {
-			if (Buffer.byteLength(message) > MESSAGE_MAX_BYTES) {
+			if (Buffer.byteLength(message) > config.messageMaxBytes) {
 				log('warn', 'Dropping oversized text message', { clientId: ws.clientId, roomId: ws.roomId });
 				return;
 			}
 		} else if (Buffer.isBuffer(message)) {
-			if (message.length > MESSAGE_MAX_BYTES) {
+			if (message.length > config.messageMaxBytes) {
 				log('warn', 'Dropping oversized binary message', { clientId: ws.clientId, roomId: ws.roomId });
 				return;
 			}
@@ -232,7 +213,7 @@ async function handleMessage(ws, roomKey, message) {
 		ws._rate.tokens -= 1;
 
 		// Backpressure check
-		if (ws.bufferedAmount > BACKPRESSURE_CLOSE_THRESHOLD_BYTES) {
+		if (ws.bufferedAmount > config.backpressureCloseThresholdBytes) {
 			log('warn', 'Closing client due to excessive backpressure (sender)', { clientId: ws.clientId, roomId: ws.roomId });
 			try { ws.close(1013, 'Server overloaded'); } catch (_) {}
 			return;
@@ -287,8 +268,8 @@ async function handleDisconnection(ws, roomKey) {
 	try {
 		const remaining = await redisClient.sCard(roomKey);
 		if (remaining === 0) {
-			try { await redisClient.expire(roomKey, ROOM_TTL_SECONDS); } catch (_) {}
-			log('info', 'Room empty globally; TTL set', { roomId, ttlSeconds: ROOM_TTL_SECONDS });
+			try { await redisClient.expire(roomKey, config.roomTtlSeconds); } catch (_) {}
+			log('info', 'Room empty globally; TTL set', { roomId, ttlSeconds: config.roomTtlSeconds });
 		}
 	} catch (e) {
 		log('warn', 'Failed checking/setting room TTL', { roomId, error: String(e && e.message || e) });
@@ -319,7 +300,21 @@ async function main() {
 	server.on('connection', (ws, request) => handleNewConnection(ws, request));
 	server.on('error', (err) => log('error', 'WebSocket server error', { error: String(err && err.message || err) }));
 
-	log('info', 'Scalable Signaling Server listening', { port: WEBSOCKET_PORT });
+	log('info', 'Scalable Signaling Server listening', { port: config.wsPort });
+
+	// Health endpoints
+	startHealthServer({
+		readinessCheck: async () => {
+			// Consider both command and subscriber clients
+			try {
+				// ping returns 'PONG' if connected
+				const pong = await redisClient.ping();
+				return pong === 'PONG' && subscriber.isOpen; // isOpen is a coarse indicator
+			} catch (_) {
+				return false;
+			}
+		}
+	});
 }
 
 main().catch(err => {
