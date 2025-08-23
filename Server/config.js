@@ -20,6 +20,8 @@ const schema = z.object({
 	RATE_LIMIT_ROOM_MSGS_PER_10S: z.preprocess((v) => Number(v), z.number().int().positive()).default(800),
 	DRAIN_TIMEOUT_MS: z.preprocess((v) => Number(v), z.number().int().positive()).default(5000),
 	SHUTDOWN_CLOSE_CODE: z.preprocess((v) => Number(v), z.number().int().positive()).default(1012),
+	CB_ERROR_THRESHOLD: z.preprocess((v) => Number(v), z.number().int().positive()).default(5),
+	CB_OPEN_MS: z.preprocess((v) => Number(v), z.number().int().positive()).default(10000),
 });
 
 let parsed;
@@ -50,6 +52,8 @@ const config = {
 	prettyLogs: parsed.PRETTY_LOGS === 'true',
 	drainTimeoutMs: parsed.DRAIN_TIMEOUT_MS,
 	shutdownCloseCode: parsed.SHUTDOWN_CLOSE_CODE,
+	cbErrorThreshold: parsed.CB_ERROR_THRESHOLD,
+	cbOpenMs: parsed.CB_OPEN_MS,
 };
 
 module.exports = { config };
