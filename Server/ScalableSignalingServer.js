@@ -393,15 +393,23 @@ async function shutdown() {
 	draining = true;
 	try { server.close(); } catch (_) {}
 
-	// Best-effort close of all clients and Redis membership cleanup
+	// Best-effort close of all clients and Redis membership cleanup, and wait for close frames to flush
 	const closePromises = [];
 	localRooms.forEach((clients, roomId) => {
 		clients.forEach((ws) => {
 			try { ws.close(config.shutdownCloseCode, 'Server draining'); } catch (_) {}
 			const roomKey = `room:${roomId}`;
+			const waitForClose = new Promise((resolve) => {
+				let resolved = false;
+				const done = () => { if (!resolved) { resolved = true; resolve(); } };
+				try { ws.once('close', () => done()); } catch (_) { done(); }
+				// Fallback in case close event doesn't arrive in time
+				setTimeout(done, Math.min(1000, config.drainTimeoutMs));
+			});
 			closePromises.push((async () => {
 				try { await redisClient.sRem(roomKey, ws.clientId); } catch (_) {}
 				try { await redisClient.publish(roomKey, JSON.stringify({ senderId: ws.clientId, data: { type: 'peer-disconnected' } })); } catch (_) {}
+				await waitForClose;
 			})());
 		});
 	});
