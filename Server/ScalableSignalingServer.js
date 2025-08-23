@@ -156,6 +156,63 @@ async function handleNewConnection(ws, request) {
 			ws.close(1008, 'Invalid roomId');
 			return;
 		}
+		// Transport security checks
+		const origin = request.headers['origin'];
+		const protocols = request.headers['sec-websocket-protocol'];
+		if (config.requireWss && request.headers['x-forwarded-proto'] !== 'https') {
+			log('warn', 'Rejected non-WSS connection in production');
+			ws.close(1008, 'WSS required');
+			return;
+		}
+		if (config.allowedOrigins.length > 0) {
+			const allowed = origin && config.allowedOrigins.some((o) => origin.includes(o));
+			if (!allowed) {
+				log('warn', 'Origin not allowed', { origin });
+				ws.close(1008, 'Origin not allowed');
+				return;
+			}
+		}
+		if (config.subprotocol) {
+			const hasProto = protocols && protocols.split(',').map(s => s.trim()).includes(config.subprotocol);
+			if (!hasProto) {
+				log('warn', 'Missing required subprotocol');
+				ws.close(1008, 'Subprotocol required');
+				return;
+			}
+			try { ws.protocol = config.subprotocol; } catch (_) {}
+		}
+		// Auth (optional)
+		if (config.enableAuth) {
+			const authHeader = request.headers['authorization'] || '';
+			let token = parameters.get('token');
+			if (!token && authHeader.toLowerCase().startsWith('bearer ')) token = authHeader.slice(7);
+			if (!token) {
+				log('warn', 'Missing JWT');
+				ws.close(1008, 'Unauthorized');
+				return;
+			}
+			try {
+				let payload;
+				if (config.jwt.jwksUrl) {
+					const JWKS = createRemoteJWKSet(new URL(config.jwt.jwksUrl));
+					const { payload: pl } = await jwtVerify(token, JWKS, { issuer: config.jwt.issuer, audience: config.jwt.audience });
+					payload = pl;
+				} else {
+					payload = jwt.verify(token, config.jwt.secret, { algorithms: [config.jwt.alg], issuer: config.jwt.issuer, audience: config.jwt.audience });
+				}
+				const allowedRooms = payload[config.jwt.roomsClaim];
+				if (Array.isArray(allowedRooms) && !allowedRooms.includes(roomId)) {
+					log('warn', 'JWT does not authorize room', { roomId });
+					ws.close(1008, 'Forbidden');
+					return;
+				}
+				ws.user = { sub: payload.sub };
+			} catch (e) {
+				log('warn', 'JWT verification failed');
+				ws.close(1008, 'Unauthorized');
+				return;
+			}
+		}
 
 		// IP-based connection rate limiting
 		const ip = (request.socket && request.socket.remoteAddress) || 'unknown';

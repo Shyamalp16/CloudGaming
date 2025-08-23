@@ -22,6 +22,17 @@ const schema = z.object({
 	SHUTDOWN_CLOSE_CODE: z.preprocess((v) => Number(v), z.number().int().positive()).default(1012),
 	CB_ERROR_THRESHOLD: z.preprocess((v) => Number(v), z.number().int().positive()).default(5),
 	CB_OPEN_MS: z.preprocess((v) => Number(v), z.number().int().positive()).default(10000),
+	REQUIRE_WSS: z.string().optional(),
+	ALLOWED_ORIGINS: z.string().optional(),
+	SUBPROTOCOL: z.string().optional(),
+	ENABLE_AUTH: z.string().optional(),
+	JWT_ISSUER: z.string().optional(),
+	JWT_AUDIENCE: z.string().optional(),
+	JWT_ALG: z.string().optional(),
+	JWT_SECRET: z.string().optional(),
+	JWKS_URL: z.string().optional(),
+	JWKS_CACHE_TTL: z.preprocess((v) => Number(v), z.number().int().positive()).optional(),
+	ROOMS_CLAIM: z.string().optional(),
 });
 
 let parsed;
@@ -54,6 +65,19 @@ const config = {
 	shutdownCloseCode: parsed.SHUTDOWN_CLOSE_CODE,
 	cbErrorThreshold: parsed.CB_ERROR_THRESHOLD,
 	cbOpenMs: parsed.CB_OPEN_MS,
+	requireWss: parsed.REQUIRE_WSS === 'true',
+	allowedOrigins: (parsed.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean),
+	subprotocol: parsed.SUBPROTOCOL,
+	enableAuth: parsed.ENABLE_AUTH === 'true',
+	jwt: {
+		issuer: parsed.JWT_ISSUER,
+		audience: parsed.JWT_AUDIENCE,
+		alg: parsed.JWT_ALG || 'HS256',
+		secret: parsed.JWT_SECRET,
+		jwksUrl: parsed.JWKS_URL,
+		jwksTtlMs: parsed.JWKS_CACHE_TTL || 300000,
+		roomsClaim: parsed.ROOMS_CLAIM || 'rooms',
+	},
 };
 
 module.exports = { config };
