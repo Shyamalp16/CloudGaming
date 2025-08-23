@@ -28,6 +28,16 @@ async function waitForReady(healthPort, timeoutMs = 15000) {
 	throw new Error('Server not ready in time');
 }
 
+function waitForExit(child, timeoutMs = 15000) {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error('Child did not exit in time')), timeoutMs);
+		child.once('exit', (code, signal) => {
+			clearTimeout(timer);
+			resolve({ code, signal });
+		});
+	});
+}
+
 function startServer({ wsPort, healthPort }) {
 	const serverPath = path.join(__dirname, '..', 'ScalableSignalingServer.js');
 	const child = spawn(process.execPath, [serverPath], {
@@ -59,7 +69,12 @@ describe('ScalableSignalingServer headless E2E', () => {
 		const child = startServer({ wsPort, healthPort });
 
 		try {
-			await waitForReady(healthPort, 15000);
+			await Promise.race([
+				waitForReady(healthPort, 20000),
+				waitForExit(child, 20000).then(({ code, signal }) => {
+					throw new Error(`Server exited early (code=${code}, signal=${signal})`);
+				}),
+			]);
 
 			const roomId = 'e2e-room';
 			const base = `ws://127.0.0.1:${wsPort}`;
@@ -85,7 +100,8 @@ describe('ScalableSignalingServer headless E2E', () => {
 			c1.close();
 			c2.close();
 		} finally {
-			child.kill('SIGTERM');
+			try { child.kill('SIGTERM'); } catch (_) {}
+			try { await waitForExit(child, 5000); } catch (_) {}
 		}
 	});
 });

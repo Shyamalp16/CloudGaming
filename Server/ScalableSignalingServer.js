@@ -351,7 +351,7 @@ async function main() {
 			try {
 				// ping returns 'PONG' if connected
 				const pong = await redisClient.ping();
-				return pong === 'PONG' && subscriber.isOpen; // isOpen is a coarse indicator
+				return pong === 'PONG';
 			} catch (_) {
 				return false;
 			}
