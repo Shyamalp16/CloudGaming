@@ -14,11 +14,14 @@ const {
 	incSchemaRejects,
 	incRateLimitDrops,
 	incBackpressureCloses,
+	// observeRedisLatency,
+	// observeFanoutLatency,
 	startRedisTimer,
 	startFanoutTimer,
 } = require('./metrics');
 const jwt = require('jsonwebtoken');
 const { createRemoteJWKSet, jwtVerify } = require('jose');
+const { atomicJoin, atomicLeave } = require('./redisScripts');
 
 // =============================
 // Logging helper (pino-backed)

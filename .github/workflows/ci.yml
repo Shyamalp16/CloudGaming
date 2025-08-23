@@ -38,3 +38,44 @@ jobs:
       - name: Test
         run: npm test
 
+  staging-auth:
+    name: Staging (auth + origin/subprotocol)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping || exit 1" 
+          --health-interval 5s 
+          --health-timeout 3s 
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: Server
+    env:
+      ENABLE_AUTH: 'true'
+      JWT_ALG: HS256
+      JWT_SECRET: test-secret
+      JWT_ISSUER: http://localhost
+      JWT_AUDIENCE: test
+      REQUIRE_WSS: 'false'
+      SUBPROTOCOL: webrtc-signaling
+      ALLOWED_ORIGINS: localhost,127.0.0.1,example.com
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: Server/package-lock.json
+      - name: Install dependencies (pinned)
+        run: npm ci
+      - name: Prettier write
+        run: npm run format:fix
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+
