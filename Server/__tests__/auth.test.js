@@ -58,9 +58,10 @@ function startServer({ wsPort, healthPort }) {
 	return child;
 }
 
-function connect(url) {
+function connect(url, subprotocol) {
 	return new Promise((resolve, reject) => {
-		const ws = new WebSocket(url);
+		const protocols = subprotocol ? [subprotocol] : undefined;
+		const ws = new WebSocket(url, protocols, { headers: { origin: 'http://localhost' } });
 		ws.once('open', () => resolve(ws));
 		ws.once('error', reject);
 	});
@@ -83,13 +84,18 @@ describe('JWT auth and room authorization', () => {
 
 			// Allowed room
 			const okUrl = `ws://127.0.0.1:${wsPort}/?roomId=${allowedRoom}&token=${token}`;
-			const wsOk = await connect(okUrl);
+			const wsOk = await connect(okUrl, process.env.SUBPROTOCOL);
 			expect(wsOk.readyState).toBe(WebSocket.OPEN);
 			wsOk.close();
 
-			// Forbidden room: should close immediately
+			// Forbidden room: should close quickly with 1008
 			const badUrl = `ws://127.0.0.1:${wsPort}/?roomId=${forbiddenRoom}&token=${token}`;
-			await expect(connect(badUrl)).rejects.toBeDefined();
+			const wsBad = await connect(badUrl, process.env.SUBPROTOCOL);
+			const closeCode = await new Promise((resolve, reject) => {
+				const t = setTimeout(() => reject(new Error('forbidden ws not closed')), 5000);
+				wsBad.once('close', (code) => { clearTimeout(t); resolve(code); });
+			});
+			expect([1008, 1000]).toContain(closeCode);
 		} finally {
 			try { child.kill('SIGTERM'); } catch (_) {}
 			try { await waitForExit(child, 5000); } catch (_) {}

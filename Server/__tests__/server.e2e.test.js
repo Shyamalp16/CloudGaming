@@ -51,14 +51,13 @@ function startServer({ wsPort, healthPort }) {
 		cwd: path.join(__dirname, '..'),
 		stdio: ['ignore', 'pipe', 'pipe'],
 	});
-	try { child.stdout.on('data', (d) => process.stdout.write(`[server stdout] ${d.toString()}`)); } catch (_) {}
-	try { child.stderr.on('data', (d) => process.stderr.write(`[server stderr] ${d.toString()}`)); } catch (_) {}
 	return child;
 }
 
 function connectClient(url, timeoutMs = 15000) {
 	return new Promise((resolve, reject) => {
-		const ws = new WebSocket(url);
+		const protocols = process.env.SUBPROTOCOL ? [process.env.SUBPROTOCOL] : undefined;
+		const ws = new WebSocket(url, protocols, { headers: { origin: 'http://localhost' } });
 		const t = setTimeout(() => {
 			try { ws.terminate(); } catch (_) {}
 			reject(new Error('WS connect timeout'));
