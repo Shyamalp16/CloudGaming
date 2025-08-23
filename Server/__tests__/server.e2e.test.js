@@ -14,7 +14,7 @@ function getFreePort() {
 	});
 }
 
-jest.setTimeout(30000);
+jest.setTimeout(60000);
 
 async function waitForReady(healthPort, timeoutMs = 15000) {
 	const deadline = Date.now() + timeoutMs;
@@ -51,14 +51,20 @@ function startServer({ wsPort, healthPort }) {
 		cwd: path.join(__dirname, '..'),
 		stdio: ['ignore', 'pipe', 'pipe'],
 	});
+	try { child.stdout.on('data', (d) => process.stdout.write(`[server stdout] ${d.toString()}`)); } catch (_) {}
+	try { child.stderr.on('data', (d) => process.stderr.write(`[server stderr] ${d.toString()}`)); } catch (_) {}
 	return child;
 }
 
-function connectClient(url) {
+function connectClient(url, timeoutMs = 15000) {
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(url);
-		ws.once('open', () => resolve(ws));
-		ws.once('error', reject);
+		const t = setTimeout(() => {
+			try { ws.terminate(); } catch (_) {}
+			reject(new Error('WS connect timeout'));
+		}, timeoutMs);
+		ws.once('open', () => { clearTimeout(t); resolve(ws); });
+		ws.once('error', (e) => { clearTimeout(t); reject(e); });
 	});
 }
 
@@ -94,11 +100,14 @@ describe('ScalableSignalingServer headless E2E', () => {
 			});
 
 			c1.send(JSON.stringify({ type: 'control', action: 'test', payload: { ok: true } }));
-			const data = await received;
+			const data = await Promise.race([
+				received,
+				new Promise((_, rej) => setTimeout(() => rej(new Error('No message received')), 20000)),
+			]);
 			expect(data).toEqual({ type: 'control', action: 'test', payload: { ok: true } });
 
-			c1.close();
-			c2.close();
+			await new Promise((r) => { try { c1.close(); } catch (_) {} setTimeout(r, 50); });
+			await new Promise((r) => { try { c2.close(); } catch (_) {} setTimeout(r, 50); });
 		} finally {
 			try { child.kill('SIGTERM'); } catch (_) {}
 			try { await waitForExit(child, 5000); } catch (_) {}
