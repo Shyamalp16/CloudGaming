@@ -7,6 +7,16 @@ const { logger } = require('./logger');
 const { startHealthServer } = require('./health');
 const { validateSignalingMessage } = require('./validation');
 const { RateLimiter } = require('./rateLimiter');
+const {
+	setActiveConnections,
+	setLocalRooms,
+	incMessagesForwarded,
+	incSchemaRejects,
+	incRateLimitDrops,
+	incBackpressureCloses,
+	observeRedisLatency,
+	observeFanoutLatency,
+} = require('./metrics');
 
 // =============================
 // Logging helper (pino-backed)
@@ -86,6 +96,7 @@ function handleRedisMessage(message, channel) {
 				// Backpressure guard
 				if (client.bufferedAmount > config.backpressureCloseThresholdBytes) {
 					log('warn', 'Closing client due to excessive backpressure', { clientId: client.clientId, roomId });
+					incBackpressureCloses();
 					try { client.close(1013, 'Server overloaded'); } catch (_) {}
 					return;
 				}
@@ -94,6 +105,7 @@ function handleRedisMessage(message, channel) {
 				}
 			}
 		});
+		incMessagesForwarded();
 	} catch (error) {
 		log('error', 'Error handling Redis message', { channel, error: String(error && error.message || error) });
 	}
@@ -166,6 +178,8 @@ async function handleNewConnection(ws, request) {
 		// Register locally
 		if (!localRooms.has(roomId)) localRooms.set(roomId, new Set());
 		localRooms.get(roomId).add(ws);
+		setActiveConnections([...localRooms.values()].reduce((acc, set) => acc + set.size, 0));
+		setLocalRooms(localRooms.size);
 
 		log('info', 'Client joined room', { clientId, roomId, localCount: localRooms.get(roomId).size });
 
@@ -249,6 +263,7 @@ async function handleMessage(ws, roomKey, message) {
 			log('warn', 'Dropping invalid signaling message', { clientId: ws.clientId, roomId: ws.roomId });
 			// Optionally send a control error
 			try { ws.send(JSON.stringify({ type: 'control', action: 'schema-error' })); } catch (_) {}
+			incSchemaRejects();
 			return;
 		}
 
@@ -265,6 +280,7 @@ async function handleMessage(ws, roomKey, message) {
 		}
 		if (!allowedMsg) {
 			log('warn', 'Message rate-limited', { clientId: ws.clientId, roomId: ws.roomId, ip });
+			incRateLimitDrops();
 			return;
 		}
 

@@ -4,6 +4,7 @@ describe('config module', () => {
 		const { config } = require('../config');
 		expect(config.wsPort).toBeGreaterThan(0);
 		expect(config.redisUrl).toEqual(expect.stringContaining('redis://'));
+		expect(config.healthPort).toBeGreaterThan(0);
 	});
 });
 

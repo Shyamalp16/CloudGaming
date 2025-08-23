@@ -1,6 +1,7 @@
 const http = require('http');
 const { config } = require('./config');
 const { logger } = require('./logger');
+const { metricsHandler } = require('./metrics');
 
 function startHealthServer({ readinessCheck }) {
 	const log = logger.child({ svc: 'health' });
@@ -25,6 +26,9 @@ function startHealthServer({ readinessCheck }) {
 				res.end('not-ready');
 			}
 			return;
+		}
+		if (req.url === '/metrics') {
+			return metricsHandler(req, res);
 		}
 		res.writeHead(404, { 'Content-Type': 'text/plain' });
 		res.end('not-found');
