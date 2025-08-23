@@ -80,7 +80,7 @@ function handleRedisMessage(message, channel) {
 		clientsInRoom.forEach(client => {
 			if (client.clientId !== senderId && client.readyState === WebSocket.OPEN) {
 				// Backpressure guard
-				if (client.bufferedAmount > BACKPRESSURE_CLOSE_THRESHOLD_BYTES) {
+				if (client.bufferedAmount > config.backpressureCloseThresholdBytes) {
 					log('warn', 'Closing client due to excessive backpressure', { clientId: client.clientId, roomId });
 					try { client.close(1013, 'Server overloaded'); } catch (_) {}
 					return;
