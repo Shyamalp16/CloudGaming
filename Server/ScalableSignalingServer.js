@@ -42,6 +42,7 @@ subscriber.on('error', (err) => log('error', 'Redis subscriber error', { err: St
 // =============================
 // WebSocket Server
 // =============================
+let draining = false;
 const server = new WebSocket.Server({ port: config.wsPort, maxPayload: config.messageMaxBytes });
 
 // In-memory map for clients connected to THIS server instance.
@@ -267,6 +268,21 @@ async function handleMessage(ws, roomKey, message) {
 			return;
 		}
 
+		// Local fanout for same-instance peers to reduce dependency on pub/sub timing
+		try {
+			const peers = localRooms.get(ws.roomId);
+			if (peers && peers.size > 0) {
+				const payload = JSON.stringify(validation.data);
+				peers.forEach((peer) => {
+					if (peer !== ws && peer.readyState === WebSocket.OPEN) {
+						if (peer.bufferedAmount <= config.backpressureCloseThresholdBytes) {
+							try { peer.send(payload); } catch (_) {}
+						}
+					}
+				});
+			}
+		} catch (_) {}
+
 		try {
 			await redisClient.publish(roomKey, JSON.stringify({ senderId: ws.clientId, data: validation.data }));
 		} catch (e) {
@@ -339,7 +355,13 @@ async function main() {
 		process.exit(1);
 	}
 
-	server.on('connection', (ws, request) => handleNewConnection(ws, request));
+	server.on('connection', (ws, request) => {
+		if (draining) {
+			try { ws.close(config.shutdownCloseCode, 'Server draining'); } catch (_) {}
+			return;
+		}
+		handleNewConnection(ws, request);
+	});
 	server.on('error', (err) => log('error', 'WebSocket server error', { error: String(err && err.message || err) }));
 
 	log('info', 'Scalable Signaling Server listening', { port: config.wsPort });
@@ -351,7 +373,7 @@ async function main() {
 			try {
 				// ping returns 'PONG' if connected
 				const pong = await redisClient.ping();
-				return pong === 'PONG';
+				return pong === 'PONG' && !draining;
 			} catch (_) {
 				return false;
 			}
@@ -367,7 +389,30 @@ main().catch(err => {
 // Graceful shutdown
 async function shutdown() {
 	log('info', 'Shutting down gracefully...');
+	// Enter drain mode
+	draining = true;
 	try { server.close(); } catch (_) {}
+
+	// Best-effort close of all clients and Redis membership cleanup
+	const closePromises = [];
+	localRooms.forEach((clients, roomId) => {
+		clients.forEach((ws) => {
+			try { ws.close(config.shutdownCloseCode, 'Server draining'); } catch (_) {}
+			const roomKey = `room:${roomId}`;
+			closePromises.push((async () => {
+				try { await redisClient.sRem(roomKey, ws.clientId); } catch (_) {}
+				try { await redisClient.publish(roomKey, JSON.stringify({ senderId: ws.clientId, data: { type: 'peer-disconnected' } })); } catch (_) {}
+			})());
+		});
+	});
+
+	try {
+		await Promise.race([
+			Promise.all(closePromises).catch(() => {}),
+			new Promise((resolve) => setTimeout(resolve, config.drainTimeoutMs)),
+		]);
+	} catch (_) {}
+
 	try { await subscriber.quit(); } catch (_) {}
 	try { await redisClient.quit(); } catch (_) {}
 	process.exit(0);

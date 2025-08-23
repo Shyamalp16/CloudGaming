@@ -113,6 +113,50 @@ describe('ScalableSignalingServer headless E2E', () => {
 			try { await waitForExit(child, 5000); } catch (_) {}
 		}
 	});
+
+	it('drain closes clients with 1012 close code', async () => {
+		const wsPort = await getFreePort();
+		const healthPort = await getFreePort();
+		const child = startServer({ wsPort, healthPort });
+
+		try {
+			await Promise.race([
+				waitForReady(healthPort, 20000),
+				waitForExit(child, 20000).then(({ code, signal }) => {
+					throw new Error(`Server exited early (code=${code}, signal=${signal})`);
+				}),
+			]);
+
+			const roomId = 'e2e-room-drain';
+			const base = `ws://127.0.0.1:${wsPort}`;
+			const c1 = await connectClient(`${base}/?roomId=${roomId}`);
+			const c2 = await connectClient(`${base}/?roomId=${roomId}`);
+
+			const closed1 = new Promise((resolve) => {
+				c1.once('close', (code) => resolve(code));
+			});
+			const closed2 = new Promise((resolve) => {
+				c2.once('close', (code) => resolve(code));
+			});
+
+			// Trigger drain
+			try { child.kill('SIGTERM'); } catch (_) {}
+
+			const code1 = await Promise.race([
+				closed1,
+				new Promise((_, rej) => setTimeout(() => rej(new Error('c1 not closed')), 15000)),
+			]);
+			const code2 = await Promise.race([
+				closed2,
+				new Promise((_, rej) => setTimeout(() => rej(new Error('c2 not closed')), 15000)),
+			]);
+
+			expect(code1).toBe(1012);
+			expect(code2).toBe(1012);
+		} finally {
+			try { await waitForExit(child, 5000); } catch (_) {}
+		}
+	});
 });
 
 
