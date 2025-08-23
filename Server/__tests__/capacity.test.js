@@ -52,12 +52,32 @@ function startServer({ wsPort, healthPort }) {
 	return child;
 }
 
-function connectClient(url, timeoutMs = 10000) {
-	return new Promise((resolve, reject) => {
+function connectWithJoinResult(url, timeoutMs = 5000, settleMs = 300) {
+	return new Promise((resolve) => {
 		const ws = new WebSocket(url);
-		const t = setTimeout(() => { try { ws.terminate(); } catch (_) {} reject(new Error('WS connect timeout')); }, timeoutMs);
-		ws.once('open', () => { clearTimeout(t); resolve(ws); });
-		ws.once('error', (e) => { clearTimeout(t); reject(e); });
+		let settled = false;
+		const done = (result) => { if (!settled) { settled = true; resolve(result); } };
+		const to = setTimeout(() => { try { ws.terminate(); } catch (_) {} done({ ok: false, err: new Error('WS connect timeout') }); }, timeoutMs);
+		ws.once('open', () => {
+			setTimeout(() => {
+				clearTimeout(to);
+				if (ws.readyState === WebSocket.OPEN) {
+					done({ ok: true, ws });
+				} else {
+					done({ ok: false, err: new Error('Closed after open') });
+				}
+			}, settleMs);
+		});
+		ws.once('close', (code) => {
+			if (code === 1000) {
+				clearTimeout(to);
+				done({ ok: false, err: new Error('Room full') });
+			}
+		});
+		ws.once('error', () => {
+			clearTimeout(to);
+			done({ ok: false, err: new Error('WS error') });
+		});
 	});
 }
 
@@ -74,10 +94,7 @@ describe('Atomic capacity enforcement', () => {
 			const roomId = 'cap-room';
 			const base = `ws://127.0.0.1:${wsPort}`;
 			// Fire off 5 concurrent connection attempts
-			const attempts = Array.from({ length: 5 }, () => connectClient(`${base}/?roomId=${roomId}`).then(
-				(ws) => ({ ok: true, ws }),
-				(err) => ({ ok: false, err })
-			));
+			const attempts = Array.from({ length: 5 }, () => connectWithJoinResult(`${base}/?roomId=${roomId}`));
 			const results = await Promise.allSettled(attempts);
 			const successes = results
 				.filter(r => r.status === 'fulfilled' && r.value.ok)
