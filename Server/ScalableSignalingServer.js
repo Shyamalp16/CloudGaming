@@ -5,6 +5,8 @@ const { createClient } = require('redis');
 const { config } = require('./config');
 const { logger } = require('./logger');
 const { startHealthServer } = require('./health');
+const { validateSignalingMessage } = require('./validation');
+const { RateLimiter } = require('./rateLimiter');
 
 // =============================
 // Logging helper (pino-backed)
@@ -32,6 +34,7 @@ function createRedis(urlString) {
 // Need two clients: one for commands, one for subscriber mode
 const redisClient = createRedis(config.redisUrl);
 const subscriber = redisClient.duplicate();
+const rateLimiter = RateLimiter(redisClient);
 
 redisClient.on('error', (err) => log('error', 'Redis client error', { err: String(err && err.message || err) }));
 subscriber.on('error', (err) => log('error', 'Redis subscriber error', { err: String(err && err.message || err) }));
@@ -110,6 +113,20 @@ async function handleNewConnection(ws, request) {
 		if (!validateRoomId(roomId)) {
 			log('warn', 'Invalid or missing roomId on connection', { roomId });
 			ws.close(1008, 'Invalid roomId');
+			return;
+		}
+
+		// IP-based connection rate limiting
+		const ip = (request.socket && request.socket.remoteAddress) || 'unknown';
+		let allowedConn = true;
+		try {
+			allowedConn = await rateLimiter.allow({ namespace: 'conn', id: ip, limit: config.rateLimitConnPer10s, periodSeconds: 10 });
+		} catch (e) {
+			log('warn', 'Rate limiter error on connection', { ip, error: String(e && e.message || e) });
+		}
+		if (!allowedConn) {
+			log('warn', 'IP connection rate-limited', { ip });
+			ws.close(1013, 'Rate limited');
 			return;
 		}
 
@@ -225,8 +242,33 @@ async function handleMessage(ws, roomKey, message) {
 			return;
 		}
 
+		// Schema validation
+		const validation = validateSignalingMessage(parsedMessage);
+		if (!validation.ok) {
+			log('warn', 'Dropping invalid signaling message', { clientId: ws.clientId, roomId: ws.roomId });
+			// Optionally send a control error
+			try { ws.send(JSON.stringify({ type: 'control', action: 'schema-error' })); } catch (_) {}
+			return;
+		}
+
+		// IP and room message rate limits
+		const ip = (ws._socket && ws._socket.remoteAddress) || 'unknown';
+		let allowedMsg = true;
 		try {
-			await redisClient.publish(roomKey, JSON.stringify({ senderId: ws.clientId, data: parsedMessage }));
+			allowedMsg = await rateLimiter.allow({ namespace: 'msg-ip', id: ip, limit: config.rateLimitIpMsgsPer10s, periodSeconds: 10 });
+			if (allowedMsg) {
+				allowedMsg = await rateLimiter.allow({ namespace: 'msg-room', id: ws.roomId, limit: config.rateLimitRoomMsgsPer10s, periodSeconds: 10 });
+			}
+		} catch (e) {
+			log('warn', 'Rate limiter error on message', { ip, roomId: ws.roomId, error: String(e && e.message || e) });
+		}
+		if (!allowedMsg) {
+			log('warn', 'Message rate-limited', { clientId: ws.clientId, roomId: ws.roomId, ip });
+			return;
+		}
+
+		try {
+			await redisClient.publish(roomKey, JSON.stringify({ senderId: ws.clientId, data: validation.data }));
 		} catch (e) {
 			log('error', 'Failed to publish to Redis', { roomId: ws.roomId, clientId: ws.clientId, error: String(e && e.message || e) });
 		}

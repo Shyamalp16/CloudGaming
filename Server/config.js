@@ -15,6 +15,9 @@ const schema = z.object({
 	HEALTH_PORT: z.preprocess((v) => Number(v), z.number().int().positive()).default(8080),
 	LOG_LEVEL: z.string().default(process.env.LOG_LEVEL || 'info'),
 	PRETTY_LOGS: z.string().optional(),
+	RATE_LIMIT_CONN_PER_10S: z.preprocess((v) => Number(v), z.number().int().positive()).default(20),
+	RATE_LIMIT_IP_MSGS_PER_10S: z.preprocess((v) => Number(v), z.number().int().positive()).default(400),
+	RATE_LIMIT_ROOM_MSGS_PER_10S: z.preprocess((v) => Number(v), z.number().int().positive()).default(800),
 });
 
 let parsed;
@@ -36,6 +39,9 @@ const config = {
 	backpressureCloseThresholdBytes: parsed.BACKPRESSURE_CLOSE_THRESHOLD_BYTES,
 	heartbeatIntervalMs: parsed.HEARTBEAT_INTERVAL_MS,
 	rateLimitMessagesPer10s: parsed.RATE_LIMIT_MESSAGES_PER_10S,
+	rateLimitConnPer10s: parsed.RATE_LIMIT_CONN_PER_10S,
+	rateLimitIpMsgsPer10s: parsed.RATE_LIMIT_IP_MSGS_PER_10S,
+	rateLimitRoomMsgsPer10s: parsed.RATE_LIMIT_ROOM_MSGS_PER_10S,
 	roomIdMaxLength: parsed.ROOM_ID_MAX_LENGTH,
 	healthPort: parsed.HEALTH_PORT,
 	logLevel: parsed.LOG_LEVEL,

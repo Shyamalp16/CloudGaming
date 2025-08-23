@@ -78,9 +78,9 @@ describe('ScalableSignalingServer headless E2E', () => {
 				c2.once('error', reject);
 			});
 
-			c1.send(JSON.stringify({ type: 'test', payload: { ok: true } }));
+			c1.send(JSON.stringify({ type: 'control', action: 'test', payload: { ok: true } }));
 			const data = await received;
-			expect(data).toEqual({ type: 'test', payload: { ok: true } });
+			expect(data).toEqual({ type: 'control', action: 'test', payload: { ok: true } });
 
 			c1.close();
 			c2.close();
