@@ -16,6 +16,8 @@ const {
 	incBackpressureCloses,
 	observeRedisLatency,
 	observeFanoutLatency,
+	startRedisTimer,
+	startFanoutTimer,
 } = require('./metrics');
 
 // =============================
@@ -91,6 +93,7 @@ function handleRedisMessage(message, channel) {
 		const clientsInRoom = localRooms.get(roomId);
 		if (!clientsInRoom || clientsInRoom.size === 0) return;
 		const dataStr = JSON.stringify(data);
+		const endFanout = startFanoutTimer();
 		clientsInRoom.forEach(client => {
 			if (client.clientId !== senderId && client.readyState === WebSocket.OPEN) {
 				// Backpressure guard
@@ -105,6 +108,7 @@ function handleRedisMessage(message, channel) {
 				}
 			}
 		});
+		endFanout();
 		incMessagesForwarded();
 	} catch (error) {
 		log('error', 'Error handling Redis message', { channel, error: String(error && error.message || error) });
@@ -149,10 +153,16 @@ async function handleNewConnection(ws, request) {
 		// Attempt to join atomically-ish: add first, then check size and roll back if over capacity
 		let joined = false;
 		try {
+			let end = startRedisTimer();
 			await redisClient.sAdd(roomKey, clientId);
+			end();
+			end = startRedisTimer();
 			const size = await redisClient.sCard(roomKey);
+			end();
 			if (size > config.roomCapacity) {
+				let end2 = startRedisTimer();
 				await redisClient.sRem(roomKey, clientId);
+				end2();
 				log('info', 'Room is full, rejecting connection', { roomId, clientId, size });
 				ws.close(1000, 'Room is full');
 				return;
@@ -160,7 +170,7 @@ async function handleNewConnection(ws, request) {
 			joined = true;
 			if (size === 1) {
 				// Room created (first member) -> remove TTL
-				try { await redisClient.persist(roomKey); } catch (e) { log('warn', 'Failed to persist room key', { roomId, error: String(e && e.message || e) }); }
+				try { const e3 = startRedisTimer(); await redisClient.persist(roomKey); e3(); } catch (e) { log('warn', 'Failed to persist room key', { roomId, error: String(e && e.message || e) }); }
 			}
 		} catch (e) {
 			log('error', 'Redis error during join', { roomId, clientId, error: String(e && e.message || e) });
@@ -300,7 +310,9 @@ async function handleMessage(ws, roomKey, message) {
 		} catch (_) {}
 
 		try {
+			const ePub = startRedisTimer();
 			await redisClient.publish(roomKey, JSON.stringify({ senderId: ws.clientId, data: validation.data }));
+			ePub();
 		} catch (e) {
 			log('error', 'Failed to publish to Redis', { roomId: ws.roomId, clientId: ws.clientId, error: String(e && e.message || e) });
 		}
@@ -332,8 +344,12 @@ async function handleDisconnection(ws, roomKey) {
 
 	// Redis cleanup and notify peers
 	try {
+		let e1 = startRedisTimer();
 		await redisClient.sRem(roomKey, clientId);
+		e1();
+		let e2 = startRedisTimer();
 		await redisClient.publish(roomKey, JSON.stringify({ senderId: clientId, data: { type: 'peer-disconnected' } }));
+		e2();
 	} catch (e) {
 		log('warn', 'Redis cleanup or notify failed', { roomId, clientId, error: String(e && e.message || e) });
 	}

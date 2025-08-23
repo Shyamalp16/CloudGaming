@@ -63,6 +63,8 @@ function incRateLimitDrops(n = 1) { counterRateLimitDrops.inc(n); }
 function incBackpressureCloses(n = 1) { counterBackpressureCloses.inc(n); }
 function observeRedisLatency(seconds) { histoRedisLatency.observe(seconds); }
 function observeFanoutLatency(seconds) { histoFanoutLatency.observe(seconds); }
+function startRedisTimer() { return histoRedisLatency.startTimer(); }
+function startFanoutTimer() { return histoFanoutLatency.startTimer(); }
 
 async function metricsHandler(req, res) {
 	try {
@@ -85,6 +87,8 @@ module.exports = {
 	incBackpressureCloses,
 	observeRedisLatency,
 	observeFanoutLatency,
+	startRedisTimer,
+	startFanoutTimer,
 };
 
 
