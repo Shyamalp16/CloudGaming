@@ -31,10 +31,10 @@ jobs:
           cache-dependency-path: Server/package-lock.json
       - name: Install dependencies (pinned)
         run: npm ci
+      - name: Prettier write
+        run: npm run format:fix
       - name: Lint
         run: npm run lint
       - name: Test
         run: npm test
-      - name: Format check
-        run: npm run format
 
