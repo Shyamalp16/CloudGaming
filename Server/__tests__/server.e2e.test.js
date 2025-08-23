@@ -1,7 +1,18 @@
 const { spawn } = require('child_process');
 const path = require('path');
-const getPort = require('get-port');
+const net = require('net');
 const WebSocket = require('ws');
+function getFreePort() {
+	return new Promise((resolve, reject) => {
+		const srv = net.createServer();
+		srv.listen(0, '127.0.0.1', () => {
+			const addr = srv.address();
+			const port = typeof addr === 'object' && addr ? addr.port : undefined;
+			srv.close((err) => (err ? reject(err) : resolve(port)));
+		});
+		srv.on('error', reject);
+	});
+}
 
 jest.setTimeout(30000);
 
@@ -43,8 +54,8 @@ function connectClient(url) {
 
 describe('ScalableSignalingServer headless E2E', () => {
 	it('starts, accepts clients, and forwards messages', async () => {
-		const wsPort = await getPort();
-		const healthPort = await getPort();
+		const wsPort = await getFreePort();
+		const healthPort = await getFreePort();
 		const child = startServer({ wsPort, healthPort });
 
 		try {
