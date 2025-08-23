@@ -6,9 +6,11 @@
     "start": "node ScalableSignalingServer.js",
     "dev": "cross-env PRETTY_LOGS=true node ScalableSignalingServer.js",
     "health": "node -e \"require('./health').startHealthServer({})\"",
-    "lint": "echo 'No lint configured'",
-    "test": "echo 'No tests yet' && exit 0",
-    "ci": "npm ci && npm run lint && npm test"
+    "format": "prettier --check .",
+    "format:fix": "prettier --write .",
+    "lint": "eslint .",
+    "test": "jest --runInBand",
+    "ci": "npm ci && npm run format && npm run lint && npm test"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
@@ -19,6 +21,10 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "cross-env": "^7.0.3"
+    "cross-env": "^7.0.3",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "jest": "^29.7.0",
+    "prettier": "^3.3.3"
   }
 }
