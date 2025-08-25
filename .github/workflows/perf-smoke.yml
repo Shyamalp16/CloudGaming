@@ -96,8 +96,8 @@ jobs:
           config:
             target: "ws://127.0.0.1:{{ $env.WS_PORT }}"
             phases:
-              - duration: 30
-                arrivalRate: 15
+              - duration: 60
+                arrivalRate: 25
             engines:
               ws:
                 subprotocols:
@@ -132,13 +132,13 @@ jobs:
           SUBPROTOCOL: webrtc-signaling
           TOKEN: ${{ secrets.SIGNALING_JWT || '' }}
         run: |
-          ( timeout 120s npx artillery run ws-signaling.yml --output artillery-report.json | cat ) & echo $! > art.pid
+          ( timeout 180s npx artillery run ws-signaling.yml --output artillery-report.json | cat ) & echo $! > art.pid
 
           echo "=== Waiting for activity before during-scrape ==="
           timeout 30s bash -c '
             while true; do
-              conn=$(curl -fsS http://127.0.0.1:8080/metrics | grep "^signaling_active_connections " | awk "{print \$2}" || echo "0")
-              msg=$(curl -fsS http://127.0.0.1:8080/metrics | grep "^signaling_messages_forwarded_total " | awk "{print \$2}" || echo "0")
+              conn=$(curl -fsS http://127.0.0.1:8080/metrics | grep "^signaling_active_connections " | awk "{print $2}" || echo "0")
+              msg=$(curl -fsS http://127.0.0.1:8080/metrics | grep "^signaling_messages_forwarded_total " | awk "{print $2}" || echo "0")
               if [ "$conn" -ge 5 ] || [ "$msg" -gt 0 ]; then
                 echo "Activity detected: conn=$conn, msg=$msg"
                 break
@@ -151,7 +151,7 @@ jobs:
           best_conn=0
           for i in $(seq 1 10); do
             curl -fsS http://127.0.0.1:8080/metrics -o metrics_during_$i.prom || true
-            conn=$(grep "^signaling_active_connections " metrics_during_$i.prom | awk "{print \$2}" || echo "0")
+            conn=$(grep "^signaling_active_connections " metrics_during_$i.prom | awk "{print $2}" || echo "0")
             if [ "$conn" -gt "$best_conn" ]; then
               best_conn=$conn
               cp metrics_during_$i.prom metrics_during.prom
@@ -165,8 +165,8 @@ jobs:
           echo "=== Waiting for steady state before after-scrape ==="
           timeout 90s bash -c '
             while true; do
-              conn=$(curl -fsS http://127.0.0.1:8080/metrics | grep "^signaling_active_connections " | awk "{print \$2}" || echo "0")
-              msg=$(curl -fsS http://127.0.0.1:8080/metrics | grep "^signaling_messages_forwarded_total " | awk "{print \$2}" || echo "0")
+              conn=$(curl -fsS http://127.0.0.1:8080/metrics | grep "^signaling_active_connections " | awk "{print $2}" || echo "0")
+              msg=$(curl -fsS http://127.0.0.1:8080/metrics | grep "^signaling_messages_forwarded_total " | awk "{print $2}" || echo "0")
               echo "conn=$conn, msg=$msg"
               if [ "$conn" -eq 0 ]; then
                 echo "All connections closed - ready for after-scrape"
