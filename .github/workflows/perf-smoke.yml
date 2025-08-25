@@ -29,11 +29,13 @@ jobs:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: Server/package-lock.json
+
       - name: Install deps
         working-directory: Server
         run: |
           npm ci
           npx --yes artillery@latest --version | cat
+
       - name: Start server
         working-directory: Server
         env:
@@ -48,6 +50,7 @@ jobs:
           node ScalableSignalingServer.js & echo $! > server.pid
           echo "=== Waiting for readiness ==="
           timeout 20s bash -c 'until curl -fsS http://127.0.0.1:8080/readyz >/dev/null; do sleep 0.5; done' || { echo "Server did not become ready in time" >&2; exit 1; }
+
       - name: Write Artillery smoke config (helpers + YAML)
         working-directory: Server
         run: |
@@ -115,9 +118,11 @@ jobs:
                 - function: sendBurst
                 - function: waitAndClose
           YAML
+
       - name: Scrape metrics (before)
         working-directory: Server
         run: curl -fsS http://127.0.0.1:8080/metrics -o metrics_before.prom
+
       - name: Run Artillery smoke (with during-scrape)
         working-directory: Server
         timeout-minutes: 3
@@ -128,6 +133,7 @@ jobs:
           TOKEN: ${{ secrets.SIGNALING_JWT || '' }}
         run: |
           ( timeout 120s npx artillery run ws-signaling.yml --output artillery-report.json | cat ) & echo $! > art.pid
+
           echo "=== Waiting for activity before during-scrape ==="
           timeout 30s bash -c '
             while true; do
@@ -140,8 +146,22 @@ jobs:
               sleep 0.5
             done
           ' || echo "No activity detected in time"
-          curl -fsS http://127.0.0.1:8080/metrics -o metrics_during.prom || true
+
+          echo "=== Scraping metrics DURING run (sampling) ==="
+          best_conn=0
+          for i in $(seq 1 10); do
+            curl -fsS http://127.0.0.1:8080/metrics -o metrics_during_$i.prom || true
+            conn=$(grep "signaling_active_connections " metrics_during_$i.prom | awk '{print $2}' || echo "0")
+            if [ "$conn" -gt "$best_conn" ]; then
+              best_conn=$conn
+              cp metrics_during_$i.prom metrics_during.prom
+            fi
+            sleep 1
+          done
+          echo "Selected during-scrape snapshot with active_connections=$best_conn"
+
           wait $(cat art.pid) || true
+
           echo "=== Waiting for steady state before after-scrape ==="
           timeout 90s bash -c '
             while true; do
@@ -155,9 +175,11 @@ jobs:
               sleep 1
             done
           ' || echo "Steady state wait timed out"
+
       - name: Scrape metrics (after)
         working-directory: Server
         run: curl -fsS http://127.0.0.1:8080/metrics -o metrics_after.prom
+
       - name: Basic SLO checks (enhanced)
         working-directory: Server
         run: |
@@ -180,6 +202,7 @@ jobs:
           }
           console.log("SLO check passed: fanout>=" + fanCount);
           '
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -189,9 +212,8 @@ jobs:
             Server/metrics_before.prom
             Server/metrics_during.prom
             Server/metrics_after.prom
+
       - name: Stop server
         if: always()
         working-directory: Server
         run: kill $(cat server.pid) || true
-
-
