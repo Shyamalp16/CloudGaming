@@ -80,18 +80,18 @@ jobs:
 
           cat > ws-signaling.yml << 'YAML'
           config:
-            target: "ws://127.0.0.1:${WS_PORT}"
+            target: "ws://127.0.0.1:{{ $env.WS_PORT }}"
             phases:
               - duration: 20
                 arrivalRate: 15
             engines:
               ws:
                 subprotocols:
-                  - "${SUBPROTOCOL}"
+                  - "{{ $env.SUBPROTOCOL }}"
             processor: "./ws-helpers.js"
             variables:
-              origin: "${ORIGIN}"
-              token: "${TOKEN}"
+              origin: "{{ $env.ORIGIN }}"
+              token: "{{ $env.TOKEN }}"
           scenarios:
             - engine: ws
               name: "control burst"
