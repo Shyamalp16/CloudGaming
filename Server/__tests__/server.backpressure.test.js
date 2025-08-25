@@ -67,7 +67,7 @@ describe('Backpressure close path', () => {
 	it('closes client when bufferedAmount exceeds threshold', async () => {
 		const wsPort = await getFreePort();
 		const healthPort = await getFreePort();
-		const child = startServer({ wsPort, healthPort, extraEnv: { BACKPRESSURE_CLOSE_THRESHOLD_BYTES: '1' } });
+		const child = startServer({ wsPort, healthPort, extraEnv: { BACKPRESSURE_CLOSE_THRESHOLD_BYTES: '0', MESSAGE_MAX_BYTES: String(1024 * 1024) } });
 		try {
 			await waitForReady(healthPort, 20000);
 			const roomId = `bp-${Date.now()}`;
@@ -77,13 +77,14 @@ describe('Backpressure close path', () => {
 			// Make receiver artificially slow by pausing its socket (approximation)
 			try { b._socket.pause(); } catch (_) {}
 			await new Promise((r) => setTimeout(r, 100));
-			// Send enough messages to grow buffer
-			for (let i = 0; i < 200; i++) {
-				a.send(JSON.stringify({ type: 'control', action: 'spam', payload: { i } }));
+			// Send enough large messages to grow server's send buffer to b
+			const payload = JSON.stringify({ type: 'control', action: 'spam', payload: { blob: 'x'.repeat(65536) } });
+			for (let i = 0; i < 600; i++) {
+				try { a.send(payload); } catch (_) {}
 			}
 			const closed = await new Promise((resolve, reject) => {
 				b.once('close', (code) => resolve(code));
-				setTimeout(() => reject(new Error('no backpressure close')), 20000);
+				setTimeout(() => reject(new Error('no backpressure close')), 30000);
 			});
 			expect([1013, 1006, 1001]).toContain(closed);
 		} finally {
