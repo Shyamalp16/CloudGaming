@@ -2,6 +2,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const net = require('net');
 const WebSocket = require('ws');
+const jwt = require('jsonwebtoken');
 const { createClient } = require('redis');
 
 function getFreePort() {
@@ -54,9 +55,19 @@ function startServer({ wsPort, healthPort, extraEnv = {} }) {
 	return child;
 }
 
+function makeAuthToken(roomId) {
+	if (process.env.ENABLE_AUTH !== 'true') return '';
+	const secret = process.env.JWT_SECRET || 'test-secret';
+	const iss = process.env.JWT_ISSUER || 'http://localhost';
+	const aud = process.env.JWT_AUDIENCE || 'test';
+	const payload = { sub: 'ttl', iss, aud, rooms: [roomId] };
+	return jwt.sign(payload, secret, { algorithm: 'HS256', expiresIn: '5m' });
+}
+
 function connectClient(url, timeoutMs = 10000) {
 	return new Promise((resolve, reject) => {
-		const ws = new WebSocket(url);
+		const protocols = process.env.SUBPROTOCOL ? [process.env.SUBPROTOCOL] : undefined;
+		const ws = new WebSocket(url, protocols, { headers: { origin: 'http://localhost' } });
 		const t = setTimeout(() => { try { ws.terminate(); } catch (_) {} reject(new Error('WS connect timeout')); }, timeoutMs);
 		ws.once('open', () => { clearTimeout(t); resolve(ws); });
 		ws.once('error', (e) => { clearTimeout(t); reject(e); });
@@ -80,7 +91,9 @@ describe('Room TTL logic', () => {
 				waitForExit(child, 20000).then(({ code, signal }) => { throw new Error(`Server exited early: ${code}:${signal}`); }),
 			]);
 			const base = `ws://127.0.0.1:${wsPort}`;
-			const c1 = await connectClient(`${base}/?roomId=${roomId}`);
+			const token = makeAuthToken(roomId);
+			const qs = token ? `&token=${token}` : '';
+			const c1 = await connectClient(`${base}/?roomId=${roomId}${qs}`);
 			// small settle so join is processed
 			await new Promise((r) => setTimeout(r, 150));
 			// Close client to trigger leave; room becomes empty -> EXPIRE set on key
