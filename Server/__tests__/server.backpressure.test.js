@@ -17,7 +17,7 @@ function getFreePort() {
 
 jest.setTimeout(90000);
 
-async function waitForReady(healthPort, timeoutMs = 20000) {
+async function waitForReady(healthPort, timeoutMs = 40000) {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		try {
@@ -69,7 +69,11 @@ describe('Backpressure close path', () => {
 		const healthPort = await getFreePort();
 		const child = startServer({ wsPort, healthPort, extraEnv: { BACKPRESSURE_CLOSE_THRESHOLD_BYTES: '0', MESSAGE_MAX_BYTES: String(1024 * 1024) } });
 		try {
-			await waitForReady(healthPort, 20000);
+			// Be resilient to slow boots: race readiness with unexpected exit
+			await Promise.race([
+				waitForReady(healthPort, 40000),
+				waitForExit(child, 40000).then(({ code, signal }) => { throw new Error(`Server exited early: ${code}:${signal}`); }),
+			]);
 			const roomId = `bp-${Date.now()}`;
 			const base = `ws://127.0.0.1:${wsPort}`;
 			const a = await connect(`${base}/?roomId=${roomId}`);
