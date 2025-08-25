@@ -179,11 +179,16 @@ jobs:
           // Assert meaningful activity
           const fanCount=fanBuckets.find(l=>l.includes("le=\"+Inf\"")).split(" ")[1];
           const actCount=act[0].split(" ")[1];
-          if(parseInt(fanCount)<100||parseInt(actCount)>0){ 
-            console.error("Insufficient activity: fanout=$fanCount, active=$actCount"); 
+          console.log("Checking SLO: fanout=" + fanCount + ", active=" + actCount);
+          if(parseInt(fanCount)<100){ 
+            console.error("Insufficient fanout activity: " + fanCount + " < 100"); 
             process.exit(1); 
           }
-          console.log("SLO check passed: fanout=$fanCount, active=$actCount");
+          if(parseInt(actCount)>0){ 
+            console.error("Still have active connections: " + actCount + " > 0"); 
+            process.exit(1); 
+          }
+          console.log("SLO check passed: fanout=" + fanCount + ", active=" + actCount);
           '
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
