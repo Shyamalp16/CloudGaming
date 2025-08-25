@@ -76,10 +76,9 @@ jobs:
           ENABLE_AUTH: 'false'
         run: |
           node ScalableSignalingServer.js & echo $! > server.pid
-          for i in {1..60}; do
-            if curl -fsS http://127.0.0.1:8080/readyz >/dev/null; then echo READY; break; fi
-            sleep 0.5
-          done
+          echo "=== Waiting for readiness ==="
+          timeout 20s bash -c 'until curl -fsS http://127.0.0.1:8080/readyz >/dev/null; do sleep 0.5; done' || {
+            echo "Server did not become ready in time" >&2; exit 1; }
       - name: Write Artillery smoke config
         working-directory: Server
         run: |
@@ -87,7 +86,7 @@ jobs:
           config:
             target: "ws://127.0.0.1:${WS_PORT}"
             phases:
-              - duration: 30
+              - duration: 20
                 arrivalRate: 15
             engines:
               ws:
@@ -120,7 +119,7 @@ jobs:
           ORIGIN: http://localhost
           SUBPROTOCOL: webrtc-signaling
           TOKEN: ${{ secrets.SIGNALING_JWT || '' }}
-        run: npx artillery run ws-signaling.yml --output artillery-report.json | cat
+        run: timeout 90s npx artillery run ws-signaling.yml --output artillery-report.json | cat
       - name: Scrape metrics (after)
         working-directory: Server
         run: curl -fsS http://127.0.0.1:8080/metrics -o metrics_after.prom
