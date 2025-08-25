@@ -76,6 +76,13 @@ async function metricsHandler(req, res) {
 	}
 }
 
+// Optional: allow tests to stop default metrics collection to avoid open handle warnings
+let _stopDefaultMetrics = null;
+try {
+	const rv = client.collectDefaultMetrics({ register });
+	if (typeof rv === 'function') _stopDefaultMetrics = rv;
+} catch (_) {}
+
 module.exports = {
 	register,
 	metricsHandler,
@@ -89,6 +96,7 @@ module.exports = {
 	observeFanoutLatency,
 	startRedisTimer,
 	startFanoutTimer,
+	stopDefaultMetrics: () => { try { if (_stopDefaultMetrics) _stopDefaultMetrics(); } catch (_) {} },
 };
 
 
