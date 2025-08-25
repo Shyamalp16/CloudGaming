@@ -54,7 +54,7 @@ flowchart LR
 ```
 
 1.  **Host (C++)**: A native Windows application that captures the screen (Windows Graphics Capture), audio (WASAPI), and encodes them into a video stream. It also receives and simulates keyboard/mouse input from the client.
-2.  **Signaling Server (Node.js)**: A lightweight matchmaker for WebRTC offer/answer and ICE exchange. Supports single-node or scalable, stateless mode via `ScalableSignalingServer.js` with Redis Pub/Sub. It never carries media; only signaling JSON over WS/WSS.
+2.  **Signaling Server (Node.js)**: A production-ready, scalable signaling server (`ScalableSignalingServer.js`) with Redis Pub/Sub, comprehensive security, observability, and resilience features. Supports single-node or horizontal scaling with stateless design.
 3.  **Client (HTML/JS)**: A web-based application that connects to the Host, receives the video/audio stream, and sends user input back.
 
 ---
@@ -64,7 +64,7 @@ flowchart LR
 | Module | Language(s) | Key Libraries & Frameworks | Purpose |
 | :--- | :--- | :--- | :--- |
 | **Host** | C++ | **FFmpeg** (H.264), **Pion WebRTC** (Go), **WinRT/C++ (WGC)**, **Direct3D 11** | Screen/audio capture, H.264 encoding, WebRTC session management. |
-| **Server** | JavaScript | **Node.js**, **ws** (WebSocket library), **Redis** | Signaling, matchmaking, and ICE candidate exchange. |
+| **Server** | JavaScript | **Node.js**, **ws** (WebSocket), **Redis**, **pino** (logging), **zod** (validation), **prom-client** (metrics) | Production signaling with security, observability, and scalability. |
 | **Client** | JavaScript | **HTML5**, WebRTC API | Renders video, captures user input, and manages the WebRTC connection. |
 
 ---
@@ -86,13 +86,29 @@ The Host is the core of the streaming solution. It runs on the machine with the 
 
 ### 2. Signaling Server (`/Server`)
 
-This is a lightweight but essential component for establishing the P2P connection. The server is designed to be stateless, allowing multiple instances to run behind a load balancer for high availability and scalability.
+A production-ready, horizontally-scalable signaling server with comprehensive security, observability, and resilience features.
 
 **Key Components:**
-*   **`PureSignalingServer.js`**: A simple implementation that allows two peers (one Host, one Client) to find each other and exchange the necessary information to connect.
-*   **`ScalableSignalingServer.js`**: A more advanced, stateless implementation that uses **Redis** to store all room and session state. It uses a single, pattern-based Redis subscription (`psubscribe`) to efficiently handle messaging for all rooms, eliminating the need for per-client subscriptions and allowing for seamless scaling.
-*   **`SecureSignalingServer.js`**: A room-based signaling server that provides more robust session management.
-*   **Logic**: The server listens for WebSocket connections. When a client connects, it is added to a room. When it sends a message, the message is forwarded to the other peer in the room.
+*   **`ScalableSignalingServer.js`**: The main production server with Redis Pub/Sub, comprehensive security, and observability.
+*   **`config.js`**: Environment-driven configuration with schema validation using `zod`.
+*   **`logger.js`**: Structured JSON logging with `pino`, including redaction and contextual fields.
+*   **`health.js`**: Lightweight HTTP server exposing `/healthz`, `/readyz`, and `/metrics` endpoints.
+*   **`validation.js`**: Message schema validation using `zod` for offer/answer/candidate/control messages.
+*   **`rateLimiter.js`**: Redis-backed token bucket rate limiting for connections and messages.
+*   **`redisScripts.js`**: Lua scripts for atomic room join/leave operations.
+*   **`metrics.js`**: Prometheus metrics for observability (connections, messages, latency, errors).
+
+**Production Features:**
+*   **Security**: WSS enforcement, Origin validation, JWT authentication, room authorization
+*   **Resilience**: Graceful shutdown, Redis circuit breaker, atomic operations, backpressure handling
+*   **Observability**: Structured logging, Prometheus metrics, health checks, distributed tracing
+*   **Scalability**: Stateless design, Redis Pub/Sub, horizontal scaling support
+*   **Rate Limiting**: Per-connection, per-IP, and per-room message throttling
+*   **Input Validation**: Schema-based message validation with error metrics
+
+**Legacy Components:**
+*   **`PureSignalingServer.js`**: Simple implementation for development/testing.
+*   **`SecureSignalingServer.js`**: Room-based signaling with basic session management.
 
 ### 3. Client (`/Client`)
 
@@ -158,7 +174,7 @@ The system works by creating a continuous feedback loop between the Client and t
 4.  **Encoder-managed AIMD controller:**
     *   RTCP stats (loss/jitter) are forwarded into `Encoder::OnRtcpFeedback`. RTT is computed from video datachannel ping/pong and combined in the callback.
     *   An **AIMD** (Additive Increase / Multiplicative Decrease) controller adjusts bitrate within configured min/max bounds.
-    *   If runtime bitrate changes aren’t supported by the current codec, the encoder schedules a safe reopen between frames.
+    *   If runtime bitrate changes aren't supported by the current codec, the encoder schedules a safe reopen between frames.
 
 This entire process runs continuously, allowing the stream to adapt to changing network conditions in near real-time, ensuring the best possible quality and smoothness.
 
@@ -173,6 +189,7 @@ This is a complex project with multiple components.
 - Visual Studio 2022 with C++ development workload
 - Node.js and npm
 - Go toolchain
+- Redis (for production signaling server)
 - FFmpeg shared libraries (place `avcodec.dll`, `avformat.dll`, `avutil.dll`, `swresample.dll`, `swscale.dll` in the same directory as the Host executable).
 
 ### 1. Build the Go WebRTC Module
@@ -188,11 +205,71 @@ go build -o pion_webrtc.dll -buildmode=c-shared main.go
 - Build the solution for the `x64` platform.
 
 ### 3. Run the Signaling Server
+
+#### Development (Simple Server)
 ```bash
 cd Server
 npm install
-# Run your desired server
 node PureSignalingServer.js
+```
+
+#### Production (Scalable Server)
+```bash
+cd Server
+npm install
+
+# Start Redis (required for production server)
+# Option 1: Docker
+docker run -p 6379:6379 redis:7-alpine
+
+# Option 2: Local installation
+# Install Redis on your system
+
+# Create environment configuration
+cp ENV_README.md .env
+# Edit .env with your settings
+
+# Run the production server
+npm start
+```
+
+**Environment Configuration:**
+Create a `.env` file in the `Server` directory with the following settings:
+
+```env
+# Server Configuration
+NODE_ENV=development
+WS_PORT=3002
+HEALTH_PORT=8080
+
+# Redis Configuration
+REDIS_URL=redis://127.0.0.1:6379
+
+# Room Configuration
+ROOM_CAPACITY=2
+ROOM_TTL_SECONDS=120
+
+# Message Limits
+MESSAGE_MAX_BYTES=262144
+BACKPRESSURE_CLOSE_THRESHOLD_BYTES=5242880
+
+# Rate Limiting
+RATE_LIMIT_MESSAGES_PER_10S=200
+RATE_LIMIT_IP_MSGS_PER_10S=500
+RATE_LIMIT_ROOM_MSGS_PER_10S=1000
+RATE_LIMIT_CONN_PER_10S=50
+
+# Security (Production)
+REQUIRE_WSS=false
+ALLOWED_ORIGINS=
+SUBPROTOCOL=
+ENABLE_AUTH=false
+JWT_SECRET=
+JWT_ISSUER=
+JWT_AUDIENCE=
+
+# Logging
+PRETTY_LOGS=true
 ```
 
 ### 4. Configure and Run the Host
@@ -222,7 +299,101 @@ Key fields:
 - `video`: encoder FPS and bitrate bounds; the AIMD controller operates within `bitrateMin..bitrateMax`.
 - `capture.maxQueueDepth`: bounded frame queue to keep latency low; older frames are dropped first.
 - `capture.dropWindowMs`/`dropMinEvents`: if the encoder backlogs (EAGAIN) at least `dropMinEvents` times in `dropWindowMs`, the next capture frame is dropped (latency > throughput).
-- `capture.mmcss`: enables Multimedia Class Scheduler (MCSS) “Games” profile for the capture/encode thread with a configurable priority.
+- `capture.mmcss`: enables Multimedia Class Scheduler (MCSS) "Games" profile for the capture/encode thread with a configurable priority.
+
+### 5. Run the Client
+- Open `Client/html-server/index.html` in a web browser.
+- Enter the Room ID from the Host and click "Connect".
+
+---
+
+## Testing Strategy
+
+The project includes a comprehensive testing strategy with multiple layers:
+
+### Unit Tests
+- **Validators**: Message schema validation using `zod`
+- **Rate Limiter**: Token bucket algorithm and window management
+- **Configuration**: Environment variable parsing and validation
+- **Logger**: Structured logging output and redaction
+
+### Integration Tests
+- **Redis Operations**: Atomic join/leave, capacity enforcement, TTL behavior
+- **Pub/Sub**: Message fanout across multiple server instances
+- **Reconnection**: Redis outage recovery and resubscription
+- **Circuit Breaker**: Failure detection and graceful degradation
+
+### End-to-End Tests
+- **Signaling Flow**: Complete offer/answer/candidate exchange
+- **Room Management**: Join, message exchange, leave scenarios
+- **Graceful Shutdown**: Server drain and client notification
+- **Security**: JWT authentication and room authorization
+
+### Chaos Tests
+- **Redis Outage**: Mid-session Redis failure and recovery
+- **Server Restart**: Forced shutdown and client reconnection
+- **Network Issues**: Simulated packet loss and delays
+
+### Running Tests
+```bash
+cd Server
+npm test                    # Run all tests
+npm run test:unit          # Unit tests only
+npm run test:integration   # Integration tests only
+npm run test:e2e          # End-to-end tests only
+```
+
+---
+
+## Performance and Scale Validation
+
+The signaling server is designed for high-performance, horizontally-scalable deployments:
+
+### Load Testing
+- **Tools**: k6 or Artillery for realistic signaling patterns
+- **Scenarios**: Room creation bursts, sustained message traffic, rapid connect/disconnect cycles
+- **Metrics**: Connection latency, message fanout latency, error rates, Redis command latency
+
+### Capacity Planning
+- **Instance Sizing**: CPU/memory footprints at target QPS
+- **Redis Throughput**: Headroom for pub/sub and set operations
+- **Horizontal Scaling**: Room distribution across instances
+- **Saturation Points**: Performance degradation thresholds
+
+### Performance Tuning
+- **Message Size Limits**: Configurable `MESSAGE_MAX_BYTES`
+- **Rate Limiting**: Per-connection, per-IP, and per-room throttling
+- **Backpressure**: Configurable close thresholds for excessive buffering
+- **Heartbeat**: Configurable ping/pong intervals for connection health
+
+### Monitoring and Observability
+- **Prometheus Metrics**: Active connections, message throughput, latency histograms
+- **Health Checks**: `/healthz` (liveness) and `/readyz` (readiness)
+- **Structured Logging**: JSON format with contextual fields and redaction
+- **Distributed Tracing**: Instance and request correlation
+
+---
+
+## Production Deployment
+
+### Security Considerations
+- **Transport Security**: Enforce WSS (WebSocket Secure) in production
+- **Authentication**: JWT-based authentication with short-lived tokens
+- **Authorization**: Room-level access control via JWT claims
+- **Input Validation**: Schema-based message validation
+- **Rate Limiting**: Multi-level throttling to prevent abuse
+
+### High Availability
+- **Load Balancing**: Multiple signaling server instances behind a reverse proxy
+- **Redis Cluster**: For high-throughput deployments
+- **Health Checks**: Integration with load balancers and container orchestrators
+- **Graceful Shutdown**: Proper connection draining and resource cleanup
+
+### Monitoring and Alerting
+- **Metrics Collection**: Prometheus scraping of `/metrics` endpoint
+- **Log Aggregation**: Centralized logging with structured JSON
+- **Alerting**: SLO-based alerts for error rates, latency, and availability
+- **Dashboards**: Grafana or similar for visualization
 
 ### Design & Efficiency Highlights
 
@@ -241,7 +412,7 @@ Key fields:
 
 - **Bitrate adaptation inside the encoder**
   - AIMD controller uses RTCP loss/jitter plus RTT from datachannel.
-  - If a codec can’t change bitrate live, the encoder does a safe reopen between frames.
+  - If a codec can't change bitrate live, the encoder does a safe reopen between frames.
 
 - **Input validation & rate limiting**
   - Host validates key codes against an allowlist, clamps mouse ranges, drops oversized messages, and rate-limits key/mouse events.
@@ -250,6 +421,10 @@ Key fields:
   - Configurable MMCSS, drop policy, and queue depth via `config.json`.
   - When exposed to the Internet: enable WSS via reverse proxy and require a room token at the signaling layer.
 
-### 5. Run the Client
-- Open `Client/html-server/index.html` in a web browser.
-- Enter the Room ID from the Host and click "Connect".
+- **Production Signaling Server**
+  - Environment-driven configuration with schema validation
+  - Structured logging with redaction and contextual fields
+  - Comprehensive security features (WSS, JWT, rate limiting)
+  - Observability with Prometheus metrics and health checks
+  - Resilience with graceful shutdown and circuit breakers
+  - Horizontal scalability with Redis Pub/Sub
