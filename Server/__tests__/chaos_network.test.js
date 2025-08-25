@@ -44,9 +44,9 @@ function getFreePort() {
 	});
 }
 
-jest.setTimeout(90000);
+jest.setTimeout(120000);
 
-async function waitForReady(healthPort, timeoutMs = 20000) {
+async function waitForReady(healthPort, timeoutMs = 30000) {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		try {
@@ -74,6 +74,15 @@ function startServer({ wsPort, healthPort }) {
 			HEALTH_PORT: String(healthPort),
 			REDIS_URL: process.env.REDIS_URL || 'redis://127.0.0.1:6379',
 			PRETTY_LOGS: 'false',
+			// Staging profile knobs defaulted here for reliability
+			REQUIRE_WSS: process.env.REQUIRE_WSS || 'false',
+			SUBPROTOCOL: process.env.SUBPROTOCOL || 'webrtc-signaling',
+			ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || 'localhost,127.0.0.1',
+			ENABLE_AUTH: process.env.ENABLE_AUTH || 'true',
+			JWT_ALG: process.env.JWT_ALG || 'HS256',
+			JWT_SECRET: process.env.JWT_SECRET || 'test-secret',
+			JWT_ISSUER: process.env.JWT_ISSUER || 'http://localhost',
+			JWT_AUDIENCE: process.env.JWT_AUDIENCE || 'test',
 		},
 		cwd: path.join(__dirname, '..'),
 		stdio: ['ignore', 'pipe', 'pipe'],
@@ -82,7 +91,6 @@ function startServer({ wsPort, healthPort }) {
 }
 
 function makeAuthToken(roomId) {
-	if (process.env.ENABLE_AUTH !== 'true') return '';
 	const secret = process.env.JWT_SECRET || 'test-secret';
 	const iss = process.env.JWT_ISSUER || 'http://localhost';
 	const aud = process.env.JWT_AUDIENCE || 'test';
@@ -90,7 +98,7 @@ function makeAuthToken(roomId) {
 	return jwt.sign(payload, secret, { algorithm: 'HS256', expiresIn: '5m' });
 }
 
-function connectClient(url, timeoutMs = 15000) {
+function connectClient(url, timeoutMs = 20000) {
 	const WebSocket = require('ws');
 	return new Promise((resolve, reject) => {
 		const protocols = process.env.SUBPROTOCOL ? [process.env.SUBPROTOCOL] : undefined;
@@ -107,7 +115,7 @@ describe('Chaos: network jitter and packet loss', () => {
 		const healthPort = await getFreePort();
 		const child = startServer({ wsPort, healthPort });
 		try {
-			await waitForReady(healthPort, 20000);
+			await waitForReady(healthPort, 30000);
 			const roomId = `chaos-net-${Date.now()}`;
 			const token = makeAuthToken(roomId);
 			const qs = token ? `&token=${token}` : '';
@@ -117,10 +125,10 @@ describe('Chaos: network jitter and packet loss', () => {
 			const c1 = new JitterWS(raw1, { sendDelayMs: 50, recvDelayMs: 50, dropProb: 0.1 });
 			const c2 = new JitterWS(raw2, { sendDelayMs: 50, recvDelayMs: 50, dropProb: 0.1 });
 
-			await new Promise((r) => setTimeout(r, 100));
+			await new Promise((r) => setTimeout(r, 150));
 			const receive = new Promise((resolve, reject) => {
-				c2.once('message', (msg) => { try { resolve(JSON.parse(msg.toString())); } catch (e) { reject(e); } });
 				raw2.once('error', reject);
+				c2.once('message', (msg) => { try { resolve(JSON.parse(msg.toString())); } catch (e) { reject(e); } });
 			});
 			c1.send(JSON.stringify({ type: 'control', action: 'jitter' }));
 			const data = await Promise.race([

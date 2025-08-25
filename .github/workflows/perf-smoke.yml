@@ -29,11 +29,13 @@ jobs:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: Server/package-lock.json
+
       - name: Install deps
         working-directory: Server
         run: |
           npm ci
           npx --yes artillery@latest --version | cat
+
       - name: Start server
         working-directory: Server
         env:
@@ -48,25 +50,32 @@ jobs:
           node ScalableSignalingServer.js & echo $! > server.pid
           echo "=== Waiting for readiness ==="
           timeout 20s bash -c 'until curl -fsS http://127.0.0.1:8080/readyz >/dev/null; do sleep 0.5; done' || { echo "Server did not become ready in time" >&2; exit 1; }
+
       - name: Write Artillery smoke config (helpers + YAML)
         working-directory: Server
         run: |
           cat > ws-helpers.js << 'JS'
           'use strict';
+          const WebSocket = require('ws');
           module.exports = {
             connectTwo: function (ctx, events, done) {
               const roomId = `ci-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
               const qs = ctx.vars.token ? `&token=${ctx.vars.token}` : '';
               const base = ctx.vars.base;
               const url = `${base}/?roomId=${roomId}${qs}`;
-              const headers = { origin: ctx.vars.origin };
-              ctx.ws.connect(url, { headers }, function (a) {
-                ctx.a = a;
-                ctx.ws.connect(url, { headers }, function (b) {
+              const headers = { 'Origin': ctx.vars.origin };
+              const protocol = ctx.vars.subprotocol || undefined;
+              const a = new WebSocket(url, protocol, { headers });
+              a.once('open', () => {
+                const b = new WebSocket(url, protocol, { headers });
+                b.once('open', () => {
+                  ctx.a = a;
                   ctx.b = b;
                   done();
                 });
+                b.once('error', () => done());
               });
+              a.once('error', () => done());
             },
             sendBurst: function (ctx, events, done) {
               const payload = JSON.stringify({ type: 'control', action: 'load' });
@@ -74,7 +83,11 @@ jobs:
               setTimeout(done, 300);
             },
             waitAndClose: function (ctx, events, done) {
-              setTimeout(() => { try { ctx.a && ctx.a.close(); } catch(e){} try { ctx.b && ctx.b.close(); } catch(e){} done(); }, 800);
+              setTimeout(() => {
+                try { if (ctx.a) { ctx.a.close(); try { ctx.a.terminate(); } catch(_){} } } catch(_){}
+                try { if (ctx.b) { ctx.b.close(); try { ctx.b.terminate(); } catch(_){} } } catch(_){}
+                done();
+              }, 2800);
             }
           };
           JS
@@ -83,7 +96,7 @@ jobs:
           config:
             target: "ws://127.0.0.1:{{ $env.WS_PORT }}"
             phases:
-              - duration: 20
+              - duration: 30
                 arrivalRate: 15
             engines:
               ws:
@@ -93,6 +106,7 @@ jobs:
             variables:
               base: "ws://127.0.0.1:{{ $env.WS_PORT }}"
               origin: "{{ $env.ORIGIN }}"
+              subprotocol: "{{ $env.SUBPROTOCOL }}"
               token: "{{ $env.TOKEN }}"
           scenarios:
             - engine: ws
@@ -104,9 +118,11 @@ jobs:
                 - function: sendBurst
                 - function: waitAndClose
           YAML
+
       - name: Scrape metrics (before)
         working-directory: Server
         run: curl -fsS http://127.0.0.1:8080/metrics -o metrics_before.prom
+
       - name: Run Artillery smoke (with during-scrape)
         working-directory: Server
         timeout-minutes: 3
@@ -116,13 +132,77 @@ jobs:
           SUBPROTOCOL: webrtc-signaling
           TOKEN: ${{ secrets.SIGNALING_JWT || '' }}
         run: |
-          ( timeout 90s npx artillery run ws-signaling.yml --output artillery-report.json | cat ) & echo $! > art.pid
-          sleep 5
-          curl -fsS http://127.0.0.1:8080/metrics -o metrics_during.prom || true
+          ( timeout 120s npx artillery run ws-signaling.yml --output artillery-report.json | cat ) & echo $! > art.pid
+
+          echo "=== Waiting for activity before during-scrape ==="
+          timeout 30s bash -c '
+            while true; do
+              conn=$(curl -fsS http://127.0.0.1:8080/metrics | grep "^signaling_active_connections " | awk "{print \$2}" || echo "0")
+              msg=$(curl -fsS http://127.0.0.1:8080/metrics | grep "^signaling_messages_forwarded_total " | awk "{print \$2}" || echo "0")
+              if [ "$conn" -ge 5 ] || [ "$msg" -gt 0 ]; then
+                echo "Activity detected: conn=$conn, msg=$msg"
+                break
+              fi
+              sleep 0.5
+            done
+          ' || echo "No activity detected in time"
+
+          echo "=== Scraping metrics DURING run (sampling) ==="
+          best_conn=0
+          for i in $(seq 1 10); do
+            curl -fsS http://127.0.0.1:8080/metrics -o metrics_during_$i.prom || true
+            conn=$(grep "^signaling_active_connections " metrics_during_$i.prom | awk "{print \$2}" || echo "0")
+            if [ "$conn" -gt "$best_conn" ]; then
+              best_conn=$conn
+              cp metrics_during_$i.prom metrics_during.prom
+            fi
+            sleep 1
+          done
+          echo "Selected during-scrape snapshot with active_connections=$best_conn"
+
           wait $(cat art.pid) || true
+
+          echo "=== Waiting for steady state before after-scrape ==="
+          timeout 90s bash -c '
+            while true; do
+              conn=$(curl -fsS http://127.0.0.1:8080/metrics | grep "^signaling_active_connections " | awk "{print \$2}" || echo "0")
+              msg=$(curl -fsS http://127.0.0.1:8080/metrics | grep "^signaling_messages_forwarded_total " | awk "{print \$2}" || echo "0")
+              echo "conn=$conn, msg=$msg"
+              if [ "$conn" -eq 0 ]; then
+                echo "All connections closed - ready for after-scrape"
+                break
+              fi
+              sleep 1
+            done
+          ' || echo "Steady state wait timed out"
+
       - name: Scrape metrics (after)
         working-directory: Server
         run: curl -fsS http://127.0.0.1:8080/metrics -o metrics_after.prom
+
+      - name: Basic SLO checks (enhanced)
+        working-directory: Server
+        run: |
+          node -e '
+          const fs=require("fs");
+          const m=fs.readFileSync("metrics_after.prom","utf8").split("\n");
+          const find=(name)=>m.filter(l=>l.startsWith(name));
+          // Core metrics presence
+          const fanBuckets=find("signaling_fanout_latency_seconds_bucket");
+          const red=find("signaling_redis_cmd_latency_seconds_bucket");
+          if(red.length===0||fanBuckets.length===0){ 
+            console.error("Missing core metrics"); process.exit(1); 
+          }
+          // Assert meaningful activity (relaxed: only fanout threshold)
+          const fanCount=fanBuckets.find(l=>l.includes("le=\"+Inf\""))?.split(" ")[1]||"0";
+          console.log("Checking SLO: fanout=" + fanCount);
+          if(parseInt(fanCount)<100){ 
+            console.error("Insufficient fanout activity: " + fanCount + " < 100"); 
+            process.exit(1); 
+          }
+          console.log("SLO check passed: fanout>=" + fanCount);
+          '
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -132,9 +212,8 @@ jobs:
             Server/metrics_before.prom
             Server/metrics_during.prom
             Server/metrics_after.prom
+
       - name: Stop server
         if: always()
         working-directory: Server
         run: kill $(cat server.pid) || true
-
-

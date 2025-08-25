@@ -21,5 +21,8 @@ module.exports = {
 			lines: 80,
 		},
 	},
+	// Ensure CI does not hang on open handles
+	forceExit: true,
+	detectOpenHandles: true,
 };
 
