@@ -1,0 +1,109 @@
+name: Perf smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  perf-smoke:
+    name: Perf smoke (Artillery)
+    timeout-minutes: 8
+    runs-on: ubuntu-latest
+    # Skip for forked PRs where secrets are unavailable
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping || exit 1"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: Server/package-lock.json
+      - name: Install deps
+        working-directory: Server
+        run: |
+          npm ci
+          npx --yes artillery@latest --version | cat
+      - name: Start server
+        working-directory: Server
+        env:
+          WS_PORT: 3002
+          HEALTH_PORT: 8080
+          REDIS_URL: redis://127.0.0.1:6379
+          PRETTY_LOGS: "false"
+          ORIGIN: http://localhost
+          SUBPROTOCOL: webrtc-signaling
+          ENABLE_AUTH: 'false'
+        run: |
+          node ScalableSignalingServer.js & echo $! > server.pid
+          echo "=== Waiting for readiness ==="
+          timeout 20s bash -c 'until curl -fsS http://127.0.0.1:8080/readyz >/dev/null; do sleep 0.5; done' || { echo "Server did not become ready in time" >&2; exit 1; }
+      - name: Write Artillery smoke config
+        working-directory: Server
+        run: |
+          cat > ws-signaling.yml << 'YAML'
+          config:
+            target: "ws://127.0.0.1:${WS_PORT}"
+            phases:
+              - duration: 20
+                arrivalRate: 15
+            engines:
+              ws:
+                subprotocols:
+                  - "${SUBPROTOCOL}"
+            variables:
+              origin: "${ORIGIN}"
+              token: "${TOKEN}"
+          scenarios:
+            - engine: ws
+              name: "control burst"
+              flow:
+                - connect:
+                    url: "/?roomId={{ $randomString() }}&token={{ token }}"
+                    headers:
+                      origin: "{{ origin }}"
+                - think: 0.2
+                - loop:
+                    - send: '{ "type":"control","action":"load" }'
+                    - think: 0.05
+                  count: 5
+          YAML
+      - name: Scrape metrics (before)
+        working-directory: Server
+        run: curl -fsS http://127.0.0.1:8080/metrics -o metrics_before.prom
+      - name: Run Artillery smoke
+        working-directory: Server
+        timeout-minutes: 3
+        env:
+          WS_PORT: 3002
+          ORIGIN: http://localhost
+          SUBPROTOCOL: webrtc-signaling
+          TOKEN: ${{ secrets.SIGNALING_JWT || '' }}
+        run: timeout 90s npx artillery run ws-signaling.yml --output artillery-report.json | cat
+      - name: Scrape metrics (after)
+        working-directory: Server
+        run: curl -fsS http://127.0.0.1:8080/metrics -o metrics_after.prom
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-smoke-artifacts
+          path: |
+            Server/artillery-report.json
+            Server/metrics_before.prom
+            Server/metrics_after.prom
+      - name: Stop server
+        if: always()
+        working-directory: Server
+        run: kill $(cat server.pid) || true
+
+
