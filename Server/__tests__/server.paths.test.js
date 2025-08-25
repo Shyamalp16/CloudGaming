@@ -2,6 +2,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const net = require('net');
 const WebSocket = require('ws');
+const jwt = require('jsonwebtoken');
 
 function getFreePort() {
 	return new Promise((resolve, reject) => {
@@ -54,9 +55,19 @@ function startServer({ wsPort, healthPort, extraEnv = {} }) {
 	return child;
 }
 
+function makeAuthToken(roomId) {
+	if (process.env.ENABLE_AUTH !== 'true') return '';
+	const secret = process.env.JWT_SECRET || 'test-secret';
+	const iss = process.env.JWT_ISSUER || 'http://localhost';
+	const aud = process.env.JWT_AUDIENCE || 'test';
+	const payload = { sub: 'paths', iss, aud, rooms: [roomId] };
+	return jwt.sign(payload, secret, { algorithm: 'HS256', expiresIn: '5m' });
+}
+
 function connect(url, { origin = 'http://localhost', subprotocol } = {}, timeoutMs = 10000) {
 	return new Promise((resolve, reject) => {
-		const protocols = subprotocol ? [subprotocol] : undefined;
+		const proto = subprotocol || process.env.SUBPROTOCOL;
+		const protocols = proto ? [proto] : undefined;
 		const ws = new WebSocket(url, protocols, { headers: { origin } });
 		const t = setTimeout(() => { try { ws.terminate(); } catch (_) {} reject(new Error('WS connect timeout')); }, timeoutMs);
 		ws.once('open', () => { clearTimeout(t); resolve(ws); });
@@ -73,8 +84,10 @@ describe('Server core path coverage', () => {
 			await waitForReady(healthPort, 20000);
 			const roomId = `paths-schema-${Date.now()}`;
 			const base = `ws://127.0.0.1:${wsPort}`;
-			const c1 = await connect(`${base}/?roomId=${roomId}`);
-			const c2 = await connect(`${base}/?roomId=${roomId}`);
+			const token = makeAuthToken(roomId);
+			const qs = token ? `&token=${token}` : '';
+			const c1 = await connect(`${base}/?roomId=${roomId}${qs}`);
+			const c2 = await connect(`${base}/?roomId=${roomId}${qs}`);
 			await new Promise((r) => setTimeout(r, 100));
 			const got = new Promise((resolve, reject) => {
 				c1.once('message', (m) => { try { resolve(JSON.parse(m.toString())); } catch (e) { reject(e); } });
@@ -99,8 +112,10 @@ describe('Server core path coverage', () => {
 			await waitForReady(healthPort, 20000);
 			const roomId = `paths-size-${Date.now()}`;
 			const base = `ws://127.0.0.1:${wsPort}`;
-			const c1 = await connect(`${base}/?roomId=${roomId}`);
-			const c2 = await connect(`${base}/?roomId=${roomId}`);
+			const token = makeAuthToken(roomId);
+			const qs = token ? `&token=${token}` : '';
+			const c1 = await connect(`${base}/?roomId=${roomId}${qs}`);
+			const c2 = await connect(`${base}/?roomId=${roomId}${qs}`);
 			await new Promise((r) => setTimeout(r, 100));
 			let got = false;
 			c2.once('message', (m) => {
@@ -130,9 +145,13 @@ describe('Server core path coverage', () => {
 			await waitForReady(healthPort, 20000);
 			const roomId = `paths-rl-${Date.now()}`;
 			const base = `ws://127.0.0.1:${wsPort}`;
-			const c1 = await connect(`${base}/?roomId=${roomId}`);
+			const token = makeAuthToken(roomId);
+			const qs = token ? `&token=${token}` : '';
+			const c1 = await connect(`${base}/?roomId=${roomId}${qs}`);
 			const result = await new Promise((resolve) => {
-				const ws = new WebSocket(`${base}/?roomId=${roomId}`, undefined, { headers: { origin: 'http://localhost' } });
+				const proto = process.env.SUBPROTOCOL;
+				const protocols = proto ? [proto] : undefined;
+				const ws = new WebSocket(`${base}/?roomId=${roomId}${qs}`, protocols, { headers: { origin: 'http://localhost' } });
 				let captured;
 				ws.once('open', () => { /* may open then close */ });
 				ws.once('close', (code) => { captured = code; resolve(captured); });
@@ -181,8 +200,10 @@ describe('Server core path coverage', () => {
 			await waitForReady(healthPort, 20000);
 			const roomId = `paths-msg-rl-${Date.now()}`;
 			const base = `ws://127.0.0.1:${wsPort}`;
-			const c1 = await connect(`${base}/?roomId=${roomId}`);
-			const c2 = await connect(`${base}/?roomId=${roomId}`);
+			const token = makeAuthToken(roomId);
+			const qs = token ? `&token=${token}` : '';
+			const c1 = await connect(`${base}/?roomId=${roomId}${qs}`);
+			const c2 = await connect(`${base}/?roomId=${roomId}${qs}`);
 			await new Promise((r) => setTimeout(r, 100));
 			let count = 0;
 			const done = new Promise((resolve, reject) => {
