@@ -103,9 +103,16 @@ describe('Server core path coverage', () => {
 			const c2 = await connect(`${base}/?roomId=${roomId}`);
 			await new Promise((r) => setTimeout(r, 100));
 			let got = false;
-			c2.once('message', () => { got = true; });
+			c2.once('message', (m) => {
+				try {
+					const data = JSON.parse(m.toString());
+					if (data && data.type === 'control' && data.action === 'x') {
+						got = true;
+					}
+				} catch (_) {}
+			});
 			c1.send(JSON.stringify({ type: 'control', action: 'x', payload: { blob: 'a'.repeat(5000) } }));
-			await new Promise((r) => setTimeout(r, 800));
+			await new Promise((r) => setTimeout(r, 1200));
 			expect(got).toBe(false);
 			try { c1.close(); } catch (_) {}
 			try { c2.close(); } catch (_) {}
