@@ -57,7 +57,8 @@ jobs:
             connectTwo: function (ctx, events, done) {
               const roomId = `ci-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
               const qs = ctx.vars.token ? `&token=${ctx.vars.token}` : '';
-              const url = `${ctx.config.target}/?roomId=${roomId}${qs}`;
+              const base = ctx.vars.base;
+              const url = `${base}/?roomId=${roomId}${qs}`;
               const headers = { origin: ctx.vars.origin };
               ctx.ws.connect(url, { headers }, function (a) {
                 ctx.a = a;
@@ -90,6 +91,7 @@ jobs:
                   - "{{ $env.SUBPROTOCOL }}"
             processor: "./ws-helpers.js"
             variables:
+              base: "ws://127.0.0.1:{{ $env.WS_PORT }}"
               origin: "{{ $env.ORIGIN }}"
               token: "{{ $env.TOKEN }}"
           scenarios:
