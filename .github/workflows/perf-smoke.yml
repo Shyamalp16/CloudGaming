@@ -48,9 +48,36 @@ jobs:
           node ScalableSignalingServer.js & echo $! > server.pid
           echo "=== Waiting for readiness ==="
           timeout 20s bash -c 'until curl -fsS http://127.0.0.1:8080/readyz >/dev/null; do sleep 0.5; done' || { echo "Server did not become ready in time" >&2; exit 1; }
-      - name: Write Artillery smoke config
+      - name: Write Artillery smoke config (helpers + YAML)
         working-directory: Server
         run: |
+          cat > ws-helpers.js << 'JS'
+          'use strict';
+          module.exports = {
+            connectTwo: function (ctx, events, done) {
+              const roomId = `ci-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+              const qs = ctx.vars.token ? `&token=${ctx.vars.token}` : '';
+              const url = `${ctx.config.target}/?roomId=${roomId}${qs}`;
+              const headers = { origin: ctx.vars.origin };
+              ctx.ws.connect(url, { headers }, function (a) {
+                ctx.a = a;
+                ctx.ws.connect(url, { headers }, function (b) {
+                  ctx.b = b;
+                  done();
+                });
+              });
+            },
+            sendBurst: function (ctx, events, done) {
+              const payload = JSON.stringify({ type: 'control', action: 'load' });
+              for (let i = 0; i < 5; i++) { try { ctx.a && ctx.a.send(payload); } catch (e) {} }
+              setTimeout(done, 300);
+            },
+            waitAndClose: function (ctx, events, done) {
+              setTimeout(() => { try { ctx.a && ctx.a.close(); } catch(e){} try { ctx.b && ctx.b.close(); } catch(e){} done(); }, 800);
+            }
+          };
+          JS
+
           cat > ws-signaling.yml << 'YAML'
           config:
             target: "ws://127.0.0.1:${WS_PORT}"
@@ -61,6 +88,7 @@ jobs:
               ws:
                 subprotocols:
                   - "${SUBPROTOCOL}"
+            processor: "./ws-helpers.js"
             variables:
               origin: "${ORIGIN}"
               token: "${TOKEN}"
@@ -68,20 +96,16 @@ jobs:
             - engine: ws
               name: "control burst"
               flow:
-                - connect:
-                    url: "/?roomId={{ $randomString() }}&token={{ token }}"
-                    headers:
-                      origin: "{{ origin }}"
+                - function: connectTwo
+                - function: sendBurst
                 - think: 0.2
-                - loop:
-                    - send: '{ "type":"control","action":"load" }'
-                    - think: 0.05
-                  count: 5
+                - function: sendBurst
+                - function: waitAndClose
           YAML
       - name: Scrape metrics (before)
         working-directory: Server
         run: curl -fsS http://127.0.0.1:8080/metrics -o metrics_before.prom
-      - name: Run Artillery smoke
+      - name: Run Artillery smoke (with during-scrape)
         working-directory: Server
         timeout-minutes: 3
         env:
@@ -89,7 +113,11 @@ jobs:
           ORIGIN: http://localhost
           SUBPROTOCOL: webrtc-signaling
           TOKEN: ${{ secrets.SIGNALING_JWT || '' }}
-        run: timeout 90s npx artillery run ws-signaling.yml --output artillery-report.json | cat
+        run: |
+          ( timeout 90s npx artillery run ws-signaling.yml --output artillery-report.json | cat ) & echo $! > art.pid
+          sleep 5
+          curl -fsS http://127.0.0.1:8080/metrics -o metrics_during.prom || true
+          wait $(cat art.pid) || true
       - name: Scrape metrics (after)
         working-directory: Server
         run: curl -fsS http://127.0.0.1:8080/metrics -o metrics_after.prom
@@ -100,6 +128,7 @@ jobs:
           path: |
             Server/artillery-report.json
             Server/metrics_before.prom
+            Server/metrics_during.prom
             Server/metrics_after.prom
       - name: Stop server
         if: always()
