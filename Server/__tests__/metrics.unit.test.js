@@ -1,4 +1,6 @@
 describe('metrics module', () => {
+	afterAll(() => { try { require('../metrics').stopDefaultMetrics(); } catch (_) {} });
+
 	it('increments and sets metrics without throwing', () => {
 		const m = require('../metrics');
 		expect(() => m.setActiveConnections(5)).not.toThrow();

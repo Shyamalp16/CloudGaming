@@ -1,6 +1,6 @@
 const http = require('http');
 const { startHealthServer } = require('../health');
-const { register } = require('../metrics');
+const { register, stopDefaultMetrics } = require('../metrics');
 
 jest.setTimeout(20000);
 
@@ -11,6 +11,7 @@ function get(pathname, port) {
 }
 
 describe('health server endpoints', () => {
+    afterAll(() => { try { stopDefaultMetrics(); } catch (_) {} });
 	it('responds to /healthz with 200', async () => {
 		const srv = startHealthServer({});
 		try {
