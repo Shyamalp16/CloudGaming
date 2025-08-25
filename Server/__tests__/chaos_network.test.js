@@ -125,17 +125,26 @@ describe('Chaos: network jitter and packet loss', () => {
 			const c1 = new JitterWS(raw1, { sendDelayMs: 50, recvDelayMs: 50, dropProb: 0.1 });
 			const c2 = new JitterWS(raw2, { sendDelayMs: 50, recvDelayMs: 50, dropProb: 0.1 });
 
-			await new Promise((r) => setTimeout(r, 150));
+			// Allow joins to propagate
+			await new Promise((r) => setTimeout(r, 300));
+
+			// Robust receive with retries under jitter/loss
+			const expected = { type: 'control', action: 'jitter' };
 			const receive = new Promise((resolve, reject) => {
 				raw2.once('error', reject);
 				c2.once('message', (msg) => { try { resolve(JSON.parse(msg.toString())); } catch (e) { reject(e); } });
 			});
-			c1.send(JSON.stringify({ type: 'control', action: 'jitter' }));
+			const sender = (async () => {
+				for (let i = 0; i < 20; i++) {
+					c1.send(JSON.stringify(expected));
+					await new Promise((r) => setTimeout(r, 120));
+				}
+			})();
 			const data = await Promise.race([
 				receive,
 				new Promise((_, rej) => setTimeout(() => rej(new Error('No message under jitter')), 30000)),
 			]);
-			expect(data).toEqual({ type: 'control', action: 'jitter' });
+			expect(data).toEqual(expected);
 
 			c1.close();
 			c2.close();
