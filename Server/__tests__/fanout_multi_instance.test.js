@@ -2,6 +2,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const net = require('net');
 const WebSocket = require('ws');
+const jwt = require('jsonwebtoken');
 
 function getFreePort() {
 	return new Promise((resolve, reject) => {
@@ -52,9 +53,19 @@ function startServer({ wsPort, healthPort }) {
 	return child;
 }
 
+function makeAuthToken(roomId) {
+	if (process.env.ENABLE_AUTH !== 'true') return '';
+	const secret = process.env.JWT_SECRET || 'test-secret';
+	const iss = process.env.JWT_ISSUER || 'http://localhost';
+	const aud = process.env.JWT_AUDIENCE || 'test';
+	const payload = { sub: 'test', iss, aud, rooms: [roomId] };
+	return jwt.sign(payload, secret, { algorithm: 'HS256', expiresIn: '5m' });
+}
+
 function connectClient(url, timeoutMs = 10000) {
 	return new Promise((resolve, reject) => {
-		const ws = new WebSocket(url);
+		const protocols = process.env.SUBPROTOCOL ? [process.env.SUBPROTOCOL] : undefined;
+		const ws = new WebSocket(url, protocols, { headers: { origin: 'http://localhost' } });
 		const t = setTimeout(() => { try { ws.terminate(); } catch (_) {} reject(new Error('WS connect timeout')); }, timeoutMs);
 		ws.once('open', () => { clearTimeout(t); resolve(ws); });
 		ws.once('error', (e) => { clearTimeout(t); reject(e); });
@@ -75,8 +86,10 @@ describe('Pub/Sub fanout across instances', () => {
 				waitForReady(healthPort2, 20000),
 			]);
 			const roomId = `fanout-${Date.now()}`;
-			const c1 = await connectClient(`ws://127.0.0.1:${wsPort1}/?roomId=${roomId}`);
-			const c2 = await connectClient(`ws://127.0.0.1:${wsPort2}/?roomId=${roomId}`);
+			const token = makeAuthToken(roomId);
+			const qs = token ? `&token=${token}` : '';
+			const c1 = await connectClient(`ws://127.0.0.1:${wsPort1}/?roomId=${roomId}${qs}`);
+			const c2 = await connectClient(`ws://127.0.0.1:${wsPort2}/?roomId=${roomId}${qs}`);
 			const received = new Promise((resolve, reject) => {
 				c2.once('message', (msg) => {
 					try { resolve(JSON.parse(msg.toString())); } catch (e) { reject(e); }

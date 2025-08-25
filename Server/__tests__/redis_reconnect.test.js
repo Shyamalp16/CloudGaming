@@ -2,6 +2,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const net = require('net');
 const WebSocket = require('ws');
+const jwt = require('jsonwebtoken');
 const http = require('http');
 
 function getFreePort() {
@@ -53,9 +54,19 @@ function startServer({ wsPort, healthPort }) {
 	return child;
 }
 
+function makeAuthToken(roomId) {
+	if (process.env.ENABLE_AUTH !== 'true') return '';
+	const secret = process.env.JWT_SECRET || 'test-secret';
+	const iss = process.env.JWT_ISSUER || 'http://localhost';
+	const aud = process.env.JWT_AUDIENCE || 'test';
+	const payload = { sub: 'reconnect', iss, aud, rooms: [roomId] };
+	return jwt.sign(payload, secret, { algorithm: 'HS256', expiresIn: '5m' });
+}
+
 function connectClient(url, timeoutMs = 10000) {
 	return new Promise((resolve, reject) => {
-		const ws = new WebSocket(url);
+		const protocols = process.env.SUBPROTOCOL ? [process.env.SUBPROTOCOL] : undefined;
+		const ws = new WebSocket(url, protocols, { headers: { origin: 'http://localhost' } });
 		const t = setTimeout(() => { try { ws.terminate(); } catch (_) {} reject(new Error('WS connect timeout')); }, timeoutMs);
 		ws.once('open', () => { clearTimeout(t); resolve(ws); });
 		ws.once('error', (e) => { clearTimeout(t); reject(e); });
@@ -71,8 +82,10 @@ describe('Reconnect/Resubscribe after Redis outage', () => {
 			await waitForReady(healthPort, 30000);
 			const base = `ws://127.0.0.1:${wsPort}`;
 			const roomId = `recon-${Date.now()}`;
-			const c1 = await connectClient(`${base}/?roomId=${roomId}`);
-			const c2 = await connectClient(`${base}/?roomId=${roomId}`);
+			const token = makeAuthToken(roomId);
+			const qs = token ? `&token=${token}` : '';
+			const c1 = await connectClient(`${base}/?roomId=${roomId}${qs}`);
+			const c2 = await connectClient(`${base}/?roomId=${roomId}${qs}`);
 
 			// Simulate Redis outage by pointing REDIS_URL to invalid? Not feasible at runtime. Instead, rely on CI environment where Redis can be stopped.
 			// Here we perform a readiness check loop expecting it to remain 200 (smoke). If CI supports stopping Redis, extend with control hooks.
