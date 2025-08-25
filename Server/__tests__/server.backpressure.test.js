@@ -67,13 +67,9 @@ describe('Backpressure close path', () => {
 	it('closes client when bufferedAmount exceeds threshold', async () => {
 		const wsPort = await getFreePort();
 		const healthPort = await getFreePort();
-		const child = startServer({ wsPort, healthPort, extraEnv: { BACKPRESSURE_CLOSE_THRESHOLD_BYTES: '0', MESSAGE_MAX_BYTES: String(1024 * 1024) } });
+		const child = startServer({ wsPort, healthPort, extraEnv: { BACKPRESSURE_CLOSE_THRESHOLD_BYTES: '1', MESSAGE_MAX_BYTES: String(1024 * 1024) } });
 		try {
-			// Be resilient to slow boots: race readiness with unexpected exit
-			await Promise.race([
-				waitForReady(healthPort, 40000),
-				waitForExit(child, 40000).then(({ code, signal }) => { throw new Error(`Server exited early: ${code}:${signal}`); }),
-			]);
+			await waitForReady(healthPort, 40000);
 			const roomId = `bp-${Date.now()}`;
 			const base = `ws://127.0.0.1:${wsPort}`;
 			const a = await connect(`${base}/?roomId=${roomId}`);
@@ -83,7 +79,7 @@ describe('Backpressure close path', () => {
 			await new Promise((r) => setTimeout(r, 100));
 			// Send enough large messages to grow server's send buffer to b
 			const payload = JSON.stringify({ type: 'control', action: 'spam', payload: { blob: 'x'.repeat(65536) } });
-			for (let i = 0; i < 600; i++) {
+			for (let i = 0; i < 1200; i++) {
 				try { a.send(payload); } catch (_) {}
 			}
 			const closed = await new Promise((resolve, reject) => {
