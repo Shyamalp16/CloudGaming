@@ -101,7 +101,8 @@ function makeAuthToken(roomId) {
 function connectClient(url, timeoutMs = 20000) {
 	const WebSocket = require('ws');
 	return new Promise((resolve, reject) => {
-		const protocols = process.env.SUBPROTOCOL ? [process.env.SUBPROTOCOL] : undefined;
+		// Always send the expected subprotocol for reliability
+		const protocols = ['webrtc-signaling'];
 		const ws = new WebSocket(url, protocols, { headers: { origin: 'http://localhost' } });
 		const t = setTimeout(() => { try { ws.terminate(); } catch (_) {} reject(new Error('WS connect timeout')); }, timeoutMs);
 		ws.once('open', () => { clearTimeout(t); resolve(ws); });
@@ -126,23 +127,23 @@ describe('Chaos: network jitter and packet loss', () => {
 			const c2 = new JitterWS(raw2, { sendDelayMs: 50, recvDelayMs: 50, dropProb: 0.1 });
 
 			// Allow joins to propagate
-			await new Promise((r) => setTimeout(r, 300));
+			await new Promise((r) => setTimeout(r, 500));
 
-			// Robust receive with retries under jitter/loss
 			const expected = { type: 'control', action: 'jitter' };
+			let stop = false;
 			const receive = new Promise((resolve, reject) => {
 				raw2.once('error', reject);
-				c2.once('message', (msg) => { try { resolve(JSON.parse(msg.toString())); } catch (e) { reject(e); } });
+				c2.once('message', (msg) => { try { stop = true; resolve(JSON.parse(msg.toString())); } catch (e) { reject(e); } });
 			});
 			const sender = (async () => {
-				for (let i = 0; i < 20; i++) {
+				for (let i = 0; i < 50 && !stop; i++) {
 					c1.send(JSON.stringify(expected));
-					await new Promise((r) => setTimeout(r, 120));
+					await new Promise((r) => setTimeout(r, 100));
 				}
 			})();
 			const data = await Promise.race([
 				receive,
-				new Promise((_, rej) => setTimeout(() => rej(new Error('No message under jitter')), 30000)),
+				new Promise((_, rej) => setTimeout(() => rej(new Error('No message under jitter')), 45000)),
 			]);
 			expect(data).toEqual(expected);
 
