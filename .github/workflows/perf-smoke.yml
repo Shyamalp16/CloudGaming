@@ -139,24 +139,16 @@ jobs:
           curl -fsS http://127.0.0.1:8080/metrics -o metrics_during.prom || true
           wait $(cat art.pid) || true
           echo "=== Waiting for steady state before after-scrape ==="
-          timeout 15s bash -c '
-            last_msg=0
-            stable_count=0
-            while [ $stable_count -lt 4 ]; do
+          timeout 30s bash -c '
+            while true; do
               conn=$(curl -fsS http://127.0.0.1:8080/metrics | grep "signaling_active_connections" | grep -v "#" | cut -d" " -f2 || echo "0")
               msg=$(curl -fsS http://127.0.0.1:8080/metrics | grep "messages_forwarded_total" | grep -v "#" | cut -d" " -f2 || echo "0")
+              echo "conn=$conn, msg=$msg"
               if [ "$conn" -eq 0 ]; then
-                echo "All connections closed"
+                echo "All connections closed - ready for after-scrape"
                 break
               fi
-              if [ "$msg" -eq "$last_msg" ]; then
-                stable_count=$((stable_count + 1))
-              else
-                stable_count=0
-                last_msg=$msg
-              fi
-              echo "conn=$conn, msg=$msg, stable=$stable_count"
-              sleep 0.5
+              sleep 1
             done
           ' || echo "Steady state wait timed out"
       - name: Scrape metrics (after)
