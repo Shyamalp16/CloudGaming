@@ -16,6 +16,7 @@
 #include "VideoMetrics.h"
 #include <thread>
 #include <deque>
+#include <cstring>
 
 // Removed unused software conversion components
 int Encoder::currentWidth = 0;
@@ -337,32 +338,47 @@ namespace Encoder {
     }
 
     bool SubmitHwFrame(int slotIndex, int64_t timestampUs) {
-        std::lock_guard<std::mutex> lock(g_encoderMutex);
-        if (!codecCtx || slotIndex < 0 || slotIndex >= (int)g_hwFrames.size()) return false;
-        AVFrame* hw = g_hwFrames[slotIndex];
-        hw->pts = av_rescale_q(timestampUs, {1, 1000000}, codecCtx->time_base);
-        int ret = avcodec_send_frame(codecCtx, hw);
-        if (ret == AVERROR(EAGAIN)) {
-            g_eagainCount.fetch_add(1);
-            g_lastEagain = std::chrono::steady_clock::now();
+        // Encode and drain under mutex, but do NOT call FFI/network while holding it
+        std::vector<uint8_t> merged;
+        {
+            std::lock_guard<std::mutex> lock(g_encoderMutex);
+            if (!codecCtx || slotIndex < 0 || slotIndex >= (int)g_hwFrames.size()) return false;
+            AVFrame* hw = g_hwFrames[slotIndex];
+            hw->pts = av_rescale_q(timestampUs, {1, 1000000}, codecCtx->time_base);
+            int ret = avcodec_send_frame(codecCtx, hw);
+            if (ret == AVERROR(EAGAIN)) {
+                g_eagainCount.fetch_add(1);
+                g_lastEagain = std::chrono::steady_clock::now();
+                for (;;) {
+                    int r = avcodec_receive_packet(codecCtx, packet);
+                    if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) break;
+                    else if (r < 0) break;
+                    if (packet && packet->data && packet->size > 0) {
+                        size_t off = merged.size();
+                        merged.resize(off + packet->size);
+                        std::memcpy(merged.data() + off, packet->data, packet->size);
+                    }
+                    av_packet_unref(packet);
+                }
+                ret = avcodec_send_frame(codecCtx, hw);
+            }
+            if (ret < 0) return false;
             for (;;) {
                 int r = avcodec_receive_packet(codecCtx, packet);
                 if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) break;
-                else if (r < 0) break;
-                packet->stream_index = videoStream->index;
-                pushPacketToWebRTC(packet);
+                else if (r < 0) return false;
+                if (packet && packet->data && packet->size > 0) {
+                    size_t off = merged.size();
+                    merged.resize(off + packet->size);
+                    std::memcpy(merged.data() + off, packet->data, packet->size);
+                }
                 av_packet_unref(packet);
             }
-            ret = avcodec_send_frame(codecCtx, hw);
         }
-        if (ret < 0) return false;
-        for (;;) {
-            int r = avcodec_receive_packet(codecCtx, packet);
-            if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) break;
-            else if (r < 0) return false;
-            packet->stream_index = videoStream->index;
-            pushPacketToWebRTC(packet);
-            av_packet_unref(packet);
+        if (!merged.empty()) {
+            int64_t frameDurationUs = ComputeFrameDurationUsLocked();
+            if (frameDurationUs <= 0) frameDurationUs = 8333;
+            EnqueueEncodedSample(std::move(merged), frameDurationUs);
         }
         return true;
     }
@@ -528,6 +544,8 @@ namespace Encoder {
     }
 
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps) {
+        // Encode and drain under mutex, but handoff outside
+        std::vector<uint8_t> merged;
         std::lock_guard<std::mutex> lock(g_encoderMutex);
 
         // Clear caches when (re)initializing encoder
@@ -777,6 +795,8 @@ namespace Encoder {
     }
 
     void EncodeFrame(ID3D11Texture2D* texture, ID3D11DeviceContext* context, int width, int height, int64_t pts) {
+        std::vector<uint8_t> merged;
+        {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
         // If a bitrate reopen was requested and we have a valid context, perform it now
         if (g_pendingReopen.load() && codecCtx) {
@@ -922,8 +942,11 @@ namespace Encoder {
                     std::cerr << "[Encoder] Drain on EAGAIN failed: " << errBuf << "\n";
                     break;
                 }
-                packet->stream_index = videoStream->index;
-                pushPacketToWebRTC(packet);
+                if (packet && packet->data && packet->size > 0) {
+                    size_t off = merged.size();
+                    merged.resize(off + packet->size);
+                    std::memcpy(merged.data() + off, packet->data, packet->size);
+                }
                 av_packet_unref(packet);
             }
             // Retry once after draining
@@ -934,24 +957,32 @@ namespace Encoder {
             char errBuf[128];
             av_make_error_string(errBuf, 128, ret);
             std::cerr << "[Encoder] Failed to send frame to encoder: " << errBuf << "\n";
-            return;
+            // fallthrough to not send anything
         }
 
         while (ret >= 0) {
             ret = avcodec_receive_packet(codecCtx, packet);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                return; // Need more input or end of stream
+                break; // Need more input or end of stream
             }
             else if (ret < 0) {
                 char errBuf[128];
                 av_make_error_string(errBuf, 128, ret);
                 std::cerr << "[Encoder] Failed to receive packet from encoder: " << errBuf << "\n";
-                return;
+                break;
             }
-
-            packet->stream_index = videoStream->index;
-            pushPacketToWebRTC(packet);
+            if (packet && packet->data && packet->size > 0) {
+                size_t off = merged.size();
+                merged.resize(off + packet->size);
+                std::memcpy(merged.data() + off, packet->data, packet->size);
+            }
             av_packet_unref(packet);
+        }
+        }
+        if (!merged.empty()) {
+            int64_t frameDurationUs = ComputeFrameDurationUsLocked();
+            if (frameDurationUs <= 0) frameDurationUs = 8333;
+            EnqueueEncodedSample(std::move(merged), frameDurationUs);
         }
     }
 
