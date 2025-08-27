@@ -105,6 +105,9 @@ static int g_nvBf = 0;
 static int g_nvRcLookahead = 0;
 static int g_nvAsyncDepth = 2;
 static int g_nvSurfaces = 8;
+// Pacing from capture timestamps (EWMA of inter-frame delta)
+static std::atomic<long long> g_lastCaptureTsUs{0};
+static std::atomic<long long> g_smoothedDurUs{0};
 
 // Encoded sample sender queue to avoid holding encoder mutex during FFI send
 struct QueuedSample {
@@ -177,6 +180,25 @@ static inline int64_t ComputeFrameDurationUsLocked() {
     if (cfgFps > 0) return static_cast<int64_t>(1000000.0 / static_cast<double>(cfgFps));
     if (fpsNum > 0) return static_cast<int64_t>((1000000.0 * (fpsDen > 0 ? fpsDen : 1)) / static_cast<double>(fpsNum));
     return 8333; // ~120fps fallback
+}
+
+static inline int64_t UpdatePacingFromTimestamp(int64_t currentTsUs) {
+    if (currentTsUs <= 0) {
+        long long sm = g_smoothedDurUs.load(std::memory_order_relaxed);
+        return sm > 0 ? sm : ComputeFrameDurationUsLocked();
+    }
+    long long prevTs = g_lastCaptureTsUs.exchange(currentTsUs, std::memory_order_relaxed);
+    if (prevTs > 0) {
+        long long delta = currentTsUs - prevTs;
+        if (delta > 1000 && delta < 2'000'000) { // 1 ms .. 2 s sane bounds
+            long long prevSm = g_smoothedDurUs.load(std::memory_order_relaxed);
+            long long newSm = (prevSm <= 0) ? delta : static_cast<long long>(0.8 * static_cast<double>(prevSm) + 0.2 * static_cast<double>(delta));
+            g_smoothedDurUs.store(newSm, std::memory_order_relaxed);
+            return newSm;
+        }
+    }
+    long long sm = g_smoothedDurUs.load(std::memory_order_relaxed);
+    return sm > 0 ? sm : ComputeFrameDurationUsLocked();
 }
 
 static inline void EnqueueEncodedSample(std::vector<uint8_t>&& bytes, int64_t durationUs) {
@@ -376,7 +398,8 @@ namespace Encoder {
             }
         }
         if (!merged.empty()) {
-            int64_t frameDurationUs = ComputeFrameDurationUsLocked();
+            // This EncodeFrame variant does not receive capture timestamp; use smoothed/default pacing
+            int64_t frameDurationUs = UpdatePacingFromTimestamp(0);
             if (frameDurationUs <= 0) frameDurationUs = 8333;
             EnqueueEncodedSample(std::move(merged), frameDurationUs);
         }
@@ -980,7 +1003,8 @@ namespace Encoder {
         }
         }
         if (!merged.empty()) {
-            int64_t frameDurationUs = ComputeFrameDurationUsLocked();
+            // int64_t frameDurationUs = UpdatePacingFromTimestamp(timestampUs);
+            int64_t frameDurationUs = UpdatePacingFromTimestamp(0);
             if (frameDurationUs <= 0) frameDurationUs = 8333;
             EnqueueEncodedSample(std::move(merged), frameDurationUs);
         }
