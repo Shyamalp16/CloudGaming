@@ -1,18 +1,88 @@
 #include "KeyInputHandler.h"
-#include "ShutdownManager.h"
+#include "ShutdownManager.h" 
 #include "pion_webrtc.h"
 #include <unordered_map>
+#include <unordered_set>
 #include <atomic>
+#include <cstdlib>
+#include <cassert>
 
 using json = nlohmann::json;
 
 static std::atomic_bool isRunning;
+
+// Simple configurable logging (0=ERROR,1=WARN,2=INFO,3=DEBUG)
+static std::atomic<int> gInputLogLevel{1};
+static inline void SetInputLogLevelFromEnv() {
+    const char* lvl = std::getenv("INPUT_LOG_LEVEL");
+    if (lvl) {
+        int v = std::atoi(lvl);
+        if (v < 0) v = 0; if (v > 3) v = 3;
+        gInputLogLevel.store(v);
+    }
+}
+static inline bool ShouldLog(int level) { return level <= gInputLogLevel.load(); }
+static inline void LogInfo(const std::string& s) { if (ShouldLog(2)) std::cout << s << std::endl; }
+static inline void LogDebug(const std::string& s) { if (ShouldLog(3)) std::cout << s << std::endl; }
+static inline void LogWarn(const std::string& s) { if (ShouldLog(1)) std::cout << s << std::endl; }
 
 namespace KeyInputHandler {
 	static std::thread messageThread;
 	static std::set<WORD> clientReportedKeysDown;
 	static std::mutex clientKeysMutex;
 	static std::unordered_map<WORD, std::string> vkDownToJsCode;
+
+	// Canonical extended-key classifier (single source of truth)
+	static inline bool IsExtendedKeyCanonical(WORD virtualKeyCode, const std::string& jsCode) {
+		// Extended keys per Win32: arrows, Insert/Delete, Home/End, PgUp/PgDn, right Ctrl/Alt, Win keys, Apps
+		static const std::unordered_set<WORD> kExtendedVKs = {
+			VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT,
+			VK_INSERT, VK_DELETE, VK_HOME, VK_END,
+			VK_PRIOR, VK_NEXT,
+			VK_RCONTROL, VK_RMENU,
+			VK_LWIN, VK_RWIN, VK_APPS
+		};
+		if (virtualKeyCode == VK_RETURN && jsCode == "NumpadEnter") {
+			return true; // numpad enter only
+		}
+		return kExtendedVKs.find(virtualKeyCode) != kExtendedVKs.end();
+	}
+
+	// Debug-only verification of extended-bit consistency for critical keys
+	static inline void DebugAssertExtendedConsistency(WORD virtualKeyCode,
+		WORD scanCode,
+		bool isExtendedKey,
+		DWORD flags,
+		const std::string& jsCode,
+		bool usingScanCode)
+	{
+		(void)scanCode; (void)usingScanCode; (void)jsCode; (void)isExtendedKey;
+#ifdef _DEBUG
+		bool hasExtendedFlag = (flags & KEYEVENTF_EXTENDEDKEY) != 0;
+		// Right Ctrl/Alt must always be extended
+		if (virtualKeyCode == VK_RCONTROL || virtualKeyCode == VK_RMENU) {
+			assert(isExtendedKey && hasExtendedFlag);
+		}
+		// Left Ctrl/Alt/Shift must not be extended
+		if (virtualKeyCode == VK_LCONTROL || virtualKeyCode == VK_LMENU ||
+			virtualKeyCode == VK_LSHIFT || virtualKeyCode == VK_RSHIFT) {
+			assert(!hasExtendedFlag);
+		}
+		// Numpad Enter must be extended; normal Enter must not
+		if (virtualKeyCode == VK_RETURN) {
+			if (jsCode == "NumpadEnter") {
+				assert(isExtendedKey && hasExtendedFlag);
+			} else {
+				assert(!hasExtendedFlag);
+			}
+		}
+		// Ensure no E1-path keys are being synthesized (Pause/Break), which we don't support here
+		// Scan code 0x45 with E1 sequence should not appear in our paths
+		if (usingScanCode) {
+			assert(!(scanCode == 0x45 && virtualKeyCode != VK_NUMLOCK));
+		}
+#endif
+	}
 
 	static const std::map<std::string, WORD> vkMap = {
 		//Letters
@@ -116,7 +186,15 @@ namespace KeyInputHandler {
 		{"CapsLock", 0x3A}, {"NumLock", 0x45}, {"ScrollLock", 0x46},
 
 		// Windows keys
-		{"MetaLeft", 0x5B}, {"MetaRight", 0x5C}, {"ContextMenu", 0x5D}
+		{"MetaLeft", 0x5B}, {"MetaRight", 0x5C}, {"ContextMenu", 0x5D},
+
+		// Numpad digits and operators
+		{"Numpad1", 0x4F}, {"Numpad2", 0x50}, {"Numpad3", 0x51},
+		{"Numpad4", 0x4B}, {"Numpad5", 0x4C}, {"Numpad6", 0x4D},
+		{"Numpad7", 0x47}, {"Numpad8", 0x48}, {"Numpad9", 0x49},
+		{"Numpad0", 0x52}, {"NumpadDecimal", 0x53},
+		{"NumpadAdd", 0x4E}, {"NumpadSubtract", 0x4A}, {"NumpadMultiply", 0x37},
+		{"NumpadDivide", 0x35}
 	};
 
 	WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
@@ -179,26 +257,14 @@ namespace KeyInputHandler {
 		input.ki.time = 0;
 		input.ki.dwExtraInfo = 0;
 
-		bool isExtendedKey = (
-			virtualKeyCode == VK_UP || virtualKeyCode == VK_DOWN ||
-			virtualKeyCode == VK_LEFT || virtualKeyCode == VK_RIGHT ||
-			virtualKeyCode == VK_HOME || virtualKeyCode == VK_END ||
-			virtualKeyCode == VK_PRIOR || virtualKeyCode == VK_NEXT ||
-			virtualKeyCode == VK_INSERT || virtualKeyCode == VK_DELETE ||
-			virtualKeyCode == VK_RCONTROL || virtualKeyCode == VK_RMENU ||
-			virtualKeyCode == VK_LWIN || virtualKeyCode == VK_RWIN ||
-			virtualKeyCode == VK_APPS ||
-			(virtualKeyCode == VK_RETURN && eventCode == "NumpadEnter")
-		);
+		bool isExtendedKey = IsExtendedKeyCanonical(virtualKeyCode, eventCode);
 
 		// Decide whether to use scancodes or virtual keys based on key type
 		// Prioritize scancodes for layout-sensitive keys (punctuation, etc.)
 		bool preferScanCode = true;
 
 		// Use virtual keys only for keys that are universally consistent across layouts
-		if ((virtualKeyCode >= 'A' && virtualKeyCode <= 'Z') ||
-			(virtualKeyCode >= '0' && virtualKeyCode <= '9') ||
-			virtualKeyCode == VK_SPACE ||
+		if (virtualKeyCode == VK_SPACE ||
 			virtualKeyCode == VK_RETURN ||
 			virtualKeyCode == VK_BACK ||
 			virtualKeyCode == VK_TAB ||
@@ -229,13 +295,14 @@ namespace KeyInputHandler {
 					input.ki.dwFlags |= KEYEVENTF_KEYUP;
 				}
 				input.ki.wVk = 0;
+				DebugAssertExtendedConsistency(virtualKeyCode, scanCode, isExtendedKey, input.ki.dwFlags, eventCode, true);
 				std::cout << "[SimulateWindowsKeyEvent] Sending Input (Direct Scan Code) - JSCode: '" << eventCode
 					<< "', VK_Mapped: " << virtualKeyCode << ", Scan: 0x" << std::hex << scanCode << std::dec
 					<< ", Flags: 0x" << std::hex << input.ki.dwFlags << std::dec
 					<< (isKeyDown ? " (DOWN)" : " (UP)") << std::endl;
 			} else {
-				// Fallback: try to convert VK to scancode with current layout
-				HKL hkl = GetKeyboardLayout(0);
+				// Fallback: try to convert VK to scancode with current foreground layout
+				HKL hkl = GetKeyboardLayout(GetWindowThreadProcessId(GetForegroundWindow(), nullptr));
 				scanCode = MapVirtualKeyEx(virtualKeyCode, MAPVK_VK_TO_VSC_EX, hkl);
 				if (scanCode != 0) {
 					input.ki.wScan = scanCode;
@@ -247,6 +314,7 @@ namespace KeyInputHandler {
 						input.ki.dwFlags |= KEYEVENTF_KEYUP;
 					}
 					input.ki.wVk = 0;
+					DebugAssertExtendedConsistency(virtualKeyCode, scanCode, isExtendedKey, input.ki.dwFlags, eventCode, true);
 					std::cout << "[SimulateWindowsKeyEvent] Sending Input (VK->Scan Fallback) - JSCode: '" << eventCode
 						<< "', VK: " << virtualKeyCode << ", Scan: 0x" << std::hex << scanCode << std::dec
 						<< ", Flags: 0x" << std::hex << input.ki.dwFlags << std::dec
@@ -315,14 +383,14 @@ namespace KeyInputHandler {
 				consecutiveEmptyPolls = 0;
 
 				try {
-					std::cout << "[KeyInputHandler] Received message string: " << message << std::endl;
+					LogDebug("[KeyInputHandler] Received message string: " + message);
 
 					json j = json::parse(message);
 					if (j.is_object() && j.contains("code") && j.contains("type")) {
 						std::string jsCode = j["code"].get<std::string>();
 						std::string jsType = j["type"].get<std::string>();
 						bool isClientKeyDown = (jsType == "keydown");
-						std::cout << "[KeyInputHandler] Parsed - Code: " << jsCode << ", Type: " << jsType << std::endl;
+						LogDebug(std::string("[KeyInputHandler] Parsed - Code: ") + jsCode + ", Type: " + jsType);
 						
 						WORD vkCode = MapJavaScriptCodeToVK(jsCode);
 						if (vkCode == 0) {
@@ -436,6 +504,7 @@ namespace KeyInputHandler {
 	}
 
 	void initializeDataChannel() {
+		SetInputLogLevelFromEnv();
 		if (!isRunning.load()) {
 			isRunning.store(true);
 			std::lock_guard<std::mutex> lock(clientKeysMutex);

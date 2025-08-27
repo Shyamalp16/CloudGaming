@@ -8,6 +8,33 @@
 using json = nlohmann::json;
 
 namespace MouseInputHandler {
+    // Simple configurable logging (0=ERROR,1=WARN,2=INFO,3=DEBUG)
+    static std::atomic<int> gMouseLogLevel{1};
+    static inline void SetMouseLogLevelFromEnv() {
+        const char* lvl = std::getenv("INPUT_LOG_LEVEL");
+        if (lvl) {
+            int v = std::atoi(lvl);
+            if (v < 0) v = 0; if (v > 3) v = 3;
+            gMouseLogLevel.store(v);
+        }
+    }
+    static inline bool MouseShouldLog(int level) { return level <= gMouseLogLevel.load(); }
+    static inline void MouseLogInfo(const std::string& s) { if (MouseShouldLog(2)) std::cout << s << std::endl; }
+    static inline void MouseLogDebug(const std::string& s) { if (MouseShouldLog(3)) std::cout << s << std::endl; }
+    static inline void MouseLogWarn(const std::string& s) { if (MouseShouldLog(1)) std::cout << s << std::endl; }
+
+    // Feature flags and accumulators
+    static std::atomic_bool gSplitClickMove{false};
+    static int gWheelAccumY = 0;
+    static int gWheelAccumX = 0;
+    static int gInvalidButtonWarns = 0;
+
+    static inline void SetMouseFeatureFlagsFromEnv() {
+        const char* split = std::getenv("INPUT_SPLIT_CLICK");
+        if (split && (split[0] == '1' || split[0] == 't' || split[0] == 'T' || split[0] == 'y' || split[0] == 'Y')) {
+            gSplitClickMove.store(true);
+        }
+    }
 	static std::atomic_bool isRunning;
 	static std::thread mouseMessageThread;
 	static std::set<int> clientReportedMouseButtonsDown;
@@ -107,7 +134,9 @@ namespace MouseInputHandler {
 				input.mi.mouseData = XBUTTON2;
 				break;
 			default:
-				std::cerr << "[MouseInputHandler] Invalid mouse button: " << button << ". Valid values are 0 (Left), 1 (Middle), 2 (Right), 3 (XButton1), 4 (XButton2)." << std::endl;
+				if (++gInvalidButtonWarns <= 10) {
+					std::cerr << "[MouseInputHandler] Invalid mouse button: " << button << ". Valid values are 0 (Left), 1 (Middle), 2 (Right), 3 (XButton1), 4 (XButton2). (" << gInvalidButtonWarns << "/10 warnings)" << std::endl;
+				}
 				return;
 			}
 
@@ -130,12 +159,36 @@ namespace MouseInputHandler {
 				virtualScreenHeight = GetSystemMetrics(SM_CYSCREEN);
 			}
 
-			// Apply virtual desktop offset and normalize coordinates
-			input.mi.dx = (LONG)(((double)(x - virtualScreenX) / virtualScreenWidth) * 65535.0);
-			input.mi.dy = (LONG)(((double)(y - virtualScreenY) / virtualScreenHeight) * 65535.0);
-			input.mi.dwFlags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+			if (gSplitClickMove.load()) {
+				// First, move absolutely to the requested position
+				INPUT moveInput = { 0 };
+				moveInput.type = INPUT_MOUSE;
+				moveInput.mi.dx = (LONG)(((double)(x - virtualScreenX) / virtualScreenWidth) * 65535.0);
+				moveInput.mi.dy = (LONG)(((double)(y - virtualScreenY) / virtualScreenHeight) * 65535.0);
+				moveInput.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
 
-			std::cout << "[MouseInputHandler] Simulating Mouse Button " << button << " " << eventType << " at (" << x << ", " << y << ") -> Virtual Desktop Offset (" << virtualScreenX << ", " << virtualScreenY << ") -> Normalized (" << input.mi.dx << ", " << input.mi.dy << ")" << std::endl;
+				// Then, button down/up as a separate event
+				INPUT btnInput = { 0 };
+				btnInput.type = INPUT_MOUSE;
+				btnInput.mi.dwFlags = input.mi.dwFlags;
+				btnInput.mi.mouseData = input.mi.mouseData;
+
+				INPUT inputs[2] = { moveInput, btnInput };
+				UINT sent = SendInput(2, inputs, sizeof(INPUT));
+				if (sent != 2) {
+					DWORD errorCode = GetLastError();
+					std::cerr << "[MouseInputHandler] SendInput split click failed! Error Code: " << errorCode
+						<< ", Error Message: " << std::system_category().message(errorCode) << std::endl;
+				}
+				return;
+			} else {
+				// Combined move + button flags (legacy behavior)
+				input.mi.dx = (LONG)(((double)(x - virtualScreenX) / virtualScreenWidth) * 65535.0);
+				input.mi.dy = (LONG)(((double)(y - virtualScreenY) / virtualScreenHeight) * 65535.0);
+				input.mi.dwFlags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+
+				MouseLogDebug(std::string("[MouseInputHandler] Simulating Mouse Button ") + std::to_string(button) + " " + eventType + " at (" + std::to_string(x) + ", " + std::to_string(y) + ") -> Virtual Desktop Offset (" + std::to_string(virtualScreenX) + ", " + std::to_string(virtualScreenY) + ") -> Normalized (" + std::to_string(input.mi.dx) + ", " + std::to_string(input.mi.dy) + ")");
+			}
 		}
 		else if (eventType == "wheel") {
 			// Handle vertical wheel events
@@ -143,11 +196,16 @@ namespace MouseInputHandler {
 			// y parameter contains deltaY (wheel rotation amount)
 			// button parameter is unused for wheel events
 
-			// Normalize deltaY to wheel increments (WHEEL_DELTA = 120)
-			LONG wheelDelta = (LONG)y;
+			// Accumulate and normalize to WHEEL_DELTA (120)
+			gWheelAccumY += y;
+			int steps = gWheelAccumY / WHEEL_DELTA;
+			gWheelAccumY = gWheelAccumY % WHEEL_DELTA;
+			if (steps == 0) {
+				return; // keep accumulating until we have a full step
+			}
 
 			input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-			input.mi.mouseData = wheelDelta;
+			input.mi.mouseData = steps * WHEEL_DELTA;
 
 			std::cout << "[MouseInputHandler] Simulating Vertical Wheel - DeltaY: " << y << " -> mouseData: " << input.mi.mouseData << std::endl;
 		}
@@ -157,11 +215,16 @@ namespace MouseInputHandler {
 			// y parameter contains deltaY (unused for horizontal wheel)
 			// button parameter is unused for wheel events
 
-			// Normalize deltaX to wheel increments (WHEEL_DELTA = 120)
-			LONG wheelDelta = (LONG)x;
+			// Accumulate and normalize to WHEEL_DELTA (120)
+			gWheelAccumX += x;
+			int steps = gWheelAccumX / WHEEL_DELTA;
+			gWheelAccumX = gWheelAccumX % WHEEL_DELTA;
+			if (steps == 0) {
+				return;
+			}
 
 			input.mi.dwFlags = MOUSEEVENTF_HWHEEL;
-			input.mi.mouseData = wheelDelta;
+			input.mi.mouseData = steps * WHEEL_DELTA;
 
 			std::cout << "[MouseInputHandler] Simulating Horizontal Wheel - DeltaX: " << x << " -> mouseData: " << input.mi.mouseData << std::endl;
 		}
@@ -205,7 +268,7 @@ namespace MouseInputHandler {
 				consecutiveEmptyPolls = 0;
 
 				try {
-					std::cout << "[MouseInputHandler] Received raw mouse message: " << message << std::endl;
+					MouseLogDebug(std::string("[MouseInputHandler] Received raw mouse message: ") + message);
 					json j = json::parse(message);
 					if (j.is_object() && j.contains("type")) {
 						std::string jsType = j["type"].get<std::string>();
@@ -351,6 +414,8 @@ namespace MouseInputHandler {
 	}
 
 	void initializeMouseChannel() {
+		SetMouseLogLevelFromEnv();
+		SetMouseFeatureFlagsFromEnv();
 		std::cout << "[MouseInputHandler] DEBUG: initializeMouseChannel called." << std::endl; // ADD THIS
 		if (!isRunning.load()) {
 			isRunning.store(true);
