@@ -43,11 +43,7 @@ struct FrameData {
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface{ nullptr }; // deferred copy source
 };
 
-struct FrameComparator {
-    bool operator()(const FrameData& a, const FrameData& b) const {
-        return a.sequenceNumber > b.sequenceNumber;
-    };
-};
+// (Removed) FrameComparator used by priority_queue in older design
 
 // Single-producer single-consumer ring buffer: capture callback -> encoder thread
 static size_t g_maxQueuedFrames = kMaxQueuedFramesDefault;
@@ -64,6 +60,8 @@ static std::condition_variable g_ringCV;    // wake consumer when producer pushe
 // Metrics
 static std::atomic<uint64_t> g_overwriteDrops{ 0 }; // times we overwrote oldest due to full ring
 static std::atomic<uint64_t> g_backpressureSkips{ 0 }; // frames skipped by consumer due to encoder backpressure
+static std::atomic<int> g_lastProcessedSeq{ -1 }; // monotonicity tracking
+static std::atomic<uint64_t> g_outOfOrder{ 0 }; // frames observed out of order
 
 static std::atomic<int> g_targetFps{kDefaultTargetFps};
 void SetCaptureTargetFps(int fps) { if (fps > 0) g_targetFps.store(fps); }
@@ -336,6 +334,7 @@ void StartCapture() {
         static int submitCount = 0;
         static uint64_t lastOverwriteDrops = 0;
         static uint64_t lastBpSkips = 0;
+        static uint64_t lastOutOfOrder = 0;
 
         while (isCapturing.load()) {
             FrameData job{};
@@ -372,6 +371,15 @@ void StartCapture() {
                 job = g_ring[tail];
                 g_ringTail.store((tail + 1) % g_ringCapacity, std::memory_order_release);
             }
+            // Enforce monotonic sequence; count any out-of-order occurrence
+            {
+                int prev = g_lastProcessedSeq.load(std::memory_order_relaxed);
+                if (prev >= 0 && job.sequenceNumber <= prev) {
+                    g_outOfOrder.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    g_lastProcessedSeq.store(job.sequenceNumber, std::memory_order_relaxed);
+                }
+            }
             if (!job.texture && !job.surface) continue;
 
             winrt::com_ptr<ID3D11Texture2D> tex = job.texture;
@@ -401,14 +409,17 @@ void StartCapture() {
                 uint64_t od = g_overwriteDrops.load(std::memory_order_relaxed);
                 uint64_t bp = g_backpressureSkips.load(std::memory_order_relaxed);
                 size_t qsz = RingSize();
+                uint64_t oo = g_outOfOrder.load(std::memory_order_relaxed);
                 std::wcout << L"[Stats] Encode=" << submitCount
                            << L"/s, Target=" << g_targetFps.load()
                            << L" fps, QueueDepth=" << qsz
                            << L", OverwriteDrops/s=" << (od - lastOverwriteDrops)
                            << L", BPSkips/s=" << (bp - lastBpSkips)
+                           << L", OutOfOrder/s=" << (oo - lastOutOfOrder)
                            << std::endl;
                 lastOverwriteDrops = od;
                 lastBpSkips = bp;
+                lastOutOfOrder = oo;
                 submitCount = 0;
                 lastLog = nowDbg;
             }
