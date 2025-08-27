@@ -74,6 +74,9 @@ namespace Encoder {
     // Enable/disable GPU timing instrumentation around VideoProcessorBlt
     void SetGpuTimingEnabled(bool enable);
 
+    // Enable/disable D3D11 deferred context path for VideoProcessorBlt
+    void SetDeferredContextEnabled(bool enable);
+
     extern "C" int sendVideoSample(uint8_t* data, int size, int64_t durationUs);
 
     extern int currentWidth;

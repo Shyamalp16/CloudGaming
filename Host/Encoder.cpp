@@ -12,6 +12,8 @@
 #include <d3d11.h>
 #include <wrl.h>
 #include <unordered_map>
+#include "EtwMarkers.h"
+#include "VideoMetrics.h"
 #include <thread>
 #include <deque>
 
@@ -60,6 +62,9 @@ static bool g_gpuTimingEnabled = false;
 static Microsoft::WRL::ComPtr<ID3D11Query> g_tsDisjoint;
 static Microsoft::WRL::ComPtr<ID3D11Query> g_tsStart;
 static Microsoft::WRL::ComPtr<ID3D11Query> g_tsEnd;
+static bool g_deferredContextEnabled = false;
+static Microsoft::WRL::ComPtr<ID3D11DeviceContext> g_deferredContext;
+static Microsoft::WRL::ComPtr<ID3D11CommandList> g_commandList;
 
 // Hardware frame ring
 static std::vector<AVFrame*> g_hwFrames;
@@ -227,6 +232,14 @@ namespace Encoder {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
         g_gpuTimingEnabled = enable;
     }
+    void SetDeferredContextEnabled(bool enable) {
+        std::lock_guard<std::mutex> lock(g_encoderMutex);
+        g_deferredContextEnabled = enable;
+        if (!enable) {
+            g_deferredContext.Reset();
+            g_commandList.Reset();
+        }
+    }
     bool AcquireHwInputSurface(int &slotIndexOut, ID3D11Texture2D** nv12TextureOut) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
         if (!codecCtx || g_hwFrames.empty()) return false;
@@ -269,6 +282,12 @@ namespace Encoder {
         }
         D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
 
+        // Optional deferred-context flag present, but VideoProcessorBlt is only available via ID3D11VideoContext
+        // which is immediate-context backed. Fall back to immediate video context.
+        if (g_deferredContextEnabled) {
+            return SUCCEEDED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream));
+        }
+
         if (!g_gpuTimingEnabled) {
             return SUCCEEDED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream));
         }
@@ -303,6 +322,9 @@ namespace Encoder {
             if (SUCCEEDED(immediate->GetData(g_tsStart.Get(), &startTs, sizeof(startTs), 0)) &&
                 SUCCEEDED(immediate->GetData(g_tsEnd.Get(), &endTs, sizeof(endTs), 0)) && endTs > startTs) {
                 double gpuMs = (double)(endTs - startTs) / (double)disjoint.Frequency * 1000.0;
+                VideoMetrics::vpGpuMs().store(gpuMs, std::memory_order_relaxed);
+                // Persist last observed value for external export
+                // Avoid an include cycle by not depending on VideoMetrics here
                 static auto lastLog = std::chrono::steady_clock::now();
                 auto now = std::chrono::steady_clock::now();
                 if (std::chrono::duration_cast<std::chrono::seconds>(now - lastLog).count() >= 1) {
@@ -498,8 +520,10 @@ namespace Encoder {
         if (frameDurationUs <= 0) frameDurationUs = 8333;
         std::vector<uint8_t> bytes;
         if (packet && packet->data && packet->size > 0) {
+            ETW_MARK("Encoder_Send_Start");
             bytes.assign(packet->data, packet->data + packet->size);
             EnqueueEncodedSample(std::move(bytes), frameDurationUs);
+            ETW_MARK("Encoder_Send_End");
         }
     }
 

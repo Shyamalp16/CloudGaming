@@ -211,6 +211,9 @@ int main()
             // Optional: enable GPU timing instrumentation for VideoProcessor
             bool gpuTiming = vcfg.value("gpuTiming", false);
             Encoder::SetGpuTimingEnabled(gpuTiming);
+            // Optional: enable deferred context path for VideoProcessorBlt
+            bool deferredCtx = vcfg.value("deferredContext", false);
+            Encoder::SetDeferredContextEnabled(deferredCtx);
             // Optional fixed pacing
             if (vcfg.contains("pacingFixedUs")) {
                 Encoder::SetPacingFixedUs(std::max(1, vcfg["pacingFixedUs"].get<int>()));
@@ -286,6 +289,17 @@ int main()
     } catch (...) {}
     StartCapture();
     initWebsocket(roomId);
+    // Optional metrics export to signaling channel
+    try {
+        if (config.contains("host") && config["host"].contains("video")) {
+            auto vcfg = config["host"]["video"];
+            bool exportMetrics = vcfg.value("exportMetrics", false);
+            if (exportMetrics) {
+                extern void startMetricsExport(bool enable);
+                startMetricsExport(true);
+            }
+        }
+    } catch (...) {}
     AudioCapturer audioCapturer;
     audioCapturer.StartCapture(msedge[0].processId);
     std::wcout << L"[main] Capture started! Press any key to stop.\n";

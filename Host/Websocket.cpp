@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include "Config.h"
 #include "Metrics.h"
+#include "VideoMetrics.h"
 
 // Forward declarations for blocking queue functions
 void enqueueKeyboardMessage(const std::string& message);
@@ -32,6 +33,8 @@ std::string base_uri = "ws://localhost:3002/";
 std::thread g_websocket_thread;
 std::thread g_frame_thread;
 std::thread g_sender_thread;
+std::thread g_metrics_thread;
+static std::atomic<bool> g_metrics_export_enabled{ false };
 
 // Allowed key codes (must match client-side codes and KeyInputHandler mapping)
 static const std::unordered_set<std::string> kValidKeyCodes = {
@@ -79,6 +82,45 @@ void on_fail(client* c, websocketpp::connection_hdl hdl);
 void on_close(client* c, websocketpp::connection_hdl hdl);
 void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg);
 void send_message(const json& message);
+
+static void metricsExportLoop() {
+    auto last = std::chrono::steady_clock::now();
+    while (!ShutdownManager::IsShutdown() && g_metrics_export_enabled.load()) {
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last).count() >= 1) {
+            last = now;
+            try {
+                json m;
+                m["type"] = "video-metrics";
+                m["queueDepth"] = VideoMetrics::load(VideoMetrics::queueDepth());
+                m["overwriteDrops"] = VideoMetrics::load(VideoMetrics::overwriteDrops());
+                m["backpressureSkips"] = VideoMetrics::load(VideoMetrics::backpressureSkips());
+                m["outOfOrder"] = VideoMetrics::load(VideoMetrics::outOfOrder());
+                m["vpGpuMs"] = VideoMetrics::vpGpuMs().load(std::memory_order_relaxed);
+                send_message(m);
+            } catch (...) {
+                // ignore
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
+void startMetricsExport(bool enable) {
+    g_metrics_export_enabled.store(enable);
+    if (enable) {
+        if (!g_metrics_thread.joinable()) {
+            g_metrics_thread = std::thread(metricsExportLoop);
+        }
+    }
+}
+
+void stopMetricsExport() {
+    g_metrics_export_enabled.store(false);
+    if (g_metrics_thread.joinable()) {
+        g_metrics_thread.join();
+    }
+}
 
 static constexpr int kSenderTargetFps = 120; // must match capture target unless re-wired
 void senderThread() {
@@ -391,6 +433,7 @@ void initWebsocket(const std::string& roomId) {
 }
 
 void stopWebsocket() {
+    stopMetricsExport();
     static std::atomic<bool> stopped{ false };
     bool expected = false;
     if (!stopped.compare_exchange_strong(expected, true)) {

@@ -15,6 +15,8 @@
 #include <d3d11.h>
 #include <winrt/base.h>
 #include "Encoder.h"
+#include "VideoMetrics.h"
+#include "EtwMarkers.h"
 
 // Constants to replace magic numbers
 static constexpr int kDefaultFramePoolBuffers = 3;
@@ -268,6 +270,7 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                     }
                     // Ultra-light: push surface + timestamp into SPSC ring (latest-frame-wins)
                     if (g_ringCapacity > 0) {
+                        ETW_MARK("Capture_Enqueue_Start");
                         // Compute next head and detect full
                         size_t head = g_ringHead.load(std::memory_order_relaxed);
                         size_t nextHead = (head + 1) % g_ringCapacity;
@@ -284,6 +287,7 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                         g_ringHead.store(nextHead, std::memory_order_release);
                         // Notify consumer
                         g_ringCV.notify_one();
+                        ETW_MARK("Capture_Enqueue_End");
                     }
                 }
             }
@@ -409,6 +413,7 @@ void StartCapture() {
                 uint64_t od = g_overwriteDrops.load(std::memory_order_relaxed);
                 uint64_t bp = g_backpressureSkips.load(std::memory_order_relaxed);
                 size_t qsz = RingSize();
+                VideoMetrics::queueDepth().store(static_cast<uint64_t>(qsz), std::memory_order_relaxed);
                 uint64_t oo = g_outOfOrder.load(std::memory_order_relaxed);
                 std::wcout << L"[Stats] Encode=" << submitCount
                            << L"/s, Target=" << g_targetFps.load()
