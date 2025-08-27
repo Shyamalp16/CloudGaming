@@ -300,6 +300,9 @@ PRETTY_LOGS=true
       "dropMinEvents": 2,
       "minUpdateInterval100ns": 0,
       "skipUnchanged": false,
+      "adaptiveBackoff": false,
+      "adaptiveWindowMs": 2000,
+      "adaptiveEagainThreshold": 10,
       "mmcss": { "enable": true, "priority": 2 }
     }
   }
@@ -317,6 +320,9 @@ Key fields:
 - `capture.dropWindowMs`/`dropMinEvents`: drop policy threshold based on encoder backpressure (EAGAIN).
 - `capture.minUpdateInterval100ns` (default 0): when 0, the host derives `10,000,000 / fps` (100ns units) to match the target FPS; set explicitly to override.
 - `capture.skipUnchanged` (default false): enables a lightweight heuristic to skip enqueueing near-duplicate frames when inter-frame time deltas are extremely small.
+- `capture.adaptiveBackoff` (default false): when true, periodically inspects encoder backpressure (EAGAIN) and dynamically increases/decreases `minUpdateInterval100ns` to back off or recover capture rate.
+- `capture.adaptiveWindowMs` (default 2000): window for sampling backpressure events.
+- `capture.adaptiveEagainThreshold` (default 10): if EAGAIN events within the window exceed this threshold, increase `minUpdateInterval100ns` by ~10% (capped) to reduce capture rate; if zero events, decrease by ~10% toward the base.
 - `capture.mmcss`: enables Multimedia Class Scheduler (MCSS) "Games" profile for the capture/encode thread with configurable priority.
 
 ### Video Metrics (when `video.exportMetrics` is true)

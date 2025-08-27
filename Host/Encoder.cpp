@@ -183,6 +183,10 @@ static inline int64_t ComputeFrameDurationUsLocked() {
 }
 
 static inline int64_t UpdatePacingFromTimestamp(int64_t currentTsUs) {
+    // Honor explicit fixed pacing if configured
+    if (g_pacingFixedUs.load(std::memory_order_relaxed) > 0) {
+        return g_pacingFixedUs.load(std::memory_order_relaxed);
+    }
     if (currentTsUs <= 0) {
         long long sm = g_smoothedDurUs.load(std::memory_order_relaxed);
         return sm > 0 ? sm : ComputeFrameDurationUsLocked();
@@ -371,6 +375,7 @@ namespace Encoder {
             if (ret == AVERROR(EAGAIN)) {
                 g_eagainCount.fetch_add(1);
                 g_lastEagain = std::chrono::steady_clock::now();
+                VideoMetrics::inc(VideoMetrics::eagainEvents());
                 for (;;) {
                     int r = avcodec_receive_packet(codecCtx, packet);
                     if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) break;
@@ -955,6 +960,7 @@ namespace Encoder {
             // Encoder output queue full; drain packets and retry once
             g_eagainCount.fetch_add(1);
             g_lastEagain = std::chrono::steady_clock::now();
+            VideoMetrics::inc(VideoMetrics::eagainEvents());
             for (;;) {
                 int rcv = avcodec_receive_packet(codecCtx, packet);
                 if (rcv == AVERROR(EAGAIN) || rcv == AVERROR_EOF) {

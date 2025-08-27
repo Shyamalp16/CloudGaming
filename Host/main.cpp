@@ -263,6 +263,49 @@ int main()
                 int m = ccfg.value("dropMinEvents", 2);
                 SetBackpressureDropPolicy(w, m);
             }
+            // Optional: dynamic backoff based on backpressure trends
+            if (ccfg.contains("adaptiveBackoff") && ccfg["adaptiveBackoff"].is_boolean() && ccfg["adaptiveBackoff"].get<bool>()) {
+                // If sustained backpressure is detected, increase MinUpdateInterval to reduce capture rate
+                int adaptWindowMs = ccfg.value("adaptiveWindowMs", 2000);
+                int adaptThreshold = ccfg.value("adaptiveEagainThreshold", 10);
+                static auto lastAdaptCheck = std::chrono::steady_clock::now();
+                static int lastAppliedInterval = 0;
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastAdaptCheck).count() >= adaptWindowMs) {
+                    lastAdaptCheck = now;
+                    int eagainEvents = 0;
+                    Encoder::GetAndResetBackpressureStats(eagainEvents);
+                    if (eagainEvents >= adaptThreshold) {
+                        // Back off MinUpdateInterval by 10% (lower FPS) but cap the increase
+                        long long cur =  g_minUpdateInterval100ns.load();
+                        if (cur <= 0) {
+                            // derive from cfgFps if not set
+                            long long base = cfgFps > 0 ? (10000000LL / cfgFps) : 8333 * 10; // 100ns units
+                            cur = base;
+                        }
+                        long long next = static_cast<long long>(cur * 1.10);
+                        // Clamp to 5x base to avoid collapsing FPS entirely
+                        long long maxCur = (cfgFps > 0) ? (5 * (10000000LL / cfgFps)) : (5 * 8333 * 10);
+                        if (next > maxCur) next = maxCur;
+                        if (static_cast<int>(next) != lastAppliedInterval) {
+                            SetMinUpdateInterval100ns(next);
+                            lastAppliedInterval = static_cast<int>(next);
+                            std::wcout << L"[Adaptive] Increased MinUpdateInterval to " << next << L" (100ns units) due to backpressure." << std::endl;
+                        }
+                    } else if (eagainEvents == 0 && lastAppliedInterval > 0) {
+                        // Recover: reduce interval by 10% towards base
+                        long long base = cfgFps > 0 ? (10000000LL / cfgFps) : (8333 * 10);
+                        long long cur = lastAppliedInterval;
+                        long long next = static_cast<long long>(cur * 0.90);
+                        if (next < base) next = base;
+                        if (static_cast<int>(next) != lastAppliedInterval) {
+                            SetMinUpdateInterval100ns(next);
+                            lastAppliedInterval = static_cast<int>(next);
+                            std::wcout << L"[Adaptive] Decreased MinUpdateInterval to " << next << L" (100ns units) recovering from backpressure." << std::endl;
+                        }
+                    }
+                }
+            }
             if (ccfg.contains("mmcss")) {
                 auto mcfg = ccfg["mmcss"];
                 bool enable = mcfg.value("enable", true);
