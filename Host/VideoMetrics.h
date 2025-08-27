@@ -11,6 +11,7 @@ inline std::atomic<uint64_t>& backpressureSkips() { static std::atomic<uint64_t>
 inline std::atomic<uint64_t>& outOfOrder() { static std::atomic<uint64_t> v{0}; return v; }
 inline std::atomic<uint64_t>& queueDepth() { static std::atomic<uint64_t> v{0}; return v; }
 inline std::atomic<uint64_t>& eagainEvents() { static std::atomic<uint64_t> v{0}; return v; }
+inline std::atomic<uint64_t>& sendQueueDrops() { static std::atomic<uint64_t> v{0}; return v; }
 
 // GPU timing (ms, last observed)
 inline std::atomic<double>& vpGpuMs() { static std::atomic<double> v{0.0}; return v; }

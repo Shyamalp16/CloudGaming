@@ -119,6 +119,7 @@ static std::condition_variable g_sendCV;
 static std::deque<QueuedSample> g_sendQueue;
 static std::atomic<bool> g_senderRunning{false};
 static std::thread g_senderThread;
+static constexpr size_t kMaxSendQueue = 3; // drop oldest when backlogged to avoid growth
 
 static void SenderLoop() {
     // Simple 1Hz logging
@@ -209,6 +210,11 @@ static inline void EnqueueEncodedSample(std::vector<uint8_t>&& bytes, int64_t du
     if (bytes.empty()) return;
     {
         std::lock_guard<std::mutex> lk(g_sendMutex);
+        if (g_sendQueue.size() >= kMaxSendQueue) {
+            // drop oldest to prevent growth and large latency spikes
+            g_sendQueue.pop_front();
+            VideoMetrics::inc(VideoMetrics::sendQueueDrops());
+        }
         g_sendQueue.push_back(QueuedSample{ std::move(bytes), durationUs });
     }
     g_sendCV.notify_one();

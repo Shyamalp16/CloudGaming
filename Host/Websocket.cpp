@@ -31,8 +31,7 @@ client wsClient;
 websocketpp::connection_hdl g_connectionHandle;
 std::string base_uri = "ws://localhost:3002/";
 std::thread g_websocket_thread;
-std::thread g_frame_thread;
-std::thread g_sender_thread;
+// Legacy video sender threads removed; encoder pushes directly to Pion
 std::thread g_metrics_thread;
 static std::atomic<bool> g_metrics_export_enabled{ false };
 
@@ -122,39 +121,7 @@ void stopMetricsExport() {
     }
 }
 
-static constexpr int kSenderTargetFps = 120; // must match capture target unless re-wired
-void senderThread() {
-    while (!ShutdownManager::IsShutdown()) {
-        Packet packet;
-        if (g_packetQueue.pop(packet)) {
-            if (getIceConnectionState() >= 0) {
-                if (!packet.data.empty() && packet.data.data() != nullptr) {
-                    // Fixed frame duration based on target FPS constant
-                    int64_t frameDurationUs = 1000000LL / kSenderTargetFps;
-                    int result = sendVideoSample(packet.data.data(), static_cast<int>(packet.data.size()), frameDurationUs);
-                    // std::cerr << "[SenderThread] Failed to send video packet: " << result << std::endl;
-                    }
-                    else {
-                        // std::cout << "[SenderThread] Sent video packet successfully (PTS: " << packet.pts << ")" << std::endl;
-                    }
-                }
-            }
-        }
-    }
-
-void sendFrames() {
-    while (!ShutdownManager::IsShutdown()) {
-        std::vector<uint8_t> frameData;
-        int64_t pts = 0;
-
-        if (Encoder::getEncodedFrame(frameData, pts)) {
-            Packet packet;
-            packet.data = frameData;
-            packet.pts = pts;
-            g_packetQueue.push(packet);
-        }
-    }
-}
+// Legacy sender path removed; encoder pushes directly via Go API
 
 bool createPeerConnection() {
     if (createPeerConnectionGo() == 0) {
@@ -466,17 +433,7 @@ void stopWebsocket() {
     }
     std::wcout << L"[Shutdown] Websocket thread joined.\n";
 
-    std::wcout << L"[Shutdown] Joining frame thread...\n";
-    if (g_frame_thread.joinable()) {
-        g_frame_thread.join();
-    }
-    std::wcout << L"[Shutdown] Frame thread joined.\n";
-
-    std::wcout << L"[Shutdown] Joining sender thread...\n";
-    if (g_sender_thread.joinable()) {
-        g_sender_thread.join();
-    }
-    std::wcout << L"[Shutdown] Sender thread joined.\n";
+    // Legacy frame/sender threads removed
 
     std::wcout << L"[Shutdown] Websocket shutdown complete.\n";
 }

@@ -277,15 +277,11 @@ int main()
                     Encoder::GetAndResetBackpressureStats(eagainEvents);
                     if (eagainEvents >= adaptThreshold) {
                         // Back off MinUpdateInterval by 10% (lower FPS) but cap the increase
-                        long long cur =  g_minUpdateInterval100ns.load();
-                        if (cur <= 0) {
-                            // derive from cfgFps if not set
-                            long long base = cfgFps > 0 ? (10000000LL / cfgFps) : 8333 * 10; // 100ns units
-                            cur = base;
-                        }
+                        long long base = cfgFps > 0 ? (10000000LL / cfgFps) : 8333 * 10; // 100ns units
+                        long long cur = (lastAppliedInterval > 0) ? static_cast<long long>(lastAppliedInterval) : base;
                         long long next = static_cast<long long>(cur * 1.10);
                         // Clamp to 5x base to avoid collapsing FPS entirely
-                        long long maxCur = (cfgFps > 0) ? (5 * (10000000LL / cfgFps)) : (5 * 8333 * 10);
+                        long long maxCur = (cfgFps > 0) ? (5LL * (10000000LL / cfgFps)) : (5LL * 8333 * 10);
                         if (next > maxCur) next = maxCur;
                         if (static_cast<int>(next) != lastAppliedInterval) {
                             SetMinUpdateInterval100ns(next);
