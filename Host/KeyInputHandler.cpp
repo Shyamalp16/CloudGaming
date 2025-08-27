@@ -1,51 +1,72 @@
 #include "KeyInputHandler.h"
-#include "ShutdownManager.h" 
+#include "ShutdownManager.h"
 #include "pion_webrtc.h"
+#include "Logging.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <atomic>
 #include <cstdlib>
 #include <cassert>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <chrono>
 
 using json = nlohmann::json;
+#include "Metrics.h"
 
-static std::atomic_bool isRunning;
-
-// Simple configurable logging (0=ERROR,1=WARN,2=INFO,3=DEBUG)
-static std::atomic<int> gInputLogLevel{1};
-static inline void SetInputLogLevelFromEnv() {
-    const char* lvl = std::getenv("INPUT_LOG_LEVEL");
-    if (lvl) {
-        int v = std::atoi(lvl);
-        if (v < 0) v = 0; if (v > 3) v = 3;
-        gInputLogLevel.store(v);
-    }
+// Initialize logging system
+static inline void InitializeInputLogging() {
+    // TODO: Implement proper logging initialization
+    // For now, this is a stub
+    LOG_INFO("Input logging initialized");
 }
-static inline bool ShouldLog(int level) { return level <= gInputLogLevel.load(); }
-static inline void LogInfo(const std::string& s) { if (ShouldLog(2)) std::cout << s << std::endl; }
-static inline void LogDebug(const std::string& s) { if (ShouldLog(3)) std::cout << s << std::endl; }
-static inline void LogWarn(const std::string& s) { if (ShouldLog(1)) std::cout << s << std::endl; }
+
+// Temporary simple logging to fix compilation
+#define LOG_ERROR(msg) std::cout << "[ERROR] " << msg << std::endl
+#define LOG_WARN(msg) std::cout << "[WARN] " << msg << std::endl
+#define LOG_INFO(msg) std::cout << "[INFO] " << msg << std::endl
+#define LOG_DEBUG(msg) std::cout << "[DEBUG] " << msg << std::endl
+#define LOG_TRACE(msg) std::cout << "[TRACE] " << msg << std::endl
 
 namespace KeyInputHandler {
+	static std::atomic_bool isRunning;
 	static std::thread messageThread;
 	static std::set<WORD> clientReportedKeysDown;
 	static std::mutex clientKeysMutex;
 	static std::unordered_map<WORD, std::string> vkDownToJsCode;
+	// Canonical identity map keyed by (scancode | 0x8000 if extended)
+	static std::unordered_map<uint16_t, std::string> scanIdDownToJs;
+
+	// Blocking queue infrastructure
+	static std::queue<std::string> keyboardMessageQueue;
+	static std::mutex queueMutex;
+	static std::condition_variable queueCondition;
+	static bool shutdownRequested = false;
 
 	// Canonical extended-key classifier (single source of truth)
 	static inline bool IsExtendedKeyCanonical(WORD virtualKeyCode, const std::string& jsCode) {
 		// Extended keys per Win32: arrows, Insert/Delete, Home/End, PgUp/PgDn, right Ctrl/Alt, Win keys, Apps
-		static const std::unordered_set<WORD> kExtendedVKs = {
+		static const WORD kExtendedVKs[] = {
 			VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT,
 			VK_INSERT, VK_DELETE, VK_HOME, VK_END,
 			VK_PRIOR, VK_NEXT,
 			VK_RCONTROL, VK_RMENU,
 			VK_LWIN, VK_RWIN, VK_APPS
 		};
+		static const size_t kExtendedVKsCount = sizeof(kExtendedVKs) / sizeof(kExtendedVKs[0]);
+
 		if (virtualKeyCode == VK_RETURN && jsCode == "NumpadEnter") {
 			return true; // numpad enter only
 		}
-		return kExtendedVKs.find(virtualKeyCode) != kExtendedVKs.end();
+
+		for (size_t i = 0; i < kExtendedVKsCount; ++i) {
+			if (kExtendedVKs[i] == virtualKeyCode) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	// Debug-only verification of extended-bit consistency for critical keys
@@ -223,13 +244,36 @@ namespace KeyInputHandler {
 		return 0;
 	}
 
+	// Blocking queue functions
+	void enqueueKeyboardMessage(const std::string& message) {
+		std::unique_lock<std::mutex> lock(queueMutex);
+		keyboardMessageQueue.push(message);
+		lock.unlock();
+		queueCondition.notify_one();
+	}
+
+	void wakeKeyboardThreadInternal() {
+		std::unique_lock<std::mutex> lock(queueMutex);
+		shutdownRequested = true;
+		lock.unlock();
+		queueCondition.notify_one();
+	}
+
+	// Public function to enqueue messages from WebSocket handler
+	void enqueueMessage(const std::string& message) {
+		std::unique_lock<std::mutex> lock(queueMutex);
+		keyboardMessageQueue.push(message);
+		lock.unlock();
+		queueCondition.notify_one();
+	}
+
 	void simulateKeyPress(const std::string& key) {
-		std::cout << "[KeyInputHandler] Simulating key press for: '" << key << "'" << std::endl;
+		LOG_DEBUG("Simulating key press for: '" + key + "'");
 
 		// Validate the key code
 		WORD virtualKeyCode = MapJavaScriptCodeToVK(key);
 		if (virtualKeyCode == 0) {
-			std::cerr << "[KeyInputHandler] Error: Invalid key code '" << key << "'. Cannot simulate key press." << std::endl;
+			LOG_ERROR("Invalid key code '" + key + "'. Cannot simulate key press.");
 			return;
 		}
 
@@ -242,13 +286,13 @@ namespace KeyInputHandler {
 		// Simulate key up
 		SimulateWindowsKeyEvent(key, false);
 
-		std::cout << "[KeyInputHandler] Key press simulation completed for: '" << key << "'" << std::endl;
+		LOG_DEBUG("Key press simulation completed for: '" + key + "'");
 	}
 
 	void SimulateWindowsKeyEvent(const std::string& eventCode, bool isKeyDown){
 		WORD virtualKeyCode = MapJavaScriptCodeToVK(eventCode);
 		if (virtualKeyCode == 0) {
-			std::cerr << "[SimulateWindowsKeyEvent] Warning: No VK code mapping for JS code '" << eventCode << "'. Ignoring." << std::endl;
+			LOG_WARN("No VK code mapping for JS code '" + eventCode + "'. Ignoring.");
 			return;
 		}
 
@@ -315,12 +359,9 @@ namespace KeyInputHandler {
 					}
 					input.ki.wVk = 0;
 					DebugAssertExtendedConsistency(virtualKeyCode, scanCode, isExtendedKey, input.ki.dwFlags, eventCode, true);
-					std::cout << "[SimulateWindowsKeyEvent] Sending Input (VK->Scan Fallback) - JSCode: '" << eventCode
-						<< "', VK: " << virtualKeyCode << ", Scan: 0x" << std::hex << scanCode << std::dec
-						<< ", Flags: 0x" << std::hex << input.ki.dwFlags << std::dec
-						<< (isKeyDown ? " (DOWN)" : " (UP)") << std::endl;
+					LOG_TRACE("Sending Input (VK->Scan Fallback) - JSCode: '" + eventCode + "', VK: " + std::to_string(virtualKeyCode) + ", Scan: " + std::to_string(scanCode) + ", Flags: " + std::to_string(input.ki.dwFlags) + " (" + (isKeyDown ? "DOWN" : "UP") + ")");
 				} else {
-					std::cerr << "[SimulateWindowsKeyEvent] Warning: Could not map to scan code for JS code '" << eventCode << "'. Using VK." << std::endl;
+					LOG_WARN("Could not map to scan code for JS code '" + eventCode + "'. Using VK.");
 					goto useVirtualKey;
 				}
 			}
@@ -334,209 +375,202 @@ namespace KeyInputHandler {
 			if (!isKeyDown) {
 				input.ki.dwFlags |= KEYEVENTF_KEYUP;
 			}
-			std::cout << "[SimulateWindowsKeyEvent] Sending Input (Virtual Key) - JSCode: '" << eventCode
-				<< "', VK: " << virtualKeyCode
-				<< ", Flags: 0x" << std::hex << input.ki.dwFlags << std::dec
-				<< (isKeyDown ? " (DOWN)" : " (UP)") << std::endl;
+			LOG_TRACE("Sending Input (Virtual Key) - JSCode: '" + eventCode + "', VK: " + std::to_string(virtualKeyCode) + ", Flags: " + std::to_string(input.ki.dwFlags) + " (" + (isKeyDown ? "DOWN" : "UP") + ")");
 		}
 
 		UINT sent = SendInput(1, &input, sizeof(INPUT));
 		if (sent != 1) {
 			DWORD errorCode = GetLastError();
-			std::cerr << "[SimulateWindowsKeyEvent] SendInput failed for '" << eventCode << "' ("
-				<< (isKeyDown ? "DOWN" : "UP") << ")! Error Code: " << errorCode
-				<< ", Error Message: ";
 			char errorMsg[256];
 			FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
 				NULL, errorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
 				errorMsg, sizeof(errorMsg), NULL);
-			std::cerr << errorMsg << std::endl;
-		}
-		else {
-			std::cout << "[SimulateWindowsKeyEvent] SendInput succeeded for '" << eventCode << "' ("
-				<< (isKeyDown ? "DOWN" : "UP") << ")" << std::endl;
+			LOG_ERROR("SendInput failed for '" + eventCode + "' (" + (isKeyDown ? "DOWN" : "UP") + "). Error Code: " + std::to_string(errorCode) + ", Message: " + std::string(errorMsg));
+		} else {
+			LOG_TRACE("SendInput succeeded for '" + eventCode + "' (" + (isKeyDown ? "DOWN" : "UP") + ")");
 		}
 	}
 
 	void messagePollingLoop() {
-		std::cout << "[KeyInputHandler] Starting message polling loop..." << std::endl;
-
-		// Exponential backoff for polling efficiency
-		// Reduced MAX_SLEEP_MS for more responsive shutdown
-		const int MIN_SLEEP_MS = 1;
-		const int MAX_SLEEP_MS = 50;
-		const int BACKOFF_MULTIPLIER = 2;
-		int currentSleepMs = MIN_SLEEP_MS;
-		int consecutiveEmptyPolls = 0;
+		LOG_INFO("Starting blocking queue message loop");
 
 		while (isRunning.load() && !ShutdownManager::IsShutdown()) {
-			// Check shutdown condition frequently for responsive shutdown
-			if (!isRunning.load() || ShutdownManager::IsShutdown()) {
-				break;
+			std::string message;
+
+			// Blocking wait for message or shutdown signal
+			{
+				std::unique_lock<std::mutex> lock(queueMutex);
+				queueCondition.wait(lock, [&]() {
+					return shutdownRequested || !keyboardMessageQueue.empty();
+				});
+
+				if (shutdownRequested || !isRunning.load() || ShutdownManager::IsShutdown()) {
+					break;
+				}
+
+				if (!keyboardMessageQueue.empty()) {
+					message = keyboardMessageQueue.front();
+					keyboardMessageQueue.pop();
+				}
 			}
 
-			std::string message = getDataChannelMessageString();
-
 			if (!message.empty()) {
-				// Reset backoff on successful message reception
-				currentSleepMs = MIN_SLEEP_MS;
-				consecutiveEmptyPolls = 0;
-
 				try {
-					LogDebug("[KeyInputHandler] Received message string: " + message);
+					LOG_DEBUG("Processing message from queue: " + message);
 
 					json j = json::parse(message);
 					if (j.is_object() && j.contains("code") && j.contains("type")) {
 						std::string jsCode = j["code"].get<std::string>();
 						std::string jsType = j["type"].get<std::string>();
 						bool isClientKeyDown = (jsType == "keydown");
-						LogDebug(std::string("[KeyInputHandler] Parsed - Code: ") + jsCode + ", Type: " + jsType);
-						
+						LOG_DEBUG("Parsed - Code: " + jsCode + ", Type: " + jsType);
+
 						WORD vkCode = MapJavaScriptCodeToVK(jsCode);
 						if (vkCode == 0) {
 							continue;
 						}
 
+						// Collect action parameters inside minimal lock
 						bool simulateAction = false;
 						bool actionIsDown = false;
+						std::string jsForInject;
+						uint16_t scanIdentity = 0;
 
-						std::lock_guard<std::mutex> lock(clientKeysMutex);
-						if (isClientKeyDown) {
-							actionIsDown = true;
-							if (clientReportedKeysDown.find(vkCode) == clientReportedKeysDown.end()) {
-								clientReportedKeysDown.insert(vkCode);
-								vkDownToJsCode[vkCode] = jsCode;
-								simulateAction = true;
-								std::cout << "[KeyInputHandler] State: New keydown for '" << jsCode << "' (VK:" << vkCode << "). Simulating press." << std::endl;
-							}
-							else {
-								vkDownToJsCode[vkCode] = jsCode;
-								simulateAction = true;
-								std::cout << "[KeyInputHandler] State: Held keydown for '" << jsCode << "' (VK:" << vkCode << "). Re-simulating press." << std::endl;
+						{
+							std::lock_guard<std::mutex> lock(clientKeysMutex);
+							if (isClientKeyDown) {
+								actionIsDown = true;
+								if (clientReportedKeysDown.find(vkCode) == clientReportedKeysDown.end()) {
+									clientReportedKeysDown.insert(vkCode);
+									vkDownToJsCode[vkCode] = jsCode;
+									// Track scancode+extended identity
+									WORD sc = MapJavaScriptCodeToScanCode(jsCode);
+									bool ext = IsExtendedKeyCanonical(vkCode, jsCode);
+									scanIdentity = static_cast<uint16_t>((sc & 0x7FFF) | (ext ? 0x8000 : 0));
+									scanIdDownToJs[scanIdentity] = jsCode;
+									simulateAction = true;
+									jsForInject = jsCode;
+									LOG_DEBUG("State: New keydown for '" + jsCode + "' (VK:" + std::to_string(vkCode) + "). Simulating press.");
+								} else {
+									vkDownToJsCode[vkCode] = jsCode;
+									simulateAction = true;
+									jsForInject = jsCode;
+									LOG_DEBUG("State: Held keydown for '" + jsCode + "' (VK:" + std::to_string(vkCode) + "). Re-simulating press.");
+								}
+							} else {
+								actionIsDown = false;
+								if (clientReportedKeysDown.count(vkCode)) {
+									clientReportedKeysDown.erase(vkCode);
+									vkDownToJsCode.erase(vkCode);
+									// Remove scancode identity
+									WORD sc = MapJavaScriptCodeToScanCode(jsCode);
+									bool ext = IsExtendedKeyCanonical(vkCode, jsCode);
+									scanIdentity = static_cast<uint16_t>((sc & 0x7FFF) | (ext ? 0x8000 : 0));
+									scanIdDownToJs.erase(scanIdentity);
+									simulateAction = true;
+									jsForInject = jsCode;
+									LOG_DEBUG("State: Keyup for '" + jsCode + "' (VK:" + std::to_string(vkCode) + "). Simulating release.");
+								} else {
+									LOG_DEBUG("State: Ignoring keyup for '" + jsCode + "' (VK:" + std::to_string(vkCode) + ").");
+								}
 							}
 						}
-						else {
-							actionIsDown = false;
-							if (clientReportedKeysDown.count(vkCode)) {
-								clientReportedKeysDown.erase(vkCode);
-								vkDownToJsCode.erase(vkCode);
-								simulateAction = true;
-								std::cout << "[KeyInputHandler] State: Keyup for '" << jsCode << "' (VK:" << vkCode << "). Simulating release." << std::endl;
-							}
-							else {
-								std::cout << "[KeyInputHandler] State: Ignoring keyup for '" << jsCode << "' (VK:" << vkCode << ")." << std::endl;
-							}
+
+						// SendInput outside the lock
+						if (simulateAction && !jsForInject.empty()) {
+							SimulateWindowsKeyEvent(jsForInject, actionIsDown);
+							if (!actionIsDown) { InputMetrics::inc(InputMetrics::injectedKeys()); }
 						}
-						if (simulateAction) {
-							SimulateWindowsKeyEvent(jsCode, actionIsDown);
-						}
-					}else {
-						std::cerr << "[KeyInputHandler] Ignoring message: Invalid JSON format or missing 'code'/'type'. Message: " << message << std::endl;
+					} else {
+						LOG_WARN("Ignoring message: Invalid JSON format or missing 'code'/'type'. Message: " + message);
 					}
 				}
 				catch (const json::parse_error& e) {
-					std::cerr << "[KeyInputHandler] JSON Parsing Error: " << e.what() << ". Message: " << message << std::endl;
+					LOG_ERROR("JSON Parsing Error: " + std::string(e.what()) + ". Message: " + message);
 				}
 				catch (const std::exception& e) {
-					std::cerr << "[KeyInputHandler] Generic Error Processing Message: " << e.what() << ". Message: " << message << std::endl;
-				}
-			}
-			else {
-				// Exponential backoff when no messages are available
-				consecutiveEmptyPolls++;
-
-				// Log backoff only occasionally to avoid spam
-				if (consecutiveEmptyPolls % 100 == 0 && currentSleepMs > MIN_SLEEP_MS) {
-					std::cout << "[KeyInputHandler] Polling backoff: " << consecutiveEmptyPolls
-							  << " empty polls, sleeping " << currentSleepMs << "ms" << std::endl;
-				}
-
-				std::this_thread::sleep_for(std::chrono::milliseconds(currentSleepMs));
-
-				// Increase sleep time exponentially, but cap at maximum
-				if (currentSleepMs < MAX_SLEEP_MS) {
-					int oldSleepMs = currentSleepMs;
-					int newSleepMs = currentSleepMs * BACKOFF_MULTIPLIER;
-					if (newSleepMs > MAX_SLEEP_MS) {
-						newSleepMs = MAX_SLEEP_MS;
-					}
-					currentSleepMs = newSleepMs;
-
-					// Yield to make shutdown more responsive when sleep time increases significantly
-					if (currentSleepMs >= 10 && currentSleepMs != oldSleepMs) {
-						std::this_thread::yield();
-					}
+					LOG_ERROR("Generic Error Processing Message: " + std::string(e.what()) + ". Message: " + message);
 				}
 			}
 		}
-		std::cout << "[KeyInputHandler] Exiting message polling loop." << std::endl;
-		
-		std::cout << "[KeyInputHandler] Loop exited. Sending keyup for all tracked keys..." << std::endl;
-		std::lock_guard<std::mutex> lock(clientKeysMutex);
+		LOG_INFO("Exiting blocking queue message loop");
 
-		for (WORD vkCodeToRelease : clientReportedKeysDown) {
-			std::string jsCodeToRelease = "";
-			auto it = vkDownToJsCode.find(vkCodeToRelease);
-			if (it != vkDownToJsCode.end()) {
-				jsCodeToRelease = it->second;
-			}
-			if (!jsCodeToRelease.empty()) {
-				std::cout << "[KeyInputHandler] Cleanup: Releasing '" << jsCodeToRelease << "' (VK:" << vkCodeToRelease << ")" << std::endl;
-				SimulateWindowsKeyEvent(jsCodeToRelease, false);
-			}
-			else {
-				std::cout << "[KeyInputHandler] Cleanup: No original jsCode for VK:" << vkCodeToRelease << ". Falling back to first mapping." << std::endl;
-				// Fallback: pick first mapping as before
-				for (const auto& pair : vkMap) {
-					if (pair.second == vkCodeToRelease) {
-						jsCodeToRelease = pair.first;
-						break;
+		LOG_INFO("Loop exited. Sending keyup for all tracked keys");	
+		// Copy required data under lock
+		std::vector<std::string> codesToRelease;
+		{
+			std::lock_guard<std::mutex> lock(clientKeysMutex);
+			for (WORD vkCodeToRelease : clientReportedKeysDown) {
+				std::string jsCodeToRelease;
+				auto it = vkDownToJsCode.find(vkCodeToRelease);
+				if (it != vkDownToJsCode.end()) {
+					jsCodeToRelease = it->second;
+				} else {
+					for (const auto& pair : vkMap) {
+						if (pair.second == vkCodeToRelease) { jsCodeToRelease = pair.first; break; }
 					}
 				}
-				if (!jsCodeToRelease.empty()) {
-					SimulateWindowsKeyEvent(jsCodeToRelease, false);
-				}
+				if (!jsCodeToRelease.empty()) codesToRelease.push_back(jsCodeToRelease);
 			}
+			clientReportedKeysDown.clear();
+			vkDownToJsCode.clear();
 		}
-		clientReportedKeysDown.clear();
-		vkDownToJsCode.clear();
-		std::cout << "[KeyInputHandler] Cleanup keyup finished." << std::endl;
+		// Inject outside lock
+		for (const auto& jsCodeToRelease : codesToRelease) {
+			LOG_INFO("Cleanup: Releasing '" + jsCodeToRelease + "'");
+			SimulateWindowsKeyEvent(jsCodeToRelease, false);
+		}
+		LOG_INFO("Cleanup keyup finished");
 	}
 
 	void initializeDataChannel() {
-		SetInputLogLevelFromEnv();
 		if (!isRunning.load()) {
+			InitializeInputLogging();
 			isRunning.store(true);
 			std::lock_guard<std::mutex> lock(clientKeysMutex);
 			clientReportedKeysDown.clear();
 			vkDownToJsCode.clear();
+			scanIdDownToJs.clear();
+
+			// Reset blocking queue state
+			{
+				std::lock_guard<std::mutex> queueLock(queueMutex);
+				shutdownRequested = false;
+				while (!keyboardMessageQueue.empty()) {
+					keyboardMessageQueue.pop();
+				}
+			}
 
 			messageThread = std::thread(messagePollingLoop);
-			std::cout << "[KeyInputHandler] Polling started for data channel messages" << std::endl;
+			LOG_INFO("Blocking queue started for data channel messages");
 		}else {
-			std::cout << "[KeyInputHandler] Polling thread already running." << std::endl;
+			LOG_INFO("Polling thread already running");
 		}
 	}
 
 	void cleanup() {
 		if (isRunning.load()) {
 			isRunning.store(false);
+			// Wake the blocking thread for shutdown
+			wakeKeyboardThreadInternal();
 			if (messageThread.joinable()) {
 				messageThread.join();
 			}
-			std::cout << "[KeyInputHandler] Polling stopped" << std::endl;
+			LOG_INFO("Blocking queue stopped");
 		}else {
-			std::cout << "[KeyInputHandler] Cleanup called, but polling was not running." << std::endl;
+			LOG_INFO("Cleanup called, but polling was not running");
 		}
 	}
 }
 
 extern "C" void initKeyInputHandler() {
-	std::cout << "[KeyInputHandler] initKeyInputHandler called" << std::endl;
 	KeyInputHandler::initializeDataChannel();
 }
 
 extern "C" void stopKeyInputHandler() {
-	std::cout << "[KeyInputHandler] stopKeyInputHandler called (C export)" << std::endl;
 	KeyInputHandler::cleanup();
+}
+
+extern "C" void wakeKeyboardThread() {
+	KeyInputHandler::wakeKeyboardThreadInternal();
 }

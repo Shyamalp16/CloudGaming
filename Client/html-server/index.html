@@ -854,6 +854,18 @@
             case 'answer':
               await handleAnswer(msg);
               break;
+            case 'candidate': {
+              // New schema from server: candidate is a string at top-level
+              if (typeof msg.candidate === 'string') {
+                const ice = { candidate: msg.candidate, sdpMid: msg.sdpMid, sdpMLineIndex: msg.sdpMLineIndex };
+                await handleRemoteIceCandidate(ice);
+              } else if (msg.candidate === null) {
+                log("Received null ICE candidate (end of candidates).");
+              } else {
+                log("Received invalid ICE candidate structure.");
+              }
+              break;
+            }
             case 'ice-candidate':
               if (msg.candidate && msg.candidate.candidate) {
                 await handleRemoteIceCandidate(msg.candidate);
@@ -865,6 +877,14 @@
               break;
             case 'offer':
               log('Unexpected Offer Received.');
+              break;
+            case 'control':
+              // Server sends schema errors or other control messages
+              if (msg.action === 'schema-error') {
+                log('Server reported schema-error for last message. Check signaling payload shapes.', 'warn');
+              } else {
+                log('Control message: ' + JSON.stringify(msg));
+              }
               break;
             default:
               log('Unknown Message Type: ' + msg.type);
@@ -996,8 +1016,10 @@
           log(`Generated local ICE candidate (type: ${event.candidate.type || 'unknown'}). Sending...`);
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
-              type: 'ice-candidate',
-              candidate: event.candidate
+              type: 'candidate',
+              candidate: event.candidate.candidate,
+              sdpMid: event.candidate.sdpMid,
+              sdpMLineIndex: event.candidate.sdpMLineIndex
             }));
           } else {
             log("WebSocket not open, cannot send ICE candidate.", 'warn');

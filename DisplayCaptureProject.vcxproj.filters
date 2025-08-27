@@ -27,16 +27,7 @@
     <ClInclude Include="Host\Encoder.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Host\FrameCaptureThread.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Host\GlobalTime.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Host\MyCreateSdpObserver.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Host\MySetRemoteObserver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Host\pch.h">
@@ -69,6 +60,15 @@
     <ClInclude Include="Host\IdGenerator.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Host\Logging.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Host\WebRTCWrapper.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Host\Metrics.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -83,16 +83,7 @@
     <ClCompile Include="Host\Encoder.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Host\FrameCaptureThread.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="Host\main.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Host\MyCreateSdpObserver.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Host\MySetRemoteObserver.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Host\pch.cpp">
@@ -117,6 +108,15 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Host\PacketQueue.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\OpusEncoder.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\Logging.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\WebRTCWrapper.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

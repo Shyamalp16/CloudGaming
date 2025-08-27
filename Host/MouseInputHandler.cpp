@@ -4,6 +4,13 @@
 #include <Windows.h>
 #include <atomic>
 #include <cstdlib>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <chrono>
+#include "Metrics.h"
+#include "Config.h"
 
 using json = nlohmann::json;
 
@@ -39,6 +46,15 @@ namespace MouseInputHandler {
 	static std::thread mouseMessageThread;
 	static std::set<int> clientReportedMouseButtonsDown;
 	static std::mutex mouseStateMutex;
+	// Store last known cursor position for cleanup mouseups
+	static int lastKnownCursorX = 0;
+	static int lastKnownCursorY = 0;
+
+	// Blocking queue infrastructure
+	static std::queue<std::string> mouseMessageQueue;
+	static std::mutex queueMutex;
+	static std::condition_variable queueCondition;
+	static bool shutdownRequested = false;
 
 	void mouseMessagePollingLoop();
 	void simulateWindowsMouseEvent(const std::string& eventType, int x, int y, int button);
@@ -76,6 +92,29 @@ namespace MouseInputHandler {
 		if (logSignificantChanges && wasClamped && ((abs(x - originalX) > 10) || (abs(y - originalY) > 10))) {
 			std::cout << "[MouseInputHandler] Clamped coordinates: (" << originalX << ", " << originalY << ") -> (" << x << ", " << y << ")" << std::endl;
 		}
+	}
+
+	// Blocking queue functions
+	void enqueueMouseMessage(const std::string& message) {
+		std::unique_lock<std::mutex> lock(queueMutex);
+		mouseMessageQueue.push(message);
+		lock.unlock();
+		queueCondition.notify_one();
+	}
+
+	void wakeMouseThreadInternal() {
+		std::unique_lock<std::mutex> lock(queueMutex);
+		shutdownRequested = true;
+		lock.unlock();
+		queueCondition.notify_one();
+	}
+
+	// Public function to enqueue messages from WebSocket handler
+	void enqueueMessage(const std::string& message) {
+		std::unique_lock<std::mutex> lock(queueMutex);
+		mouseMessageQueue.push(message);
+		lock.unlock();
+		queueCondition.notify_one();
 	}
 
 	void simulateWindowsMouseEvent(const std::string& eventType, int x, int y, int button) {
@@ -196,10 +235,13 @@ namespace MouseInputHandler {
 			// y parameter contains deltaY (wheel rotation amount)
 			// button parameter is unused for wheel events
 
-			// Accumulate and normalize to WHEEL_DELTA (120)
+			// Accumulate and normalize using configurable wheel scale (threshold),
+			// but send multiples of WHEEL_DELTA to Windows
+			InputConfig::initialize();
+			const int wheelScale = InputConfig::getWheelScale();
 			gWheelAccumY += y;
-			int steps = gWheelAccumY / WHEEL_DELTA;
-			gWheelAccumY = gWheelAccumY % WHEEL_DELTA;
+			int steps = gWheelAccumY / wheelScale;
+			gWheelAccumY = gWheelAccumY % wheelScale;
 			if (steps == 0) {
 				return; // keep accumulating until we have a full step
 			}
@@ -215,10 +257,13 @@ namespace MouseInputHandler {
 			// y parameter contains deltaY (unused for horizontal wheel)
 			// button parameter is unused for wheel events
 
-			// Accumulate and normalize to WHEEL_DELTA (120)
+			// Accumulate and normalize using configurable wheel scale (threshold),
+			// but send multiples of WHEEL_DELTA to Windows
+			InputConfig::initialize();
+			const int wheelScaleX = InputConfig::getWheelScale();
 			gWheelAccumX += x;
-			int steps = gWheelAccumX / WHEEL_DELTA;
-			gWheelAccumX = gWheelAccumX % WHEEL_DELTA;
+			int steps = gWheelAccumX / wheelScaleX;
+			gWheelAccumX = gWheelAccumX % wheelScaleX;
 			if (steps == 0) {
 				return;
 			}
@@ -236,39 +281,43 @@ namespace MouseInputHandler {
 		UINT sent = SendInput(1, &input, sizeof(INPUT));
 		if (sent != 1) {
 			DWORD errorCode = GetLastError();
+			InputMetrics::inc(InputMetrics::injectErrors());
+			InputMetrics::setLastError(static_cast<uint32_t>(errorCode));
 			std::cerr << "[MouseInputHandler] SendInput failed for mouse event '" << eventType << "'! Error Code: " << errorCode
 				<< ", Error Message: " << std::system_category().message(errorCode) << std::endl;
 		}
 		else {
+			InputMetrics::inc(InputMetrics::injectedMouse());
 			std::cout << "[MouseInputHandler] SendInput succeeded for mouse event '" << eventType << "'" << std::endl;
 		}
 	}
 
 	void mouseMessagePollingLoop() {
-		std::cout << "[MouseInputHandler] Starting mouse message polling loop..." << std::endl;
-
-		// Exponential backoff for polling efficiency
-		// Reduced MAX_SLEEP_MS for more responsive shutdown
-		const int MIN_SLEEP_MS = 1;
-		const int MAX_SLEEP_MS = 50;
-		const int BACKOFF_MULTIPLIER = 2;
-		int currentSleepMs = MIN_SLEEP_MS;
-		int consecutiveEmptyPolls = 0;
+		std::cout << "[MouseInputHandler] Starting blocking queue mouse message loop..." << std::endl;
 
 		while (isRunning.load() && !ShutdownManager::IsShutdown()) {
-			// Check shutdown condition frequently for responsive shutdown
-			if (!isRunning.load() || ShutdownManager::IsShutdown()) {
-				break;
+			std::string message;
+
+			// Blocking wait for message or shutdown signal
+			{
+				std::unique_lock<std::mutex> lock(queueMutex);
+				queueCondition.wait(lock, [&]() {
+					return shutdownRequested || !mouseMessageQueue.empty();
+				});
+
+				if (shutdownRequested || !isRunning.load() || ShutdownManager::IsShutdown()) {
+					break;
+				}
+
+				if (!mouseMessageQueue.empty()) {
+					message = mouseMessageQueue.front();
+					mouseMessageQueue.pop();
+				}
 			}
 
-			std::string message = getMouseChannelMessageString();
 			if (!message.empty()) {
-				// Reset backoff on successful message reception
-				currentSleepMs = MIN_SLEEP_MS;
-				consecutiveEmptyPolls = 0;
-
 				try {
-					MouseLogDebug(std::string("[MouseInputHandler] Received raw mouse message: ") + message);
+					MouseLogDebug(std::string("[MouseInputHandler] Processing mouse message from queue: ") + message);
 					json j = json::parse(message);
 					if (j.is_object() && j.contains("type")) {
 						std::string jsType = j["type"].get<std::string>();
@@ -279,6 +328,12 @@ namespace MouseInputHandler {
 								x = j["x"].get<int>();
 								y = j["y"].get<int>();
 								std::cout << "[MouseInputHandler] Parsed mouse move to: (" << x << ", " << y << ")" << std::endl;
+								// Update last known cursor position
+								{
+									std::lock_guard<std::mutex> lock(mouseStateMutex);
+									lastKnownCursorX = x;
+									lastKnownCursorY = y;
+								}
 								simulateWindowsMouseEvent(jsType, x, y, -1);
 							}
 							else {
@@ -292,34 +347,45 @@ namespace MouseInputHandler {
 								button = j["button"].get<int>();
 								std::cout << "[MouseInputHandler] Parsed - Type: " << jsType << ", X: " << x << ", Y: " << y << ", Button: " << button << std::endl;
 
-								std::lock_guard<std::mutex> lock(mouseStateMutex);
+								// Collect action parameters inside minimal lock
 								bool simulateAction = false;
-								if (jsType == "mousedown") {
-									// Validate button number
-									if (button < 0 || button > 4) {
-										std::cerr << "[MouseInputHandler] Invalid button number: " << button << ". Ignoring mousedown." << std::endl;
-										continue;
-									}
-									if (clientReportedMouseButtonsDown.find(button) == clientReportedMouseButtonsDown.end()) {
-										clientReportedMouseButtonsDown.insert(button);
-										simulateAction = true;
+								std::string actionType = jsType;
+								int actionX = x, actionY = y, actionButton = button;
+
+								{
+									std::lock_guard<std::mutex> lock(mouseStateMutex);
+									// Update last known cursor position for button events too
+									lastKnownCursorX = x;
+									lastKnownCursorY = y;
+
+									if (jsType == "mousedown") {
+										// Validate button number
+										if (button < 0 || button > 4) {
+											std::cerr << "[MouseInputHandler] Invalid button number: " << button << ". Ignoring mousedown." << std::endl;
+											continue;
+										}
+										if (clientReportedMouseButtonsDown.find(button) == clientReportedMouseButtonsDown.end()) {
+											clientReportedMouseButtonsDown.insert(button);
+											simulateAction = true;
+										}
+										else {
+											std::cout << "[MouseInputHandler] State: Mouse button " << button << " already down. Ignoring re-press." << std::endl;
+										}
 									}
 									else {
-										std::cout << "[MouseInputHandler] State: Mouse button " << button << " already down. Ignoring re-press." << std::endl;
-									}
-								}
-								else {
-									if (clientReportedMouseButtonsDown.count(button)) {
-										clientReportedMouseButtonsDown.erase(button);
-										simulateAction = true;
-									}
-									else {
-										std::cout << "[MouseInputHandler] State: Mouse button " << button << " was not reported down. Ignoring release." << std::endl;
+										if (clientReportedMouseButtonsDown.count(button)) {
+											clientReportedMouseButtonsDown.erase(button);
+											simulateAction = true;
+										}
+										else {
+											std::cout << "[MouseInputHandler] State: Mouse button " << button << " was not reported down. Ignoring release." << std::endl;
+										}
 									}
 								}
 
+								// SendInput outside the lock
 								if (simulateAction) {
-									simulateWindowsMouseEvent(jsType, x, y, button);
+									simulateWindowsMouseEvent(actionType, actionX, actionY, actionButton);
 								}
 							}
 							else {
@@ -365,65 +431,66 @@ namespace MouseInputHandler {
 					std::cerr << "[MouseInputHandler] Generic Error Processing Message: " << e.what() << ". Message: " << message << std::endl;
 				}
 			}
-			else {
-				// Exponential backoff when no messages are available
-				consecutiveEmptyPolls++;
-
-				// Log backoff only occasionally to avoid spam
-				if (consecutiveEmptyPolls % 100 == 0 && currentSleepMs > MIN_SLEEP_MS) {
-					std::cout << "[MouseInputHandler] Polling backoff: " << consecutiveEmptyPolls
-							  << " empty polls, sleeping " << currentSleepMs << "ms" << std::endl;
-				}
-
-				std::this_thread::sleep_for(std::chrono::milliseconds(currentSleepMs));
-
-				// Increase sleep time exponentially, but cap at maximum
-				if (currentSleepMs < MAX_SLEEP_MS) {
-					int oldSleepMs = currentSleepMs;
-					int newSleepMs = currentSleepMs * BACKOFF_MULTIPLIER;
-					if (newSleepMs > MAX_SLEEP_MS) {
-						newSleepMs = MAX_SLEEP_MS;
-					}
-					currentSleepMs = newSleepMs;
-
-					// Yield to make shutdown more responsive when sleep time increases significantly
-					if (currentSleepMs >= 10 && currentSleepMs != oldSleepMs) {
-						std::this_thread::yield();
-					}
-				}
-			}
 		}
-		std::cout << "[MouseInputHandler] Exiting mouse message polling loop." << std::endl;
+		std::cout << "[MouseInputHandler] Exiting blocking queue mouse message loop." << std::endl;
 
 		//cleanup
 		std::cout << "[MouseInputHandler] Loop exited. Sending mouseup for all tracked buttons..." << std::endl;
-		std::lock_guard<std::mutex> lock(mouseStateMutex);
 
-		// Copy the set to a vector to avoid invalidating iterator while iterating
-		std::vector<int> buttonsToRelease(clientReportedMouseButtonsDown.begin(), clientReportedMouseButtonsDown.end());
-
-		for (int buttonToRelease : buttonsToRelease) {
-			std::cout << "[MouseInputHandler] Sending cleanup mouseup for button: " << buttonToRelease << std::endl;
-			// You might need to retrieve the last known position to send with the cleanup mouseup.
-			// For simplicity here, assuming (0,0) or no specific position is strictly needed for cleanup up.
-			// If the client's `mouseup` sends `x`/`y`, the local `SimulateWindowsMouseEvent` will handle it.
-			simulateWindowsMouseEvent("mouseup", -1, -1, buttonToRelease); // Pass -1 for x,y as it's a cleanup, not a physical move.
+		// Collect buttons to release and last known position inside minimal lock
+		std::vector<int> buttonsToRelease;
+		int cleanupX, cleanupY;
+		{
+			std::lock_guard<std::mutex> lock(mouseStateMutex);
+			// Copy the set to a vector to avoid invalidating iterator while iterating
+			buttonsToRelease.assign(clientReportedMouseButtonsDown.begin(), clientReportedMouseButtonsDown.end());
+			cleanupX = lastKnownCursorX;
+			cleanupY = lastKnownCursorY;
+			clientReportedMouseButtonsDown.clear();
 		}
-		clientReportedMouseButtonsDown.clear();
+
+		// Send cleanup mouseups outside the lock to avoid holding mutex during SendInput
+		for (int buttonToRelease : buttonsToRelease) {
+			std::cout << "[MouseInputHandler] Sending cleanup mouseup for button: " << buttonToRelease
+					  << " at last known position (" << cleanupX << ", " << cleanupY << ")" << std::endl;
+			simulateWindowsMouseEvent("mouseup", cleanupX, cleanupY, buttonToRelease);
+		}
 		std::cout << "[MouseInputHandler] Cleanup mouseup finished for " << buttonsToRelease.size() << " buttons." << std::endl;
 	}
 
 	void initializeMouseChannel() {
 		SetMouseLogLevelFromEnv();
 		SetMouseFeatureFlagsFromEnv();
-		std::cout << "[MouseInputHandler] DEBUG: initializeMouseChannel called." << std::endl; // ADD THIS
+		std::cout << "[MouseInputHandler] DEBUG: initializeMouseChannel called." << std::endl;
+		// DPI awareness note: SendInput absolute uses virtual desktop 0..65535. This is DPI-agnostic
+		// when the process is DPI-aware. Log system DPI for diagnostics.
+		UINT systemDpi = 96;
+		HMODULE hUser32 = LoadLibraryA("User32.dll");
+		if (hUser32) {
+			auto pGetDpiForSystem = (UINT(WINAPI*)())GetProcAddress(hUser32, "GetDpiForSystem");
+			if (pGetDpiForSystem) { systemDpi = pGetDpiForSystem(); }
+			FreeLibrary(hUser32);
+		}
+		std::cout << "[MouseInputHandler] System DPI (diagnostic): " << systemDpi << std::endl;
 		if (!isRunning.load()) {
 			isRunning.store(true);
 			std::lock_guard<std::mutex> lock(mouseStateMutex);
 			clientReportedMouseButtonsDown.clear();
+			// Initialize last known cursor position to screen center as reasonable default
+			lastKnownCursorX = GetSystemMetrics(SM_CXSCREEN) / 2;
+			lastKnownCursorY = GetSystemMetrics(SM_CYSCREEN) / 2;
+
+			// Reset blocking queue state
+			{
+				std::lock_guard<std::mutex> queueLock(queueMutex);
+				shutdownRequested = false;
+				while (!mouseMessageQueue.empty()) {
+					mouseMessageQueue.pop();
+				}
+			}
 
 			mouseMessageThread = std::thread(mouseMessagePollingLoop);
-			std::cout << "[MouseInputHandler] Polling started for mouse channel messages" << std::endl;
+			std::cout << "[MouseInputHandler] Blocking queue started for mouse channel messages" << std::endl;
 		}
 		else {
 			std::cout << "[MouseInputHandler] Mouse polling thread already running." << std::endl;
@@ -433,10 +500,12 @@ namespace MouseInputHandler {
 	void cleanup() {
 		if (isRunning.load()) {
 			isRunning.store(false);
+			// Wake the blocking thread for shutdown
+			wakeMouseThreadInternal();
 			if (mouseMessageThread.joinable()) {
 				mouseMessageThread.join();
 			}
-			std::cout << "[MouseInputHandler] Mouse polling stopped" << std::endl;
+			std::cout << "[MouseInputHandler] Blocking queue stopped" << std::endl;
 		}
 		else {
 			std::cout << "[MouseInputHandler] Cleanup called, but mouse polling was not running." << std::endl;
@@ -449,7 +518,11 @@ namespace MouseInputHandler {
 	}
 
 	extern "C" void stopMouseInputHandler() {
-		std::cout << "[MouseInputHandler] stopMouseInputHandler called (C export)" << std::endl;
-		MouseInputHandler::cleanup();
-	}
+	std::cout << "[MouseInputHandler] stopMouseInputHandler called (C export)" << std::endl;
+	MouseInputHandler::cleanup();
+}
+
+extern "C" void wakeMouseThread() {
+	MouseInputHandler::wakeMouseThreadInternal();
+}
 }

@@ -118,11 +118,14 @@
     <ClInclude Include="Host\GlobalTime.h" />
     <ClInclude Include="Host\IdGenerator.h" />
     <ClInclude Include="Host\KeyInputHandler.h" />
+    <ClInclude Include="Host\Logging.h" />
+    <ClInclude Include="Host\Metrics.h" />
     <ClInclude Include="Host\MouseInputHandler.h" />
     <ClInclude Include="Host\pch.h" />
     <ClInclude Include="Host\pion_webrtc.h" />
     <ClInclude Include="Host\ShutdownManager.h" />
     <ClInclude Include="Host\PacketQueue.h" />
+    <ClInclude Include="Host\WebRTCWrapper.h" />
     <ClInclude Include="Host\Websocket.h" />
     <ClInclude Include="Host\WindowHelpers.h" />
     <ClInclude Include="pch.h" />
@@ -131,6 +134,7 @@
     <ClCompile Include="Host\AudioCapturer.cpp" />
     <ClCompile Include="Host\CaptureHelpers.cpp" />
     <ClCompile Include="Host\D3DHelpers.cpp" />
+    <ClCompile Include="Host\Logging.cpp" />
     <ClCompile Include="Host\OpusEncoder.cpp" />
     <ClCompile Include="Host\Encoder.cpp" />
     <ClCompile Include="Host\KeyInputHandler.cpp" />
@@ -139,6 +143,7 @@
     <ClCompile Include="Host\pch.cpp" />
     <ClCompile Include="Host\ShutdownManager.cpp" />
     <ClCompile Include="Host\PacketQueue.cpp" />
+    <ClCompile Include="Host\WebRTCWrapper.cpp" />
     <ClCompile Include="Host\Websocket.cpp" />
     <ClCompile Include="Host\WindowHelpers.cpp" />
     <ClCompile Include="pch.cpp">

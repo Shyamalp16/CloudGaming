@@ -5,7 +5,23 @@
 #include "MouseInputHandler.h"
 #include "ShutdownManager.h"
 #include "PacketQueue.h"
+#include "WebRTCWrapper.h"
 #include <unordered_set>
+#include "Config.h"
+#include "Metrics.h"
+
+// Forward declarations for blocking queue functions
+void enqueueKeyboardMessage(const std::string& message);
+void enqueueMouseMessage(const std::string& message);
+
+// Forward declarations for input handler enqueue functions
+namespace KeyInputHandler {
+    void enqueueMessage(const std::string& message);
+}
+
+namespace MouseInputHandler {
+    void enqueueMessage(const std::string& message);
+}
 
 typedef websocketpp::client<websocketpp::config::asio_client> client;
 using json = nlohmann::json;
@@ -126,7 +142,7 @@ void handleOffer(const std::string& offer) {
     handleOffer(offer.c_str());
     sendAnswer(); // Trigger sending the answer
     initKeyInputHandler();
-    //initMouseInputHandler();
+    initMouseInputHandler();
 }
 
 void handleRemoteIceCandidate(const json& candidateJson) {
@@ -152,7 +168,11 @@ void on_close(client* c, websocketpp::connection_hdl hdl) {
 void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
     try {
         // Initialize rate-limiters once
-        std::call_once(g_bucketsInit, [](){ g_keyBucket.init(200, 200); g_mouseBucket.init(500, 500); });
+        std::call_once(g_bucketsInit, [](){
+            InputConfig::initialize();
+            g_keyBucket.init(InputConfig::getKeyEventsPerSecond(), InputConfig::getKeyEventsPerSecond());
+            g_mouseBucket.init(InputConfig::getMouseEventsPerSecond(), InputConfig::getMouseEventsPerSecond());
+        });
 
         const std::string& payload = msg->get_payload();
         // Hard cap to prevent abuse, but allow large SDP (offers/answers)
@@ -173,8 +193,12 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
 
         // Apply tight payload limits only to input/control events, not SDP signaling
         if (type == "keydown" || type == "keyup" || type == "mousemove" || type == "mousedown" || type == "mouseup") {
+            if (type == "keydown" || type == "keyup") { InputMetrics::inc(InputMetrics::receivedKeyboard()); }
+            else { InputMetrics::inc(InputMetrics::receivedMouse()); }
             if (payload.size() > 1024) {
                 // Ignore oversized input payloads
+                if (type == "keydown" || type == "keyup") { InputMetrics::inc(InputMetrics::droppedKeyboard()); }
+                else { InputMetrics::inc(InputMetrics::droppedMouse()); }
                 return;
             }
         }
@@ -200,9 +224,9 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
         else if (type == "keydown" || type == "keyup" || type == "mousemove" || type == "mousedown" || type == "mouseup") {
             // Basic per-type rate limiting
             if (type == "keydown" || type == "keyup") {
-                if (!g_keyBucket.consume(1.0)) { return; }
+                if (!g_keyBucket.consume(1.0)) { InputMetrics::inc(InputMetrics::droppedKeyboard()); return; }
             } else {
-                if (!g_mouseBucket.consume(1.0)) { return; }
+                if (!g_mouseBucket.consume(1.0)) { InputMetrics::inc(InputMetrics::droppedMouse()); return; }
             }
             // Validate and rate-limit input events
             static auto lastInputLog = std::chrono::steady_clock::now();
@@ -237,6 +261,11 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
                     // Unknown key code; ignore
                     return;
                 }
+                // Enqueue keyboard message directly to C++ queue
+                std::string msgStr = message.dump();
+                enqueueKeyboardMessage(msgStr);
+                InputMetrics::inc(InputMetrics::enqueuedKeyboard());
+                return; // Message handled, no need to continue processing
             }
 
             // Basic field validation for mouse events
@@ -258,11 +287,16 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
                         return;
                     }
                     int button = message["button"].get<int>();
-                    if (button < 0 || button > 2) {
+                    if (button < 0 || button > 4) {
                         std::cerr << "[WebSocket] Mouse button out of range" << std::endl;
                         return;
                     }
                 }
+                // Enqueue mouse message directly to C++ queue
+                std::string msgStr = message.dump();
+                enqueueMouseMessage(msgStr);
+                InputMetrics::inc(InputMetrics::enqueuedMouse());
+                return; // Message handled, no need to continue processing
             }
         }
         else if (type == "peer-disconnected") {
@@ -275,9 +309,29 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
             handleOffer(sdp);
         }
         else if (type == "ice-candidate") {
-            std::cout << "[WebSocket] Received ice candidate from server: " << message.dump() << std::endl;
+            // Backward-compat: older schema used nested object
+            std::cout << "[WebSocket] Received ice-candidate (legacy schema): " << message.dump() << std::endl;
             json candidateJson = message["candidate"];
             handleRemoteIceCandidate(candidateJson);
+        }
+        else if (type == "candidate") {
+            // New schema: candidate is a top-level string, optional mid/index
+            std::cout << "[WebSocket] Received candidate: " << message.dump() << std::endl;
+            json candidateJson;
+            if (message.contains("candidate") && message["candidate"].is_string()) {
+                candidateJson["candidate"] = message["candidate"].get<std::string>();
+            } else {
+                std::cerr << "[WebSocket] Invalid candidate payload from server" << std::endl;
+                return;
+            }
+            handleRemoteIceCandidate(candidateJson);
+        }
+        else if (type == "control") {
+            if (message.value("action", std::string()) == "schema-error") {
+                std::cerr << "[WebSocket] Server reported schema-error for a message sent by host." << std::endl;
+            } else {
+                std::cout << "[WebSocket] Control message: " << message.dump() << std::endl;
+            }
         }
         else {
             std::cout << "[WebSocket] Received Message: " << message.dump() << std::endl;
@@ -387,38 +441,44 @@ void stopWebsocket() {
 // Callback from Go to send ICE candidates
 extern "C" void onIceCandidate(const char* candidate) {
     json iceMsg;
-    iceMsg["type"] = "ice-candidate";
+    // Send using server's schema: top-level string candidate
+    iceMsg["type"] = "candidate";
     iceMsg["candidate"] = std::string(candidate);
     send_message(iceMsg);
     std::cout << "[WebSocket] Sent ICE candidate: " << iceMsg.dump() << std::endl;
 }
 
-// External declarations for Go-exported functions
+// =======================================================================
+//               DEPRECATED FUNCTIONS (Maintained for backward compatibility)
+// =======================================================================
+
+// External declarations for Go-exported functions (for backward compatibility)
 extern "C" {
     char* getDataChannelMessage();
     char* getMouseChannelMessage();
     void freeCString(char* p);
 }
 
-// C++ wrapper functions that return std::string and handle memory safely
+// DEPRECATED: Use WebRTCWrapper::getDataChannelMessageString() instead
 std::string getDataChannelMessageString() {
-    char* cMsg = getDataChannelMessage();
-    if (cMsg == nullptr) {
+    try {
+        return WebRTCWrapper::getDataChannelMessageString();
+    } catch (const std::exception& e) {
+        // Log error but don't throw from deprecated function
+        std::cerr << "[WebSocket] Error in deprecated getDataChannelMessageString: " << e.what() << std::endl;
         return std::string();
     }
-    std::string result(cMsg);
-    freeCString(cMsg); // Free the allocated memory using Go's freeCString
-    return result;
 }
 
+// DEPRECATED: Use WebRTCWrapper::getMouseChannelMessageString() instead
 std::string getMouseChannelMessageString() {
-    char* cMsg = getMouseChannelMessage();
-    if (cMsg == nullptr) {
+    try {
+        return WebRTCWrapper::getMouseChannelMessageString();
+    } catch (const std::exception& e) {
+        // Log error but don't throw from deprecated function
+        std::cerr << "[WebSocket] Error in deprecated getMouseChannelMessageString: " << e.what() << std::endl;
         return std::string();
     }
-    std::string result(cMsg);
-    freeCString(cMsg); // Free the allocated memory using Go's freeCString
-    return result;
 }
 
 // Helper functions to free the allocated memory (for backward compatibility)
@@ -432,6 +492,15 @@ extern "C" void freeMouseChannelMessage(char* msg) {
     if (msg != nullptr) {
         freeCString(msg);
     }
+}
+
+// Implementation of enqueue functions for blocking queues
+void enqueueKeyboardMessage(const std::string& message) {
+    KeyInputHandler::enqueueMessage(message);
+}
+
+void enqueueMouseMessage(const std::string& message) {
+    MouseInputHandler::enqueueMessage(message);
 }
 
 // Note: getDataChannelMessage and getMouseChannelMessage are implemented in Go (main.go)

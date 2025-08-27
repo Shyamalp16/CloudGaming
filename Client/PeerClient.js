@@ -46,11 +46,29 @@ function connectToSignalingServer(roomId) {
         case 'answer':
           await handleAnswer(msg);
           break;
+        case 'candidate': {
+          if (typeof msg.candidate === 'string') {
+            const ice = { candidate: msg.candidate, sdpMid: msg.sdpMid, sdpMLineIndex: msg.sdpMLineIndex };
+            await handleRemoteIceCandidate(ice);
+          } else if (msg.candidate === null) {
+            console.log("Received null ICE candidate (end of candidates).");
+          } else {
+            console.log("Received invalid ICE candidate structure.");
+          }
+          break;
+        }
         case 'ice-candidate':
           await handleRemoteIceCandidate(msg.candidate);
           break;
         case 'offer':
           console.warn('Unexpected Offer Received, This Client Will Always Be The Offerer.');
+          break;
+        case 'control':
+          if (msg.action === 'schema-error') {
+            console.warn('Server reported schema-error for last message. Check signaling payload.');
+          } else {
+            console.log('Control:', msg);
+          }
           break;
         default:
           console.warn('Unknown Message Type:', msg.type);
@@ -92,8 +110,10 @@ function createPeerConnection() {
     if (event.candidate) {
       console.log('Local ICE Candidate:', JSON.stringify(event.candidate, null, 2));
       ws.send(JSON.stringify({
-        type: 'ice-candidate',
-        candidate: event.candidate
+        type: 'candidate',
+        candidate: event.candidate.candidate,
+        sdpMid: event.candidate.sdpMid,
+        sdpMLineIndex: event.candidate.sdpMLineIndex,
       }));
     } else {
       console.log('ICE candidate gathering complete');

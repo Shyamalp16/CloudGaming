@@ -49,6 +49,8 @@ function createRedis(urlString) {
 // Need two clients: one for commands, one for subscriber mode
 const redisClient = createRedis(config.redisUrl);
 const subscriber = redisClient.duplicate();
+// Unique ID for this server instance for loop prevention on Redis fanout
+const serverInstanceId = (crypto.randomUUID && crypto.randomUUID()) || `srv:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
 const rateLimiter = RateLimiter(redisClient);
 let redisCircuitOpenUntil = 0;
 
@@ -109,7 +111,11 @@ function handleRedisMessage(message, channel) {
 			log('warn', 'Dropping non-JSON message from Redis', { channel, error: String(e && e.message || e) });
 			return;
 		}
-		const { senderId, data } = payload || {};
+		const { senderId, data, originServerId } = payload || {};
+		// Avoid re-fanout to local clients if this server originated the publish
+		if (originServerId && originServerId === serverInstanceId) {
+			return;
+		}
 		const clientsInRoom = localRooms.get(roomId);
 		if (!clientsInRoom || clientsInRoom.size === 0) return;
 		const dataStr = JSON.stringify(data);
@@ -167,7 +173,8 @@ async function handleNewConnection(ws, request) {
 			return;
 		}
 		if (config.allowedOrigins.length > 0) {
-			const allowed = origin && config.allowedOrigins.some((o) => origin.includes(o));
+			// Permit native clients (no Origin header) while enforcing for browsers
+			const allowed = (!origin) || config.allowedOrigins.some((o) => origin.includes(o));
 			if (!allowed) {
 				log('warn', 'Origin not allowed', { origin });
 				ws.close(1008, 'Origin not allowed');
@@ -384,7 +391,7 @@ async function handleMessage(ws, roomKey, message) {
 
 		try {
 			const ePub = startRedisTimer();
-			await redisClient.publish(roomKey, JSON.stringify({ senderId: ws.clientId, data: validation.data }));
+			await redisClient.publish(roomKey, JSON.stringify({ senderId: ws.clientId, data: validation.data, originServerId: serverInstanceId }));
 			ePub();
 			noteRedisSuccess();
 		} catch (e) {

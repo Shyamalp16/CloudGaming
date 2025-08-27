@@ -18,6 +18,12 @@ static inline void callRTCPCallback(RTCPCallback f, double p, double r, double j
 static inline void callPLICallback(OnPLICallback f) {
     if (f) { f(); }
 }
+
+// Provide no-op wake functions so cgo can resolve C.wakeKeyboardThread / C.wakeMouseThread
+// at Go DLL build time. The C++ host exports real versions; if you later want to
+// forward to them from inside this DLL, replace these with proper imports via LDFLAGS.
+static inline void wakeKeyboardThread(void) { }
+static inline void wakeMouseThread(void) { }
 */
 import "C"
 import (
@@ -179,6 +185,8 @@ func enqueueMessage(msg string) {
 		mouseEnqueueCount = 0
 		lastEnqueueLog = time.Now()
 	}
+	// Wake the keyboard thread after enqueueing
+	C.wakeKeyboardThread()
 }
 
 func enqueueMouseEvent(msg string) {
@@ -192,6 +200,8 @@ func enqueueMouseEvent(msg string) {
 		mouseEnqueueCount = 0
 		lastEnqueueLog = time.Now()
 	}
+	// Wake the mouse thread after enqueueing
+	C.wakeMouseThread()
 }
 
 //export getDataChannelMessage
@@ -211,6 +221,12 @@ func getDataChannelMessage() *C.char {
 	return C.CString(msg)
 }
 
+//export enqueueDataChannelMessage
+func enqueueDataChannelMessage(msg *C.char) {
+	goMsg := C.GoString(msg)
+	enqueueMessage(goMsg)
+}
+
 //export getMouseChannelMessage
 func getMouseChannelMessage() *C.char {
 	queueMutex.Lock()
@@ -226,6 +242,12 @@ func getMouseChannelMessage() *C.char {
 		len(mouseQueue),
 	)
 	return C.CString(msg)
+}
+
+//export enqueueMouseChannelMessage
+func enqueueMouseChannelMessage(msg *C.char) {
+	goMsg := C.GoString(msg)
+	enqueueMouseEvent(goMsg)
 }
 
 func newTrue() *bool {
