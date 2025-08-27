@@ -190,10 +190,11 @@ int main()
 
     session.StartCapture();
     // Configure encoder defaults from config
+    int cfgFps = 120;
     try {
         if (config.contains("host") && config["host"].contains("video")) {
             auto vcfg = config["host"]["video"];
-            int fps = vcfg.value("fps", 120);
+            cfgFps = vcfg.value("fps", 120);
             int brStart = vcfg.value("bitrateStart", 20000000);
             int brMin = vcfg.value("bitrateMin", 10000000);
             int brMax = vcfg.value("bitrateMax", 50000000);
@@ -203,7 +204,7 @@ int main()
                                                300,       // decrease cooldown
                                                3,         // clean samples required
                                                1000);     // increase interval
-            SetCaptureTargetFps(fps);
+            SetCaptureTargetFps(cfgFps);
             // Optional color range control (default full range true)
             bool fullRange = vcfg.value("fullRange", true);
             Encoder::SetFullRangeColor(fullRange);
@@ -266,6 +267,17 @@ int main()
                 long long interval = 0;
                 try { interval = ccfg["minUpdateInterval100ns"].get<long long>(); } catch (...) { interval = 0; }
                 SetMinUpdateInterval100ns(interval);
+            } else {
+                // Derive MinUpdateInterval from target FPS if not provided
+                if (cfgFps > 0) {
+                    long long interval = 10000000LL / cfgFps; // 100ns units
+                    SetMinUpdateInterval100ns(interval);
+                }
+            }
+            if (ccfg.contains("skipUnchanged")) {
+                bool skip = false;
+                try { skip = ccfg["skipUnchanged"].get<bool>(); } catch (...) { skip = false; }
+                SetSkipUnchanged(skip);
             }
         }
     } catch (...) {}

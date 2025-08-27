@@ -102,6 +102,9 @@ void SetMinUpdateInterval100ns(long long interval100ns) {
     if (interval100ns < 0) interval100ns = 0;
     g_minUpdateInterval100ns.store(interval100ns);
 }
+// Skip unchanged frames heuristic
+static std::atomic<bool> g_skipUnchanged{false};
+void SetSkipUnchanged(bool enable) { g_skipUnchanged.store(enable); }
 
 // (Removed) Texture copy pool (unused)
 // Allow temporary bursts before dropping oldest frames when encoder is not backlogged
@@ -139,7 +142,7 @@ winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(
     return texture;
 }
 
-static std::atomic<int> g_framePoolBuffers{3};
+static std::atomic<int> g_framePoolBuffers{6};
 void SetFramePoolBuffers(int bufferCount) {
     if (bufferCount < 1) bufferCount = 1;
     if (bufferCount > 16) bufferCount = 16;
@@ -249,6 +252,22 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                             lastLoggedH.store(cs.Height);
                         }
                     } catch (...) {}
+                    // Heuristic unchanged-frame skip: compare SystemRelativeTime delta and optionally derived size
+                    if (g_skipUnchanged.load()) {
+                        try {
+                            static int64_t lastSrtUs = 0;
+                            int64_t srtUs = timestamp; // already converted above
+                            if (lastSrtUs != 0) {
+                                // If extremely small delta (< 1000us), likely no new content; let consumer decide to drop aggressively
+                                if (srtUs - lastSrtUs <= 1000) {
+                                    // Skip enqueue and continue; rely on capture cadence
+                                    lastSrtUs = srtUs;
+                                    continue;
+                                }
+                            }
+                            lastSrtUs = srtUs;
+                        } catch (...) {}
+                    }
                     // Ultra-light: push surface + timestamp into SPSC ring (latest-frame-wins)
                     if (g_ringCapacity > 0) {
                         // Compute next head and detect full

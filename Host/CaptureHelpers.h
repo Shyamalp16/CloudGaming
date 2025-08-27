@@ -68,3 +68,6 @@ void SetMinUpdateInterval100ns(long long interval100ns);
 
 // Configure pacing burst size before dropping oldest frames when backlogged
 void SetPacingMaxBurstFrames(int frames);
+
+// Enable/disable skipping encode on unchanged frames (heuristic)
+void SetSkipUnchanged(bool enable);
