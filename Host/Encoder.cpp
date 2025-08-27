@@ -17,6 +17,7 @@
 #include <thread>
 #include <deque>
 #include <cstring>
+#include <list>
 
 // Removed unused software conversion components
 int Encoder::currentWidth = 0;
@@ -54,10 +55,55 @@ static Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> g_vpEnumerator;
 static Microsoft::WRL::ComPtr<ID3D11VideoProcessor> g_videoProcessor;
 static int g_vpWidth = 0;
 static int g_vpHeight = 0;
-// Cached views to avoid per-frame allocations
-static std::unordered_map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView>> g_inputViewCache;
-static std::unordered_map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView>> g_outputViewCache;
-static constexpr size_t kMaxViewCacheEntries = 512; // cap to avoid unbounded growth
+// LRU caches for D3D11 views to avoid per-frame allocations and prevent wholesale clears
+template<typename K, typename V>
+class LruCacheD3D {
+public:
+    explicit LruCacheD3D(size_t cap = 0) : capacity_(cap) {}
+    void setCapacity(size_t cap) {
+        capacity_ = cap;
+        evictIfNeeded();
+    }
+    void clear() {
+        items_.clear();
+        map_.clear();
+    }
+    bool get(const K& key, V& out) {
+        auto it = map_.find(key);
+        if (it == map_.end()) return false;
+        items_.splice(items_.begin(), items_, it->second);
+        out = it->second->second;
+        return true;
+    }
+    void put(const K& key, const V& val) {
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            it->second->second = val;
+            items_.splice(items_.begin(), items_, it->second);
+            return;
+        }
+        items_.emplace_front(key, val);
+        map_[key] = items_.begin();
+        evictIfNeeded();
+    }
+    size_t size() const { return map_.size(); }
+private:
+    void evictIfNeeded() {
+        if (capacity_ == 0) return;
+        while (map_.size() > capacity_) {
+            auto last = items_.end();
+            --last;
+            map_.erase(last->first);
+            items_.pop_back();
+        }
+    }
+    size_t capacity_;
+    std::list<std::pair<K, V>> items_;
+    std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator> map_;
+};
+
+static LruCacheD3D<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView>> g_inputViewLru(64);
+static LruCacheD3D<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView>> g_outputViewLru(8);
 // Optional GPU timestamp queries for VideoProcessorBlt
 static bool g_gpuTimingEnabled = false;
 static Microsoft::WRL::ComPtr<ID3D11Query> g_tsDisjoint;
@@ -291,27 +337,19 @@ namespace Encoder {
 
         // Create/reuse views
         Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
-        auto itIn = g_inputViewCache.find(bgraSrcTexture);
-        if (itIn != g_inputViewCache.end()) inView = itIn->second; else {
+        if (!g_inputViewLru.get(bgraSrcTexture, inView)) {
             D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc{};
             inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
             inDesc.Texture2D.MipSlice = 0; inDesc.Texture2D.ArraySlice = 0;
             if (FAILED(g_videoDevice->CreateVideoProcessorInputView(bgraSrcTexture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf()))) return false;
-            if (g_inputViewCache.size() >= kMaxViewCacheEntries) {
-                g_inputViewCache.clear();
-            }
-            g_inputViewCache[bgraSrcTexture] = inView;
+            g_inputViewLru.put(bgraSrcTexture, inView);
         }
         Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
-        auto itOut = g_outputViewCache.find(nv12);
-        if (itOut != g_outputViewCache.end()) outView = itOut->second; else {
+        if (!g_outputViewLru.get(nv12, outView)) {
             D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
             outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D; outDesc.Texture2D.MipSlice = 0;
             if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(nv12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) return false;
-            if (g_outputViewCache.size() >= kMaxViewCacheEntries) {
-                g_outputViewCache.clear();
-            }
-            g_outputViewCache[nv12] = outView;
+            g_outputViewLru.put(nv12, outView);
         }
         D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
 
@@ -583,8 +621,8 @@ namespace Encoder {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
 
         // Clear caches when (re)initializing encoder
-        g_inputViewCache.clear();
-        g_outputViewCache.clear();
+        g_inputViewLru.clear();
+        g_outputViewLru.clear();
         // Free any existing hardware frame ring
         for (AVFrame* f : g_hwFrames) { if (f) av_frame_free(&f); }
         g_hwFrames.clear();
@@ -823,6 +861,9 @@ namespace Encoder {
 
         // CPU swscale path not used in GPU mode
 
+        // Size output view LRU to number of hw frames (NV12 surfaces)
+        g_outputViewLru.setCapacity(std::max<size_t>(8, g_hwFrames.size()));
+
         std::wcout << L"[Encoder] " << std::wstring(encoderName.begin(), encoderName.end()) << " encoder initialized successfully." << std::endl;
         // Ensure sender thread is running after encoder is ready
         StartSenderThreadIfNeeded();
@@ -896,10 +937,7 @@ namespace Encoder {
         // GPU VideoProcessor BGRA->NV12
         // Cached input view for the source texture
         Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
-        auto itIn = g_inputViewCache.find(texture);
-        if (itIn != g_inputViewCache.end()) {
-            inView = itIn->second;
-        } else {
+        if (!g_inputViewLru.get(texture, inView)) {
             // Validate format support for input
             D3D11_TEXTURE2D_DESC inTexDesc{};
             texture->GetDesc(&inTexDesc);
@@ -920,7 +958,7 @@ namespace Encoder {
                            << L" W=" << inTexDesc.Width << L" H=" << inTexDesc.Height << L" Format=" << inTexDesc.Format << std::endl;
                 return;
             }
-            g_inputViewCache[texture] = inView;
+            g_inputViewLru.put(texture, inView);
         }
 
         // Cached output view for FFmpeg's NV12 texture from ring
@@ -928,10 +966,7 @@ namespace Encoder {
         g_hwFrameIndex = (g_hwFrameIndex + 1) % static_cast<int>(g_hwFrames.size());
         ID3D11Texture2D* ffmpegNV12 = (ID3D11Texture2D*)hwFrameLocal->data[0];
         Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
-        auto itOut = g_outputViewCache.find(ffmpegNV12);
-        if (itOut != g_outputViewCache.end()) {
-            outView = itOut->second;
-        } else {
+        if (!g_outputViewLru.get(ffmpegNV12, outView)) {
             // Validate output format support (NV12)
             D3D11_TEXTURE2D_DESC outTexDesc{};
             ffmpegNV12->GetDesc(&outTexDesc);
@@ -951,7 +986,7 @@ namespace Encoder {
                            << L" W=" << outTexDesc.Width << L" H=" << outTexDesc.Height << L" Format=" << outTexDesc.Format << std::endl;
                 return;
             }
-            g_outputViewCache[ffmpegNV12] = outView;
+            g_outputViewLru.put(ffmpegNV12, outView);
         }
         D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
         if (FAILED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream))) {

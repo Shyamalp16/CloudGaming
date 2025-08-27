@@ -87,6 +87,26 @@ var (
 	sendCount   int
 )
 
+// Reusable buffer pool for media samples to reduce per-frame allocations
+var sampleBufPool sync.Pool
+
+func getSampleBuf(n int) []byte {
+	v := sampleBufPool.Get()
+	if v == nil {
+		return make([]byte, n)
+	}
+	b := v.([]byte)
+	if cap(b) < n {
+		b = make([]byte, n)
+	}
+	return b[:n]
+}
+
+func putSampleBuf(b []byte) {
+	// Return full capacity slice to pool for reuse
+	sampleBufPool.Put(b[:cap(b)])
+}
+
 func init() {
 	rand.Seed(time.Now().UnixNano())
 }
@@ -103,7 +123,10 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		return 0
 	}
 
-	payload := C.GoBytes(data, size)
+	// Reuse buffer from pool to avoid per-call allocation
+	n := int(size)
+	payload := getSampleBuf(n)
+	C.memcpy(unsafe.Pointer(&payload[0]), data, C.size_t(n))
 
 	// Opus uses 48kHz clock; derive timestamp from pts (us)
 	ptsSeconds := float64(pts) / 1_000_000.0
@@ -125,6 +148,8 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	if err := audioTrack.WriteRTP(pkt); err != nil {
 		return -1
 	}
+	// Return buffer to pool after write
+	putSampleBuf(payload)
 	return 0
 }
 
@@ -140,12 +165,17 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 		return 0
 	}
 
-	buf := C.GoBytes(data, size)
+	// Reuse buffer from pool to avoid per-call allocation
+	n := int(size)
+	buf := getSampleBuf(n)
+	C.memcpy(unsafe.Pointer(&buf[0]), data, C.size_t(n))
 	dur := time.Duration(int64(durationUs)) * time.Microsecond
 
 	if err := videoTrack.WriteSample(media.Sample{Data: buf, Duration: dur}); err != nil {
 		return -1
 	}
+	// Return buffer to pool after write
+	putSampleBuf(buf)
 
 	// Debug: log send rate once per second (use globals to persist across calls)
 	sendCount++
@@ -740,7 +770,7 @@ func createPeerConnectionGo() C.int {
 										hostReceiveTime := time.Now().UnixNano()
 										rttNano := hostReceiveTime - hostSendTime
 										rttMilli := float64(rttNano) / float64(time.Millisecond)
-										log.Printf("[Go/Pion] [PONG] RTT for frame %d: %.2f ms", frameID, rttMilli)
+										// log.Printf("[Go/Pion] [PONG] RTT for frame %d: %.2f ms", frameID, rttMilli)
 										lastRttMutex.Lock()
 										lastRttMs = rttMilli
 										lastRttMutex.Unlock()
@@ -1079,11 +1109,16 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		return 0
 	}
 
-	buf := C.GoBytes(data, size)
+	// Reuse buffer from pool to avoid per-call allocation
+	n := int(size)
+	buf := getSampleBuf(n)
+	C.memcpy(unsafe.Pointer(&buf[0]), data, C.size_t(n))
 	// For testing pacing effects: write with zero duration (no pacing)
 	if err := videoTrack.WriteSample(media.Sample{Data: buf, Duration: 0}); err != nil {
 		return -1
 	}
+	// Return buffer to pool after write
+	putSampleBuf(buf)
 
 	// Debug: log send rate once per second (shared counters)
 	sendCount++
@@ -1206,7 +1241,9 @@ func getPeerConnectionState() C.int {
 	}
 
 	state := connectionState
-	log.Printf("[Go/Pion] PeerConnection state: %s\n", state.String())
+	if state != webrtc.PeerConnectionStateConnected {
+		log.Printf("[Go/Pion] PeerConnection state: %s\n", state.String())
+	}
 
 	switch state {
 	case webrtc.PeerConnectionStateNew:
