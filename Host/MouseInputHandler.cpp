@@ -3,7 +3,6 @@
 #include "pion_webrtc.h"
 #include <Windows.h>
 #include <atomic>
-#include <algorithm>
 #include <cstdlib>
 
 using json = nlohmann::json;
@@ -40,8 +39,8 @@ namespace MouseInputHandler {
 		int originalY = y;
 
 		// Clamp coordinates to virtual desktop bounds
-		x = max(virtualScreenX, min(x, virtualScreenX + virtualScreenWidth - 1));
-		y = max(virtualScreenY, min(y, virtualScreenY + virtualScreenHeight - 1));
+		x = (x < virtualScreenX) ? virtualScreenX : ((x > virtualScreenX + virtualScreenWidth - 1) ? virtualScreenX + virtualScreenWidth - 1 : x);
+		y = (y < virtualScreenY) ? virtualScreenY : ((y > virtualScreenY + virtualScreenHeight - 1) ? virtualScreenY + virtualScreenHeight - 1 : y);
 
 		// Detect if clamping occurred
 		wasClamped = (x != originalX) || (y != originalY);
@@ -184,9 +183,27 @@ namespace MouseInputHandler {
 
 	void mouseMessagePollingLoop() {
 		std::cout << "[MouseInputHandler] Starting mouse message polling loop..." << std::endl;
+
+		// Exponential backoff for polling efficiency
+		// Reduced MAX_SLEEP_MS for more responsive shutdown
+		const int MIN_SLEEP_MS = 1;
+		const int MAX_SLEEP_MS = 50;
+		const int BACKOFF_MULTIPLIER = 2;
+		int currentSleepMs = MIN_SLEEP_MS;
+		int consecutiveEmptyPolls = 0;
+
 		while (isRunning.load() && !ShutdownManager::IsShutdown()) {
+			// Check shutdown condition frequently for responsive shutdown
+			if (!isRunning.load() || ShutdownManager::IsShutdown()) {
+				break;
+			}
+
 			std::string message = getMouseChannelMessageString();
 			if (!message.empty()) {
+				// Reset backoff on successful message reception
+				currentSleepMs = MIN_SLEEP_MS;
+				consecutiveEmptyPolls = 0;
+
 				try {
 					std::cout << "[MouseInputHandler] Received raw mouse message: " << message << std::endl;
 					json j = json::parse(message);
@@ -286,7 +303,31 @@ namespace MouseInputHandler {
 				}
 			}
 			else {
-				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				// Exponential backoff when no messages are available
+				consecutiveEmptyPolls++;
+
+				// Log backoff only occasionally to avoid spam
+				if (consecutiveEmptyPolls % 100 == 0 && currentSleepMs > MIN_SLEEP_MS) {
+					std::cout << "[MouseInputHandler] Polling backoff: " << consecutiveEmptyPolls
+							  << " empty polls, sleeping " << currentSleepMs << "ms" << std::endl;
+				}
+
+				std::this_thread::sleep_for(std::chrono::milliseconds(currentSleepMs));
+
+				// Increase sleep time exponentially, but cap at maximum
+				if (currentSleepMs < MAX_SLEEP_MS) {
+					int oldSleepMs = currentSleepMs;
+					int newSleepMs = currentSleepMs * BACKOFF_MULTIPLIER;
+					if (newSleepMs > MAX_SLEEP_MS) {
+						newSleepMs = MAX_SLEEP_MS;
+					}
+					currentSleepMs = newSleepMs;
+
+					// Yield to make shutdown more responsive when sleep time increases significantly
+					if (currentSleepMs >= 10 && currentSleepMs != oldSleepMs) {
+						std::this_thread::yield();
+					}
+				}
 			}
 		}
 		std::cout << "[MouseInputHandler] Exiting mouse message polling loop." << std::endl;

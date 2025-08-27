@@ -292,10 +292,28 @@ namespace KeyInputHandler {
 
 	void messagePollingLoop() {
 		std::cout << "[KeyInputHandler] Starting message polling loop..." << std::endl;
+
+		// Exponential backoff for polling efficiency
+		// Reduced MAX_SLEEP_MS for more responsive shutdown
+		const int MIN_SLEEP_MS = 1;
+		const int MAX_SLEEP_MS = 50;
+		const int BACKOFF_MULTIPLIER = 2;
+		int currentSleepMs = MIN_SLEEP_MS;
+		int consecutiveEmptyPolls = 0;
+
 		while (isRunning.load() && !ShutdownManager::IsShutdown()) {
+			// Check shutdown condition frequently for responsive shutdown
+			if (!isRunning.load() || ShutdownManager::IsShutdown()) {
+				break;
+			}
+
 			std::string message = getDataChannelMessageString();
 
 			if (!message.empty()) {
+				// Reset backoff on successful message reception
+				currentSleepMs = MIN_SLEEP_MS;
+				consecutiveEmptyPolls = 0;
+
 				try {
 					std::cout << "[KeyInputHandler] Received message string: " << message << std::endl;
 
@@ -356,7 +374,31 @@ namespace KeyInputHandler {
 				}
 			}
 			else {
-				std::this_thread::sleep_for(std::chrono::milliseconds(1)); 
+				// Exponential backoff when no messages are available
+				consecutiveEmptyPolls++;
+
+				// Log backoff only occasionally to avoid spam
+				if (consecutiveEmptyPolls % 100 == 0 && currentSleepMs > MIN_SLEEP_MS) {
+					std::cout << "[KeyInputHandler] Polling backoff: " << consecutiveEmptyPolls
+							  << " empty polls, sleeping " << currentSleepMs << "ms" << std::endl;
+				}
+
+				std::this_thread::sleep_for(std::chrono::milliseconds(currentSleepMs));
+
+				// Increase sleep time exponentially, but cap at maximum
+				if (currentSleepMs < MAX_SLEEP_MS) {
+					int oldSleepMs = currentSleepMs;
+					int newSleepMs = currentSleepMs * BACKOFF_MULTIPLIER;
+					if (newSleepMs > MAX_SLEEP_MS) {
+						newSleepMs = MAX_SLEEP_MS;
+					}
+					currentSleepMs = newSleepMs;
+
+					// Yield to make shutdown more responsive when sleep time increases significantly
+					if (currentSleepMs >= 10 && currentSleepMs != oldSleepMs) {
+						std::this_thread::yield();
+					}
+				}
 			}
 		}
 		std::cout << "[KeyInputHandler] Exiting message polling loop." << std::endl;
