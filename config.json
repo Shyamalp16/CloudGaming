@@ -36,7 +36,7 @@
       "mmcss": { "enable": true, "priority": 2 },
       "cursor": false,
       "borderRequired": false,
-      "minUpdateInterval100ns": 0
+      "minUpdateInterval100ns": 8333
     }
   }
 }

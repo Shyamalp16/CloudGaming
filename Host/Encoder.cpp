@@ -12,6 +12,8 @@
 #include <d3d11.h>
 #include <wrl.h>
 #include <unordered_map>
+#include <thread>
+#include <deque>
 
 // Removed unused software conversion components
 int Encoder::currentWidth = 0;
@@ -92,6 +94,88 @@ static int g_nvBf = 0;
 static int g_nvRcLookahead = 0;
 static int g_nvAsyncDepth = 2;
 static int g_nvSurfaces = 8;
+
+// Encoded sample sender queue to avoid holding encoder mutex during FFI send
+struct QueuedSample {
+    std::vector<uint8_t> data;
+    int64_t durationUs;
+};
+static std::mutex g_sendMutex;
+static std::condition_variable g_sendCV;
+static std::deque<QueuedSample> g_sendQueue;
+static std::atomic<bool> g_senderRunning{false};
+static std::thread g_senderThread;
+
+static void SenderLoop() {
+    // Simple 1Hz logging
+    int sentCount = 0;
+    auto lastLog = std::chrono::steady_clock::now();
+    while (g_senderRunning.load()) {
+        QueuedSample sample;
+        {
+            std::unique_lock<std::mutex> lk(g_sendMutex);
+            g_sendCV.wait(lk, []{ return !g_sendQueue.empty() || !g_senderRunning.load(); });
+            if (!g_senderRunning.load() && g_sendQueue.empty()) break;
+            if (g_sendQueue.empty()) continue;
+            sample = std::move(g_sendQueue.front());
+            g_sendQueue.pop_front();
+        }
+        if (!sample.data.empty()) {
+            int result = sendVideoSample(sample.data.data(), static_cast<int>(sample.data.size()), sample.durationUs);
+            (void)result; // errors are logged inside sendVideoSample caller historically
+            sentCount++;
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - lastLog).count() >= 1) {
+            // Keep stdout fairly quiet; rely on existing logs elsewhere
+            sentCount = 0;
+            lastLog = now;
+        }
+    }
+}
+
+static void StartSenderThreadIfNeeded() {
+    bool expected = false;
+    if (g_senderRunning.compare_exchange_strong(expected, true)) {
+        g_senderThread = std::thread(SenderLoop);
+    }
+}
+
+static void StopSenderThread() {
+    bool expected = true;
+    if (g_senderRunning.compare_exchange_strong(expected, false)) {
+        {
+            std::lock_guard<std::mutex> lk(g_sendMutex);
+        }
+        g_sendCV.notify_all();
+        if (g_senderThread.joinable()) g_senderThread.join();
+        // Drain any remaining queued samples
+        {
+            std::lock_guard<std::mutex> lk(g_sendMutex);
+            g_sendQueue.clear();
+        }
+    }
+}
+
+static inline int64_t ComputeFrameDurationUsLocked() {
+    int fpsNum = Encoder::codecCtx ? Encoder::codecCtx->framerate.num : 60;
+    int fpsDen = Encoder::codecCtx ? Encoder::codecCtx->framerate.den : 1;
+    int fixedUs = g_pacingFixedUs.load();
+    int cfgFps = g_pacingFps.load();
+    if (fixedUs > 0) return fixedUs;
+    if (cfgFps > 0) return static_cast<int64_t>(1000000.0 / static_cast<double>(cfgFps));
+    if (fpsNum > 0) return static_cast<int64_t>((1000000.0 * (fpsDen > 0 ? fpsDen : 1)) / static_cast<double>(fpsNum));
+    return 8333; // ~120fps fallback
+}
+
+static inline void EnqueueEncodedSample(std::vector<uint8_t>&& bytes, int64_t durationUs) {
+    if (bytes.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(g_sendMutex);
+        g_sendQueue.push_back(QueuedSample{ std::move(bytes), durationUs });
+    }
+    g_sendCV.notify_one();
+}
 
 static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height)
 {
@@ -357,39 +441,13 @@ namespace Encoder {
     }
 
     void pushPacketToWebRTC(AVPacket* packet) {
-        //std::wcout << L"[WebRTC] Pushing encoded packets (PTS: " << packet->pts << L") to WebRTC module.\n";
-        // Directly send to WebRTC without extra copy/queue. Compute duration from codec framerate
-        static bool loggedFps = false;
-        int fpsNum = codecCtx ? codecCtx->framerate.num : 60;
-        int fpsDen = codecCtx ? codecCtx->framerate.den : 1;
-        double fpsVal = (fpsDen != 0) ? static_cast<double>(fpsNum) / static_cast<double>(fpsDen) : 60.0;
-        if (!loggedFps) {
-            std::wcout << L"[Encoder] framerate num/den: " << fpsNum << L"/" << fpsDen << L" (~" << fpsVal << L" fps)\n";
-            loggedFps = true;
-        }
-        // Prefer fixed pacing to avoid drift: fixed microseconds or fixed FPS
-        int fixedUs = g_pacingFixedUs.load();
-        int cfgFps = g_pacingFps.load();
-        int64_t frameDurationUs = 0;
-        if (fixedUs > 0) {
-            frameDurationUs = fixedUs;
-        } else if (cfgFps > 0) {
-            frameDurationUs = static_cast<int64_t>(1000000.0 / static_cast<double>(cfgFps));
-        } else {
-            // fallback to encoder framerate if no explicit pacing
-            frameDurationUs = (fpsNum > 0) ? static_cast<int64_t>((1000000.0 * (fpsDen > 0 ? fpsDen : 1)) / static_cast<double>(fpsNum)) : 8333;
-        }
-        if (frameDurationUs <= 0) frameDurationUs = 8333; // ~120fps fallback
-        // Optional debug
-        static auto lastDurLog = std::chrono::steady_clock::now();
-        auto nowDur = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::seconds>(nowDur - lastDurLog).count() >= 5) {
-            std::wcout << L"[Encoder] pacing durationUs=" << frameDurationUs << std::endl;
-            lastDurLog = nowDur;
-        }
-        int result = sendVideoSample(packet->data, packet->size, frameDurationUs);
-        if (result != 0) {
-            std::wcerr << L"[WebRTC] Failed to send video packet to WebRTC module. Error code: " << result << L"\n";
+        // Compute pacing once and enqueue a copy to sender queue
+        int64_t frameDurationUs = ComputeFrameDurationUsLocked();
+        if (frameDurationUs <= 0) frameDurationUs = 8333;
+        std::vector<uint8_t> bytes;
+        if (packet && packet->data && packet->size > 0) {
+            bytes.assign(packet->data, packet->data + packet->size);
+            EnqueueEncodedSample(std::move(bytes), frameDurationUs);
         }
     }
 
@@ -638,6 +696,8 @@ namespace Encoder {
         // CPU swscale path not used in GPU mode
 
         std::wcout << L"[Encoder] " << std::wstring(encoderName.begin(), encoderName.end()) << " encoder initialized successfully." << std::endl;
+        // Ensure sender thread is running after encoder is ready
+        StartSenderThreadIfNeeded();
     }
 
     void EncodeFrame(ID3D11Texture2D* texture, ID3D11DeviceContext* context, int width, int height, int64_t pts) {
@@ -876,6 +936,8 @@ namespace Encoder {
             av_buffer_unref(&hwDeviceCtx);
             hwDeviceCtx = nullptr;
         }
+        // Stop sender thread after encoder teardown
+        StopSenderThread();
         std::wcout << L"[Encoder] Encoder finalized.\n";
     }
 

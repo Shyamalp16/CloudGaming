@@ -39,7 +39,6 @@ std::atomic<bool> isCapturing{ false };
 struct FrameData {
     int sequenceNumber;
     winrt::com_ptr<ID3D11Texture2D> texture; // private copy for lifetime safety
-    int poolIndex = -1; // index in texture pool; -1 if not pooled
     int64_t timestamp;
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface{ nullptr }; // deferred copy source
 };
@@ -50,16 +49,21 @@ struct FrameComparator {
     };
 };
 
-// Two-stage queues: surfaces from WGC callback -> copy worker -> encode queue
-static std::priority_queue<FrameData, std::vector<FrameData>, FrameComparator> g_surfaceQueue;
+// Single-producer single-consumer ring buffer: capture callback -> encoder thread
 static size_t g_maxQueuedFrames = kMaxQueuedFramesDefault;
-std::atomic<int> frameSequenceCounter{ 0 }; 
-static std::mutex g_surfaceMutex;
-static std::condition_variable g_surfaceCV;
-// Submit queue and sync for single submitter thread
-static std::mutex g_submitMutex;
-static std::condition_variable g_submitCV;
-static std::queue<FrameData> g_submitQueue;
+std::atomic<int> frameSequenceCounter{ 0 };
+
+// Ring storage and indices
+static std::vector<FrameData> g_ring;
+static std::atomic<size_t> g_ringHead{ 0 }; // next write position (producer moves)
+static std::atomic<size_t> g_ringTail{ 0 }; // next read position (consumer moves)
+static size_t g_ringCapacity = 0;           // equals g_maxQueuedFrames (number of slots)
+static std::mutex g_ringMutex;              // only for consumer wait
+static std::condition_variable g_ringCV;    // wake consumer when producer pushes
+
+// Metrics
+static std::atomic<uint64_t> g_overwriteDrops{ 0 }; // times we overwrote oldest due to full ring
+static std::atomic<uint64_t> g_backpressureSkips{ 0 }; // frames skipped by consumer due to encoder backpressure
 
 static std::atomic<int> g_targetFps{kDefaultTargetFps};
 void SetCaptureTargetFps(int fps) { if (fps > 0) g_targetFps.store(fps); }
@@ -99,13 +103,7 @@ void SetMinUpdateInterval100ns(long long interval100ns) {
     g_minUpdateInterval100ns.store(interval100ns);
 }
 
-// Texture pool for copy surfaces (per resolution)
-static std::vector<winrt::com_ptr<ID3D11Texture2D>> g_copyPool;
-static std::vector<bool> g_poolInUse;
-static std::mutex g_poolMutex;
-static int g_poolNextIndex = 0;
-static int g_poolW = 0, g_poolH = 0;
-static int g_poolSize = 0;
+// (Removed) Texture copy pool (unused)
 // Allow temporary bursts before dropping oldest frames when encoder is not backlogged
 static std::atomic<int> g_pacingMaxBurstFrames{kPacingMaxBurstFramesDefault};
 void SetPacingMaxBurstFrames(int frames) {
@@ -122,64 +120,13 @@ static DXGI_FORMAT CoerceFormatForVideoProcessor(DXGI_FORMAT fmt) {
     }
 }
 
-static void RecreateCopyPool(ID3D11Device* device, int width, int height, DXGI_FORMAT format) {
-    std::lock_guard<std::mutex> lock(g_poolMutex);
-    g_poolW = width & ~1; g_poolH = height & ~1;
-    g_poolSize = static_cast<int>(std::max<size_t>(g_maxQueuedFrames, 12));
-    g_copyPool.clear();
-    g_poolInUse.clear();
-    g_copyPool.resize(g_poolSize);
-    g_poolInUse.resize(g_poolSize);
-    g_poolNextIndex = 0;
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = static_cast<UINT>(g_poolW);
-    desc.Height = static_cast<UINT>(g_poolH);
-    desc.MipLevels = 1;
-    desc.ArraySize = 1;
-    desc.Format = CoerceFormatForVideoProcessor(format);
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-    desc.CPUAccessFlags = 0;
-    desc.MiscFlags = 0;
-    for (int i = 0; i < g_poolSize; ++i) {
-        g_poolInUse[i] = false;
-        HRESULT hr = device->CreateTexture2D(&desc, nullptr, g_copyPool[i].put());
-        if (FAILED(hr)) {
-            g_copyPool[i] = nullptr;
-            std::wcerr << L"[WGC] CreateTexture2D failed for pool slot " << i << L" hr=0x" << std::hex << hr << std::dec << std::endl;
-        }
-    }
-    std::wcout << L"[WGC] Created texture pool with " << g_poolSize << L" slots for " << g_poolW << L"x" << g_poolH << std::endl;
-}
+// (Removed) RecreateCopyPool (unused)
 
-static int AcquirePoolSlot() {
-    std::lock_guard<std::mutex> lock(g_poolMutex);
-    if (g_copyPool.empty()) return -1;
-    int start = g_poolNextIndex;
-    for (int i = 0; i < g_poolSize; ++i) {
-        int idx = (start + i) % g_poolSize;
-        if (!g_poolInUse[idx]) {
-            g_poolInUse[idx] = true;
-            g_poolNextIndex = (idx + 1) % g_poolSize;
-            return idx;
-        }
-    }
-    return -1; // all busy
-}
+// (Removed) AcquirePoolSlot (unused)
 
-static void ReleasePoolSlot(int idx) {
-    if (idx < 0) return;
-    std::lock_guard<std::mutex> lock(g_poolMutex);
-    g_poolInUse[static_cast<size_t>(idx)] = false;
-}
+// (Removed) ReleasePoolSlot (unused)
 
-void SetCopyPoolSize(int poolSize) {
-    if (poolSize < 2) poolSize = 2;
-    if (poolSize > 16) poolSize = 16;
-    std::lock_guard<std::mutex> lock(g_poolMutex);
-    g_poolSize = poolSize;
-}
+// (Removed) SetCopyPoolSize (unused)
 
 winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface)
@@ -302,20 +249,26 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                             lastLoggedH.store(cs.Height);
                         }
                     } catch (...) {}
-                    // Ultra-light: defer copy to worker thread; push surface + timestamp
-                    {
-                        std::lock_guard<std::mutex> lock(g_surfaceMutex);
-                        if (g_surfaceQueue.size() >= g_maxQueuedFrames) {
-                            g_surfaceQueue.pop();
+                    // Ultra-light: push surface + timestamp into SPSC ring (latest-frame-wins)
+                    if (g_ringCapacity > 0) {
+                        // Compute next head and detect full
+                        size_t head = g_ringHead.load(std::memory_order_relaxed);
+                        size_t nextHead = (head + 1) % g_ringCapacity;
+                        size_t tail = g_ringTail.load(std::memory_order_acquire);
+                        if (nextHead == tail) {
+                            // Full: drop oldest (advance tail) to keep latest
+                            g_ringTail.store((tail + 1) % g_ringCapacity, std::memory_order_release);
+                            g_overwriteDrops.fetch_add(1, std::memory_order_relaxed);
                         }
-                        FrameData fd{};
-                        fd.sequenceNumber = sequenceNumber;
-                        fd.timestamp = timestamp;
-                        fd.surface = surface; // keep alive for worker copy
-                        g_surfaceQueue.push(fd);
+                        g_ring[head].sequenceNumber = sequenceNumber;
+                        g_ring[head].texture = nullptr;
+                        g_ring[head].timestamp = timestamp;
+                        g_ring[head].surface = surface;
+                        g_ringHead.store(nextHead, std::memory_order_release);
+                        // Notify consumer
+                        g_ringCV.notify_one();
                     }
                 }
-                g_surfaceCV.notify_one();
             }
             catch (const std::exception& e) {
                 std::wcerr << L"[FrameArrived] Exception: " << e.what() << L"\n";
@@ -324,91 +277,12 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
     return framePool.FrameArrived(handler);
 }
 
-void ProcessFrames() {
-    auto device = GetD3DDevice();
-    winrt::com_ptr<ID3D11DeviceContext> context;
-    device->GetImmediateContext(context.put());
-
-    // Raise thread priority and optionally register with MMCSS (Games profile)
-    HANDLE hThread = GetCurrentThread();
-    SetThreadPriority(hThread, THREAD_PRIORITY_HIGHEST);
-    HMODULE hAvrt = nullptr; HANDLE hTask = nullptr; DWORD taskIndex = 0;
-    if (g_enableMmcss.load()) {
-        hAvrt = LoadLibraryW(L"Avrt.dll");
-        if (hAvrt) {
-            using PFN_AvSetMmThreadCharacteristicsW = HANDLE (WINAPI *)(LPCWSTR, LPDWORD);
-            using PFN_AvSetMmThreadPriority = BOOL (WINAPI *)(HANDLE, int);
-            auto pSetChars = reinterpret_cast<PFN_AvSetMmThreadCharacteristicsW>(GetProcAddress(hAvrt, "AvSetMmThreadCharacteristicsW"));
-            auto pSetPrio  = reinterpret_cast<PFN_AvSetMmThreadPriority>(GetProcAddress(hAvrt, "AvSetMmThreadPriority"));
-            if (pSetChars) {
-                hTask = pSetChars(L"Games", &taskIndex);
-                if (hTask && pSetPrio) {
-                    int prio = std::clamp(g_mmcssPriority.load(), 0, 3); // 0..3
-                    pSetPrio(hTask, prio);
-                }
-            }
-        }
-    }
-
-    // Initialize encoder on first real frame with actual capture size
-    static int lastInitW = 0;
-    static int lastInitH = 0;
-
-    while (true) {
-        FrameData frameData;
-
-        {
-            std::unique_lock<std::mutex> lock(g_surfaceMutex);
-            // Wait for frames or shutdown
-            g_surfaceCV.wait(lock, [&]() { return !g_surfaceQueue.empty() || !isCapturing.load(); });
-            if (!isCapturing.load() && g_surfaceQueue.empty()) break;
-
-            // Hard pacing disabled: drop older frames and process newest immediately
-            // Drop policy: allow bursts up to g_pacingMaxBurstFrames when not backlogged
-            {
-                bool backlogged = Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load());
-                size_t maxDepth = backlogged ? 1 : static_cast<size_t>(g_pacingMaxBurstFrames.load());
-                while (g_surfaceQueue.size() > maxDepth) {
-                    auto drop = g_surfaceQueue.top();
-                    g_surfaceQueue.pop();
-                    if (drop.poolIndex >= 0) {
-                        ReleasePoolSlot(drop.poolIndex);
-                    }
-                }
-            }
-            while (g_surfaceQueue.size() > 1) {
-                auto drop = g_surfaceQueue.top();
-                g_surfaceQueue.pop();
-                if (drop.poolIndex >= 0) {
-                    ReleasePoolSlot(drop.poolIndex);
-                }
-            }
-            if (!g_surfaceQueue.empty()) {
-                frameData = g_surfaceQueue.top();
-                g_surfaceQueue.pop();
-            }
-        }
-
-        if (frameData.sequenceNumber == -1) break;
-
-        if (frameData.texture || frameData.surface) {
-            // Push to submit queue; VPBlt and encoder submission are done on submitter thread
-            {
-                std::lock_guard<std::mutex> ql(g_submitMutex);
-                g_submitQueue.push(frameData);
-            }
-            g_submitCV.notify_one();
-        }
-    }
-
-    // Revert MMCSS and free library before exit
-    if (hAvrt && hTask) {
-        auto pRevert = reinterpret_cast<BOOL (WINAPI *)(HANDLE)>(GetProcAddress(hAvrt, "AvRevertMmThreadCharacteristics"));
-        if (pRevert) { pRevert(hTask); }
-    }
-    if (hAvrt) {
-        FreeLibrary(hAvrt);
-    }
+// Helper: ring size (approximate, safe for SPSC)
+static inline size_t RingSize() {
+    size_t head = g_ringHead.load(std::memory_order_acquire);
+    size_t tail = g_ringTail.load(std::memory_order_acquire);
+    if (head >= tail) return head - tail;
+    return g_ringCapacity - (tail - head);
 }
 
 void StartCapture() {
@@ -420,11 +294,18 @@ void StartCapture() {
     isCapturing.store(true);
     frameSequenceCounter.store(0);
 
-    // Launch multiple processing threads and a submitter thread
-    int numWorkers = 3;
-    for (int i = 0; i < numWorkers; ++i) {
-        workerThreads.emplace_back(ProcessFrames);
+    // Initialize ring buffer storage
+    {
+        std::lock_guard<std::mutex> lock(g_ringMutex);
+        g_ringCapacity = std::max<size_t>(g_maxQueuedFrames, 2);
+        g_ring.assign(g_ringCapacity, FrameData{});
+        g_ringHead.store(0, std::memory_order_relaxed);
+        g_ringTail.store(0, std::memory_order_relaxed);
+        g_overwriteDrops.store(0, std::memory_order_relaxed);
+        g_backpressureSkips.store(0, std::memory_order_relaxed);
     }
+
+    // Single encode/transmit consumer thread
     workerThreads.emplace_back([](){
         auto device = GetD3DDevice();
         winrt::com_ptr<ID3D11DeviceContext> context;
@@ -434,16 +315,43 @@ void StartCapture() {
         static int lastInitH = 0;
         static auto lastLog = std::chrono::steady_clock::now();
         static int submitCount = 0;
+        static uint64_t lastOverwriteDrops = 0;
+        static uint64_t lastBpSkips = 0;
 
         while (isCapturing.load()) {
             FrameData job{};
+            // Wait for available frame or shutdown
             {
-                std::unique_lock<std::mutex> lock(g_submitMutex);
-                g_submitCV.wait(lock, [] { return !g_submitQueue.empty() || !isCapturing.load(); });
-                if (!isCapturing.load() && g_submitQueue.empty()) break;
-                if (g_submitQueue.empty()) continue;
-                job = g_submitQueue.front();
-                g_submitQueue.pop();
+                std::unique_lock<std::mutex> lk(g_ringMutex);
+                g_ringCV.wait(lk, []{ return (RingSize() > 0) || !isCapturing.load(); });
+                if (!isCapturing.load() && RingSize() == 0) break;
+            }
+
+            // If encoder is backlogged, skip to latest frame (drop all but last)
+            {
+                bool backlogged = Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load());
+                if (backlogged) {
+                    size_t head = g_ringHead.load(std::memory_order_acquire);
+                    size_t tail = g_ringTail.load(std::memory_order_acquire);
+                    size_t sz = (head >= tail) ? (head - tail) : (g_ringCapacity - (tail - head));
+                    if (sz > 1) {
+                        // keep only the newest element
+                        size_t newTail = (head + g_ringCapacity - 1) % g_ringCapacity;
+                        // Count how many we skipped
+                        size_t skipped = (sz - 1);
+                        g_ringTail.store(newTail, std::memory_order_release);
+                        g_backpressureSkips.fetch_add(skipped, std::memory_order_relaxed);
+                    }
+                }
+            }
+
+            // Pop next available frame
+            {
+                size_t tail = g_ringTail.load(std::memory_order_acquire);
+                size_t head = g_ringHead.load(std::memory_order_acquire);
+                if (tail == head) continue; // spurious wake
+                job = g_ring[tail];
+                g_ringTail.store((tail + 1) % g_ringCapacity, std::memory_order_release);
             }
             if (!job.texture && !job.surface) continue;
 
@@ -471,7 +379,17 @@ void StartCapture() {
 
             auto nowDbg = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::seconds>(nowDbg - lastLog).count() >= 1) {
-                std::wcout << L"[Stats] Encode=" << submitCount << L"/s, Target=" << g_targetFps.load() << L" fps" << std::endl;
+                uint64_t od = g_overwriteDrops.load(std::memory_order_relaxed);
+                uint64_t bp = g_backpressureSkips.load(std::memory_order_relaxed);
+                size_t qsz = RingSize();
+                std::wcout << L"[Stats] Encode=" << submitCount
+                           << L"/s, Target=" << g_targetFps.load()
+                           << L" fps, QueueDepth=" << qsz
+                           << L", OverwriteDrops/s=" << (od - lastOverwriteDrops)
+                           << L", BPSkips/s=" << (bp - lastBpSkips)
+                           << std::endl;
+                lastOverwriteDrops = od;
+                lastBpSkips = bp;
                 submitCount = 0;
                 lastLog = nowDbg;
             }
@@ -481,22 +399,20 @@ void StartCapture() {
 
 void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& framePool) {
     isCapturing.store(false);
-    g_surfaceCV.notify_all();
-
-    {
-        std::lock_guard<std::mutex> lock(g_surfaceMutex);
-        g_surfaceQueue.push({-1, nullptr, 0});
-    }
-    g_surfaceCV.notify_all();
+    g_ringCV.notify_all();
 
     for (auto& thread : workerThreads) {
         if (thread.joinable()) thread.join();
     }
     workerThreads.clear();
 
+    // Clear ring storage
     {
-        std::lock_guard<std::mutex> l1(g_surfaceMutex);
-        while (!g_surfaceQueue.empty()) g_surfaceQueue.pop();
+        std::lock_guard<std::mutex> lock(g_ringMutex);
+        g_ring.clear();
+        g_ringCapacity = 0;
+        g_ringHead.store(0, std::memory_order_relaxed);
+        g_ringTail.store(0, std::memory_order_relaxed);
     }
     // Removed unused encode queue cleanup
 

@@ -237,9 +237,7 @@ int main()
             if (ccfg.contains("maxQueueDepth")) {
                 SetMaxQueuedFrames(std::max(1, ccfg["maxQueueDepth"].get<int>()));
             }
-            if (ccfg.contains("copyPoolSize")) {
-                SetCopyPoolSize(std::max(2, ccfg["copyPoolSize"].get<int>()));
-            }
+            // (Removed) copyPoolSize configuration (unused)
             if (ccfg.contains("framePoolBuffers")) {
                 SetFramePoolBuffers(std::max(1, ccfg["framePoolBuffers"].get<int>()));
             } else if (ccfg.contains("numberOfBuffers")) {
