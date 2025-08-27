@@ -284,11 +284,22 @@ PRETTY_LOGS=true
   "host": {
     "targetProcessName": "chrome.exe",
     "window": { "resizeClientArea": true, "targetWidth": 1920, "targetHeight": 1080 },
-    "video": { "fps": 120, "bitrateStart": 20000000, "bitrateMin": 10000000, "bitrateMax": 50000000 },
+    "video": {
+      "fps": 120,
+      "bitrateStart": 20000000,
+      "bitrateMin": 10000000,
+      "bitrateMax": 50000000,
+      "gpuTiming": false,
+      "deferredContext": false,
+      "exportMetrics": false
+    },
     "capture": {
       "maxQueueDepth": 4,
+      "framePoolBuffers": 6,
       "dropWindowMs": 200,
       "dropMinEvents": 2,
+      "minUpdateInterval100ns": 0,
+      "skipUnchanged": false,
       "mmcss": { "enable": true, "priority": 2 }
     }
   }
@@ -296,10 +307,35 @@ PRETTY_LOGS=true
 ```
 
 Key fields:
-- `video`: encoder FPS and bitrate bounds; the AIMD controller operates within `bitrateMin..bitrateMax`.
-- `capture.maxQueueDepth`: bounded frame queue to keep latency low; older frames are dropped first.
-- `capture.dropWindowMs`/`dropMinEvents`: if the encoder backlogs (EAGAIN) at least `dropMinEvents` times in `dropWindowMs`, the next capture frame is dropped (latency > throughput).
-- `capture.mmcss`: enables Multimedia Class Scheduler (MCSS) "Games" profile for the capture/encode thread with a configurable priority.
+- `video.fps`: target encoder framerate.
+- `video.bitrateStart/bitrateMin/bitrateMax`: AIMD bitrate control bounds and starting point.
+- `video.gpuTiming` (default false): when true, measures D3D11 VideoProcessor GPU time per second and logs it; latest ms value exposed via metrics.
+- `video.deferredContext` (default false): hint to prefer deferred paths. Note: D3D11 video processing executes via `ID3D11VideoContext` (immediate). The flag is a placeholder for future async/compute paths.
+- `video.exportMetrics` (default false): when true, periodically emits a `video-metrics` JSON over the signaling WebSocket with queue depth, drop counters, and GPU ms.
+- `capture.maxQueueDepth`: bounded capture queue size; oldest frames are dropped first to keep latency low.
+- `capture.framePoolBuffers` (default 6): number of buffers in the WGC free-threaded frame pool to absorb transient latency.
+- `capture.dropWindowMs`/`dropMinEvents`: drop policy threshold based on encoder backpressure (EAGAIN).
+- `capture.minUpdateInterval100ns` (default 0): when 0, the host derives `10,000,000 / fps` (100ns units) to match the target FPS; set explicitly to override.
+- `capture.skipUnchanged` (default false): enables a lightweight heuristic to skip enqueueing near-duplicate frames when inter-frame time deltas are extremely small.
+- `capture.mmcss`: enables Multimedia Class Scheduler (MCSS) "Games" profile for the capture/encode thread with configurable priority.
+
+### Video Metrics (when `video.exportMetrics` is true)
+- Emitted once per second on the signaling WebSocket as a JSON message with `type: "video-metrics"`:
+  - `queueDepth`: current depth of the capture→encode SPSC ring buffer.
+  - `overwriteDrops`: total count of times the ring overwrote the oldest frame due to being full.
+  - `backpressureSkips`: total frames skipped by the consumer when the encoder reported backpressure.
+  - `outOfOrder`: total out-of-order consumptions observed (should remain 0).
+  - `vpGpuMs`: last observed GPU time in milliseconds for D3D11 VideoProcessor (BGRA→NV12) when `video.gpuTiming` is enabled.
+
+### ETW/PIX Instrumentation
+- ETW markers:
+  - `Capture_Enqueue_Start/End`: around capture enqueue into the SPSC ring.
+  - `Encoder_Send_Start/End`: around handoff of encoded frame bytes to the sender queue.
+- To enable real ETW events: define `ETW_TRACELOGGING` at build time and register the provider at process start; otherwise, markers are no-ops.
+- PIX/ETW runbook (high level):
+  - Capture a PIX GPU trace while streaming; correlate `vpGpuMs` logs with GPU Events to validate the VideoProcessor isn’t a bottleneck.
+  - Use Windows Performance Analyzer (ETW) to correlate `Capture_Enqueue_*` and `Encoder_Send_*` markers with CPU scheduling and thread contention.
+  - Look for spikes in `overwriteDrops`/`backpressureSkips` and correlate with encoder EAGAIN and network conditions.
 
 ### 5. Run the Client
 - Open `Client/html-server/index.html` in a web browser.
