@@ -16,10 +16,6 @@
 #ifndef MOUSE_INPUT_HANDLER_H
 #define MOUSE_INPUT_HANDLER_H
 
-extern "C" {
-    char* getMouseChannelMessage();
-}
-
 namespace MouseInputHandler {
     void initializeMouseChannel();
     void cleanup();

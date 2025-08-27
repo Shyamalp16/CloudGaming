@@ -393,14 +393,47 @@ extern "C" void onIceCandidate(const char* candidate) {
     std::cout << "[WebSocket] Sent ICE candidate: " << iceMsg.dump() << std::endl;
 }
 
-extern "C" char* getDataChannelMessage() {
-    // This function is called from Go to get a message from the data channel
-    // For now, it's just a placeholder
-    return nullptr;
+// External declarations for Go-exported functions
+extern "C" {
+    char* getDataChannelMessage();
+    char* getMouseChannelMessage();
+    void freeCString(char* p);
 }
 
-extern "C" char* getMouseChannelMessage() {
-    // This function is called from Go to get a message from the data channel
-    // For now, it's just a placeholder
-    return nullptr;
+// C++ wrapper functions that return std::string and handle memory safely
+std::string getDataChannelMessageString() {
+    char* cMsg = getDataChannelMessage();
+    if (cMsg == nullptr) {
+        return std::string();
+    }
+    std::string result(cMsg);
+    freeCString(cMsg); // Free the allocated memory using Go's freeCString
+    return result;
 }
+
+std::string getMouseChannelMessageString() {
+    char* cMsg = getMouseChannelMessage();
+    if (cMsg == nullptr) {
+        return std::string();
+    }
+    std::string result(cMsg);
+    freeCString(cMsg); // Free the allocated memory using Go's freeCString
+    return result;
+}
+
+// Helper functions to free the allocated memory (for backward compatibility)
+extern "C" void freeDataChannelMessage(char* msg) {
+    if (msg != nullptr) {
+        freeCString(msg);
+    }
+}
+
+extern "C" void freeMouseChannelMessage(char* msg) {
+    if (msg != nullptr) {
+        freeCString(msg);
+    }
+}
+
+// Note: getDataChannelMessage and getMouseChannelMessage are implemented in Go (main.go)
+// and exported with //export, making them callable from C++
+// The Go functions allocate memory with C.CString() that must be freed by the caller

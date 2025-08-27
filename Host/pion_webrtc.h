@@ -2,7 +2,10 @@
 #ifndef PION_WEBRTC_H
 #define PION_WEBRTC_H
 
+#include <cstdint>
+
 #ifdef __cplusplus
+#include <string>
 extern "C" {
 #endif
 
@@ -96,12 +99,17 @@ extern "C" {
     typedef void (*OnPLICallback)();
     void SetPLICallback(OnPLICallback cb);
 
-    char* getDataChannelMessage();
-
-    char* getMouseChannelMessage();
+    // C wrapper functions for memory management
+    void freeDataChannelMessage(char* msg);
+    void freeMouseChannelMessage(char* msg);
 
 #ifdef __cplusplus
-}
+} // end extern "C"
+
+// C++ wrapper functions that return std::string (safer alternative)
+std::string getDataChannelMessageString();
+std::string getMouseChannelMessageString();
+
 #endif
 
 #endif // PION_WEBRTC_H

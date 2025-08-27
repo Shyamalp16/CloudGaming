@@ -1,11 +1,15 @@
 #include "MouseInputHandler.h"
 #include "ShutdownManager.h"
+#include "pion_webrtc.h"
 #include <Windows.h>
+#include <atomic>
+#include <algorithm>
+#include <cstdlib>
 
 using json = nlohmann::json;
 
 namespace MouseInputHandler {
-	static bool isRunning = false;
+	static std::atomic_bool isRunning;
 	static std::thread mouseMessageThread;
 	static std::set<int> clientReportedMouseButtonsDown;
 	static std::mutex mouseStateMutex;
@@ -14,6 +18,39 @@ namespace MouseInputHandler {
 	void simulateWindowsMouseEvent(const std::string& eventType, int x, int y, int button);
 	void simulateMouseMove(int x, int y);
 	void simulateMouseButton(const std::string& type, int button);
+
+	// Helper function to clamp coordinates to virtual desktop bounds
+	void clampToVirtualDesktop(int& x, int& y, bool& wasClamped, bool logSignificantChanges = true) {
+		int virtualScreenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+		int virtualScreenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+		int virtualScreenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+		int virtualScreenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+		// Safety check: ensure valid dimensions
+		if (virtualScreenWidth <= 0 || virtualScreenHeight <= 0) {
+			std::cerr << "[MouseInputHandler] Invalid virtual screen dimensions: " << virtualScreenWidth << "x" << virtualScreenHeight << ". Falling back to primary screen." << std::endl;
+			virtualScreenX = 0;
+			virtualScreenY = 0;
+			virtualScreenWidth = GetSystemMetrics(SM_CXSCREEN);
+			virtualScreenHeight = GetSystemMetrics(SM_CYSCREEN);
+		}
+
+		// Store original values for clamping detection
+		int originalX = x;
+		int originalY = y;
+
+		// Clamp coordinates to virtual desktop bounds
+		x = max(virtualScreenX, min(x, virtualScreenX + virtualScreenWidth - 1));
+		y = max(virtualScreenY, min(y, virtualScreenY + virtualScreenHeight - 1));
+
+		// Detect if clamping occurred
+		wasClamped = (x != originalX) || (y != originalY);
+
+		// Log significant clamping changes (more than 10 pixels to avoid spam)
+		if (logSignificantChanges && wasClamped && ((abs(x - originalX) > 10) || (abs(y - originalY) > 10))) {
+			std::cout << "[MouseInputHandler] Clamped coordinates: (" << originalX << ", " << originalY << ") -> (" << x << ", " << y << ")" << std::endl;
+		}
+	}
 
 	void simulateWindowsMouseEvent(const std::string& eventType, int x, int y, int button) {
 		INPUT input = { 0 };
@@ -26,13 +63,30 @@ namespace MouseInputHandler {
 		input.mi.dwExtraInfo = 0;
 
 		if (eventType == "mousemove") {
-			int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-			int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+			// Clamp coordinates to virtual desktop bounds to prevent cursor jumping to unexpected positions
+			bool wasClamped = false;
+			clampToVirtualDesktop(x, y, wasClamped, true);
 
-			input.mi.dx = (LONG)(((double)x / screenWidth) * 65535.0);
-			input.mi.dy = (LONG)(((double)y / screenHeight) * 65535.0);
+			// Get virtual desktop metrics for coordinate normalization
+			int virtualScreenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+			int virtualScreenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+			int virtualScreenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+			int virtualScreenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+			// Safety fallback (shouldn't happen due to clampToVirtualDesktop, but just in case)
+			if (virtualScreenWidth <= 0 || virtualScreenHeight <= 0) {
+				virtualScreenX = 0;
+				virtualScreenY = 0;
+				virtualScreenWidth = GetSystemMetrics(SM_CXSCREEN);
+				virtualScreenHeight = GetSystemMetrics(SM_CYSCREEN);
+			}
+
+			// Apply virtual desktop offset and normalize coordinates
+			input.mi.dx = (LONG)(((double)(x - virtualScreenX) / virtualScreenWidth) * 65535.0);
+			input.mi.dy = (LONG)(((double)(y - virtualScreenY) / virtualScreenHeight) * 65535.0);
 			input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-			std::cout << "[MouseInputHandler] Simulating Mouse Move to: (" << x << ", " << y << ") -> Normalized (" << input.mi.dx << ", " << input.mi.dy << ")" << std::endl;
+
+			std::cout << "[MouseInputHandler] Simulating Mouse Move to: (" << x << ", " << y << ") -> Virtual Desktop Offset (" << virtualScreenX << ", " << virtualScreenY << ") -> Normalized (" << input.mi.dx << ", " << input.mi.dy << ")" << std::endl;
 		}
 		else if (eventType == "mousedown" || eventType == "mouseup") {
 			switch (button) {
@@ -45,11 +99,72 @@ namespace MouseInputHandler {
 			case 2: //Right
 				input.mi.dwFlags = (eventType == "mousedown") ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
 				break;
+			case 3: //XButton1 (Back)
+				input.mi.dwFlags = (eventType == "mousedown") ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP;
+				input.mi.mouseData = XBUTTON1;
+				break;
+			case 4: //XButton2 (Forward)
+				input.mi.dwFlags = (eventType == "mousedown") ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP;
+				input.mi.mouseData = XBUTTON2;
+				break;
 			default:
-				std::cerr << "[MouseInputHandler] Invalid mouse button: " << button << ". Valid values are 0 (Left), 1 (Middle), 2 (Right)." << std::endl;
+				std::cerr << "[MouseInputHandler] Invalid mouse button: " << button << ". Valid values are 0 (Left), 1 (Middle), 2 (Right), 3 (XButton1), 4 (XButton2)." << std::endl;
 				return;
 			}
-			std::cout << "[MouseInputHandler] Simulating Mouse Button " << button << " " << eventType << std::endl;
+
+			// Include cursor movement with the click for accurate positioning
+			// Clamp coordinates to virtual desktop bounds to prevent cursor jumping to unexpected positions
+			bool wasClamped = false;
+			clampToVirtualDesktop(x, y, wasClamped, false); // Use false to avoid duplicate logging
+
+			// Get virtual desktop metrics for coordinate normalization
+			int virtualScreenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+			int virtualScreenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+			int virtualScreenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+			int virtualScreenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+			// Safety fallback (shouldn't happen due to clampToVirtualDesktop, but just in case)
+			if (virtualScreenWidth <= 0 || virtualScreenHeight <= 0) {
+				virtualScreenX = 0;
+				virtualScreenY = 0;
+				virtualScreenWidth = GetSystemMetrics(SM_CXSCREEN);
+				virtualScreenHeight = GetSystemMetrics(SM_CYSCREEN);
+			}
+
+			// Apply virtual desktop offset and normalize coordinates
+			input.mi.dx = (LONG)(((double)(x - virtualScreenX) / virtualScreenWidth) * 65535.0);
+			input.mi.dy = (LONG)(((double)(y - virtualScreenY) / virtualScreenHeight) * 65535.0);
+			input.mi.dwFlags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+
+			std::cout << "[MouseInputHandler] Simulating Mouse Button " << button << " " << eventType << " at (" << x << ", " << y << ") -> Virtual Desktop Offset (" << virtualScreenX << ", " << virtualScreenY << ") -> Normalized (" << input.mi.dx << ", " << input.mi.dy << ")" << std::endl;
+		}
+		else if (eventType == "wheel") {
+			// Handle vertical wheel events
+			// x parameter contains deltaX (unused for vertical wheel)
+			// y parameter contains deltaY (wheel rotation amount)
+			// button parameter is unused for wheel events
+
+			// Normalize deltaY to wheel increments (WHEEL_DELTA = 120)
+			LONG wheelDelta = (LONG)y;
+
+			input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+			input.mi.mouseData = wheelDelta;
+
+			std::cout << "[MouseInputHandler] Simulating Vertical Wheel - DeltaY: " << y << " -> mouseData: " << input.mi.mouseData << std::endl;
+		}
+		else if (eventType == "hwheel") {
+			// Handle horizontal wheel events
+			// x parameter contains deltaX (wheel rotation amount)
+			// y parameter contains deltaY (unused for horizontal wheel)
+			// button parameter is unused for wheel events
+
+			// Normalize deltaX to wheel increments (WHEEL_DELTA = 120)
+			LONG wheelDelta = (LONG)x;
+
+			input.mi.dwFlags = MOUSEEVENTF_HWHEEL;
+			input.mi.mouseData = wheelDelta;
+
+			std::cout << "[MouseInputHandler] Simulating Horizontal Wheel - DeltaX: " << x << " -> mouseData: " << input.mi.mouseData << std::endl;
 		}
 		else {
 			std::cerr << "[MouseInputHandler] Unknown event type for mouse simulation: " << eventType << std::endl;
@@ -69,15 +184,10 @@ namespace MouseInputHandler {
 
 	void mouseMessagePollingLoop() {
 		std::cout << "[MouseInputHandler] Starting mouse message polling loop..." << std::endl;
-		while (isRunning && !ShutdownManager::IsShutdown()) {
-			char* cMsg = getMouseChannelMessage();
-			if (cMsg != nullptr) {
-				std::string message;
+		while (isRunning.load() && !ShutdownManager::IsShutdown()) {
+			std::string message = getMouseChannelMessageString();
+			if (!message.empty()) {
 				try {
-					message = cMsg;
-					//free(cMsg);
-					//cMsg = nullptr;
-
 					std::cout << "[MouseInputHandler] Received raw mouse message: " << message << std::endl;
 					json j = json::parse(message);
 					if (j.is_object() && j.contains("type")) {
@@ -105,6 +215,11 @@ namespace MouseInputHandler {
 								std::lock_guard<std::mutex> lock(mouseStateMutex);
 								bool simulateAction = false;
 								if (jsType == "mousedown") {
+									// Validate button number
+									if (button < 0 || button > 4) {
+										std::cerr << "[MouseInputHandler] Invalid button number: " << button << ". Ignoring mousedown." << std::endl;
+										continue;
+									}
 									if (clientReportedMouseButtonsDown.find(button) == clientReportedMouseButtonsDown.end()) {
 										clientReportedMouseButtonsDown.insert(button);
 										simulateAction = true;
@@ -131,6 +246,30 @@ namespace MouseInputHandler {
 								std::cerr << "[MouseInputHandler] Malformed mouse click message (missing x/y/button): " << message << std::endl;
 							}
 						}
+						else if (jsType == "wheel" || jsType == "hwheel") {
+							// Handle mouse wheel events
+							if (j.contains("deltaY") || j.contains("deltaX")) {
+								int deltaX = 0;
+								int deltaY = 0;
+
+								if (j.contains("deltaX")) {
+									deltaX = j["deltaX"].get<int>();
+								}
+								if (j.contains("deltaY")) {
+									deltaY = j["deltaY"].get<int>();
+								}
+
+								std::cout << "[MouseInputHandler] Parsed - Type: " << jsType << ", DeltaX: " << deltaX << ", DeltaY: " << deltaY << std::endl;
+
+								// For wheel events, we pass deltaX/deltaY as x/y parameters
+								// and use button parameter to distinguish wheel type (0=vertical, 1=horizontal)
+								int wheelType = (jsType == "hwheel") ? 1 : 0;
+								simulateWindowsMouseEvent(jsType, deltaX, deltaY, wheelType);
+							}
+							else {
+								std::cerr << "[MouseInputHandler] Malformed wheel message (missing deltaX/deltaY): " << message << std::endl;
+							}
+						}
 						else {
 							std::cerr << "[MouseInputHandler] Unknown event type in mouse channel: " << jsType << " Message: " << message << std::endl;
 						}
@@ -141,11 +280,9 @@ namespace MouseInputHandler {
 				}
 				catch (const json::parse_error& e) {
 					std::cerr << "[MouseInputHandler] JSON Parsing Error: " << e.what() << ". Message: " << message << std::endl;
-					//free(cMsg);
 				}
 				catch (const std::exception& e) {
 					std::cerr << "[MouseInputHandler] Generic Error Processing Message: " << e.what() << ". Message: " << message << std::endl;
-					//free(cMsg);
 				}
 			}
 			else {
@@ -157,21 +294,25 @@ namespace MouseInputHandler {
 		//cleanup
 		std::cout << "[MouseInputHandler] Loop exited. Sending mouseup for all tracked buttons..." << std::endl;
 		std::lock_guard<std::mutex> lock(mouseStateMutex);
-		for (int buttonToRelease : clientReportedMouseButtonsDown) {
+
+		// Copy the set to a vector to avoid invalidating iterator while iterating
+		std::vector<int> buttonsToRelease(clientReportedMouseButtonsDown.begin(), clientReportedMouseButtonsDown.end());
+
+		for (int buttonToRelease : buttonsToRelease) {
 			std::cout << "[MouseInputHandler] Sending cleanup mouseup for button: " << buttonToRelease << std::endl;
 			// You might need to retrieve the last known position to send with the cleanup mouseup.
 			// For simplicity here, assuming (0,0) or no specific position is strictly needed for cleanup up.
 			// If the client's `mouseup` sends `x`/`y`, the local `SimulateWindowsMouseEvent` will handle it.
 			simulateWindowsMouseEvent("mouseup", -1, -1, buttonToRelease); // Pass -1 for x,y as it's a cleanup, not a physical move.
-			clientReportedMouseButtonsDown.clear();
-			std::cout << "[MouseInputHandler] Cleanup mouseup finished." << std::endl;
 		}
+		clientReportedMouseButtonsDown.clear();
+		std::cout << "[MouseInputHandler] Cleanup mouseup finished for " << buttonsToRelease.size() << " buttons." << std::endl;
 	}
 
 	void initializeMouseChannel() {
 		std::cout << "[MouseInputHandler] DEBUG: initializeMouseChannel called." << std::endl; // ADD THIS
-		if (!isRunning) {
-			isRunning = true;
+		if (!isRunning.load()) {
+			isRunning.store(true);
 			std::lock_guard<std::mutex> lock(mouseStateMutex);
 			clientReportedMouseButtonsDown.clear();
 
@@ -184,8 +325,8 @@ namespace MouseInputHandler {
 	}
 
 	void cleanup() {
-		if (isRunning) {
-			isRunning = false;
+		if (isRunning.load()) {
+			isRunning.store(false);
 			if (mouseMessageThread.joinable()) {
 				mouseMessageThread.join();
 			}

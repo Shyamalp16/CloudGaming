@@ -21,6 +21,9 @@ namespace KeyInputHandler {
     void initializeDataChannel();
     void simulateKeyPress(const std::string& key);
     void cleanup();
+
+    // Internal functions
+    void SimulateWindowsKeyEvent(const std::string& eventCode, bool isKeyDown);
 }
 
 extern "C" void initKeyInputHandler();

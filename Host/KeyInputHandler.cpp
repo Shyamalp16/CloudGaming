@@ -1,14 +1,12 @@
 #include "KeyInputHandler.h"
-#include "ShutdownManager.h" 
+#include "ShutdownManager.h"
+#include "pion_webrtc.h"
 #include <unordered_map>
+#include <atomic>
 
 using json = nlohmann::json;
 
-static bool isRunning;
-
-extern "C" {
-	char* getDataChannelMessage();
-}
+static std::atomic_bool isRunning;
 
 namespace KeyInputHandler {
 	static std::thread messageThread;
@@ -74,6 +72,53 @@ namespace KeyInputHandler {
 		{"Comma", VK_OEM_COMMA}, {"Period", VK_OEM_PERIOD}, {"Slash", VK_OEM_2}
 	};
 
+	// Direct mapping from JS key codes to hardware scancodes for layout-independent input
+	static const std::map<std::string, WORD> scanCodeMap = {
+		// Letters (QWERTY layout scancodes)
+		{"KeyA", 0x1E}, {"KeyB", 0x30}, {"KeyC", 0x2E}, {"KeyD", 0x20},
+		{"KeyE", 0x12}, {"KeyF", 0x21}, {"KeyG", 0x22}, {"KeyH", 0x23},
+		{"KeyI", 0x17}, {"KeyJ", 0x24}, {"KeyK", 0x25}, {"KeyL", 0x26},
+		{"KeyM", 0x32}, {"KeyN", 0x31}, {"KeyO", 0x18}, {"KeyP", 0x19},
+		{"KeyQ", 0x10}, {"KeyR", 0x13}, {"KeyS", 0x1F}, {"KeyT", 0x14},
+		{"KeyU", 0x16}, {"KeyV", 0x2F}, {"KeyW", 0x11}, {"KeyX", 0x2D},
+		{"KeyY", 0x15}, {"KeyZ", 0x2C},
+
+		// Numbers (top row)
+		{"Digit1", 0x02}, {"Digit2", 0x03}, {"Digit3", 0x04}, {"Digit4", 0x05},
+		{"Digit5", 0x06}, {"Digit6", 0x07}, {"Digit7", 0x08}, {"Digit8", 0x09},
+		{"Digit9", 0x0A}, {"Digit0", 0x0B},
+
+		// Punctuation keys - using hardware scancodes for layout independence
+		{"Backquote", 0x29}, {"Minus", 0x0C}, {"Equal", 0x0D},
+		{"BracketLeft", 0x1A}, {"BracketRight", 0x1B}, {"Backslash", 0x2B},
+		{"Semicolon", 0x27}, {"Quote", 0x28},
+		{"Comma", 0x33}, {"Period", 0x34}, {"Slash", 0x35},
+
+		// Special keys
+		{"Space", 0x39}, {"Enter", 0x1C}, {"Backspace", 0x0E}, {"Tab", 0x0F},
+		{"Escape", 0x01}, {"Delete", 0x53}, {"Insert", 0x52},
+		{"Home", 0x47}, {"End", 0x4F}, {"PageUp", 0x49}, {"PageDown", 0x51},
+
+		// Arrow keys
+		{"ArrowUp", 0x48}, {"ArrowDown", 0x50}, {"ArrowLeft", 0x4B}, {"ArrowRight", 0x4D},
+
+		// Function keys
+		{"F1", 0x3B}, {"F2", 0x3C}, {"F3", 0x3D}, {"F4", 0x3E},
+		{"F5", 0x3F}, {"F6", 0x40}, {"F7", 0x41}, {"F8", 0x42},
+		{"F9", 0x43}, {"F10", 0x44}, {"F11", 0x57}, {"F12", 0x58},
+
+		// Modifiers
+		{"ShiftLeft", 0x2A}, {"ShiftRight", 0x36},
+		{"ControlLeft", 0x1D}, {"ControlRight", 0x1D}, // Right Ctrl is extended
+		{"AltLeft", 0x38}, {"AltRight", 0x38}, // Right Alt is extended
+
+		// Lock keys
+		{"CapsLock", 0x3A}, {"NumLock", 0x45}, {"ScrollLock", 0x46},
+
+		// Windows keys
+		{"MetaLeft", 0x5B}, {"MetaRight", 0x5C}, {"ContextMenu", 0x5D}
+	};
+
 	WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 		auto it = vkMap.find(jsCode);
 		if (it != vkMap.end()) {
@@ -84,10 +129,48 @@ namespace KeyInputHandler {
 		return 0;
 	}
 
+	WORD MapJavaScriptCodeToScanCode(const std::string& jsCode) {
+		auto it = scanCodeMap.find(jsCode);
+		if (it != scanCodeMap.end()) {
+			return it->second;
+		}
+		// No direct scancode mapping, fall back to virtual key conversion
+		WORD vk = MapJavaScriptCodeToVK(jsCode);
+		if (vk != 0) {
+			// Use MapVirtualKeyEx with current keyboard layout for better compatibility
+			HKL hkl = GetKeyboardLayout(0);
+			return MapVirtualKeyEx(vk, MAPVK_VK_TO_VSC_EX, hkl);
+		}
+		std::cerr << "[MapJavaScriptCodeToScanCode] Warning: No scan code mapping for code: " << jsCode << std::endl;
+		return 0;
+	}
+
+	void simulateKeyPress(const std::string& key) {
+		std::cout << "[KeyInputHandler] Simulating key press for: '" << key << "'" << std::endl;
+
+		// Validate the key code
+		WORD virtualKeyCode = MapJavaScriptCodeToVK(key);
+		if (virtualKeyCode == 0) {
+			std::cerr << "[KeyInputHandler] Error: Invalid key code '" << key << "'. Cannot simulate key press." << std::endl;
+			return;
+		}
+
+		// Simulate key down
+		SimulateWindowsKeyEvent(key, true);
+
+		// Small delay between down and up (optional, helps with some applications)
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+		// Simulate key up
+		SimulateWindowsKeyEvent(key, false);
+
+		std::cout << "[KeyInputHandler] Key press simulation completed for: '" << key << "'" << std::endl;
+	}
+
 	void SimulateWindowsKeyEvent(const std::string& eventCode, bool isKeyDown){
 		WORD virtualKeyCode = MapJavaScriptCodeToVK(eventCode);
 		if (virtualKeyCode == 0) {
-			//std::cerr << "[SimulateWindowsKeyEvent] Warning: No VK code mapping for JS code '" << eventCode << "'. Ignoring." << std::endl;
+			std::cerr << "[SimulateWindowsKeyEvent] Warning: No VK code mapping for JS code '" << eventCode << "'. Ignoring." << std::endl;
 			return;
 		}
 
@@ -95,7 +178,7 @@ namespace KeyInputHandler {
 		input.type = INPUT_KEYBOARD;
 		input.ki.time = 0;
 		input.ki.dwExtraInfo = 0;
-		
+
 		bool isExtendedKey = (
 			virtualKeyCode == VK_UP || virtualKeyCode == VK_DOWN ||
 			virtualKeyCode == VK_LEFT || virtualKeyCode == VK_RIGHT ||
@@ -108,17 +191,34 @@ namespace KeyInputHandler {
 			(virtualKeyCode == VK_RETURN && eventCode == "NumpadEnter")
 		);
 
-		bool useScanCode = true;
+		// Decide whether to use scancodes or virtual keys based on key type
+		// Prioritize scancodes for layout-sensitive keys (punctuation, etc.)
+		bool preferScanCode = true;
+
+		// Use virtual keys only for keys that are universally consistent across layouts
 		if ((virtualKeyCode >= 'A' && virtualKeyCode <= 'Z') ||
 			(virtualKeyCode >= '0' && virtualKeyCode <= '9') ||
 			virtualKeyCode == VK_SPACE ||
-			virtualKeyCode == VK_OEM_PERIOD || virtualKeyCode == VK_OEM_COMMA ||
-			virtualKeyCode == VK_OEM_MINUS || virtualKeyCode == VK_OEM_PLUS) {
-			useScanCode = false;
+			virtualKeyCode == VK_RETURN ||
+			virtualKeyCode == VK_BACK ||
+			virtualKeyCode == VK_TAB ||
+			virtualKeyCode == VK_ESCAPE ||
+			virtualKeyCode == VK_UP || virtualKeyCode == VK_DOWN ||
+			virtualKeyCode == VK_LEFT || virtualKeyCode == VK_RIGHT ||
+			virtualKeyCode == VK_HOME || virtualKeyCode == VK_END ||
+			virtualKeyCode == VK_PRIOR || virtualKeyCode == VK_NEXT ||
+			virtualKeyCode == VK_INSERT || virtualKeyCode == VK_DELETE ||
+			virtualKeyCode == VK_F1 || virtualKeyCode == VK_F2 || virtualKeyCode == VK_F3 ||
+			virtualKeyCode == VK_F4 || virtualKeyCode == VK_F5 || virtualKeyCode == VK_F6 ||
+			virtualKeyCode == VK_F7 || virtualKeyCode == VK_F8 || virtualKeyCode == VK_F9 ||
+			virtualKeyCode == VK_F10 || virtualKeyCode == VK_F11 || virtualKeyCode == VK_F12 ||
+			virtualKeyCode == VK_CAPITAL || virtualKeyCode == VK_NUMLOCK || virtualKeyCode == VK_SCROLL) {
+			preferScanCode = false;
 		}
 
-		if (useScanCode) {
-			WORD scanCode = MapVirtualKey(virtualKeyCode, MAPVK_VK_TO_VSC);
+		if (preferScanCode) {
+			// Try to use direct scancode mapping first for better layout independence
+			WORD scanCode = MapJavaScriptCodeToScanCode(eventCode);
 			if (scanCode != 0) {
 				input.ki.wScan = scanCode;
 				input.ki.dwFlags = KEYEVENTF_SCANCODE;
@@ -128,27 +228,36 @@ namespace KeyInputHandler {
 				if (!isKeyDown) {
 					input.ki.dwFlags |= KEYEVENTF_KEYUP;
 				}
-				input.ki.wVk = 0; 
-				std::cout << "[SimulateWindowsKeyEvent] Sending Input (Scan Code) - JSCode: '" << eventCode
-					<< "', VK_Mapped: " << virtualKeyCode << ", Scan: " << scanCode
+				input.ki.wVk = 0;
+				std::cout << "[SimulateWindowsKeyEvent] Sending Input (Direct Scan Code) - JSCode: '" << eventCode
+					<< "', VK_Mapped: " << virtualKeyCode << ", Scan: 0x" << std::hex << scanCode << std::dec
 					<< ", Flags: 0x" << std::hex << input.ki.dwFlags << std::dec
 					<< (isKeyDown ? " (DOWN)" : " (UP)") << std::endl;
-			}else {
-				std::cerr << "[SimulateWindowsKeyEvent] Warning: Could not map VK " << virtualKeyCode << " to Scan Code for JS code '" << eventCode << "'. Using VK." << std::endl;
-				input.ki.wVk = virtualKeyCode;
-				input.ki.dwFlags = 0;
-				if (isExtendedKey) {
-					input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+			} else {
+				// Fallback: try to convert VK to scancode with current layout
+				HKL hkl = GetKeyboardLayout(0);
+				scanCode = MapVirtualKeyEx(virtualKeyCode, MAPVK_VK_TO_VSC_EX, hkl);
+				if (scanCode != 0) {
+					input.ki.wScan = scanCode;
+					input.ki.dwFlags = KEYEVENTF_SCANCODE;
+					if (isExtendedKey) {
+						input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+					}
+					if (!isKeyDown) {
+						input.ki.dwFlags |= KEYEVENTF_KEYUP;
+					}
+					input.ki.wVk = 0;
+					std::cout << "[SimulateWindowsKeyEvent] Sending Input (VK->Scan Fallback) - JSCode: '" << eventCode
+						<< "', VK: " << virtualKeyCode << ", Scan: 0x" << std::hex << scanCode << std::dec
+						<< ", Flags: 0x" << std::hex << input.ki.dwFlags << std::dec
+						<< (isKeyDown ? " (DOWN)" : " (UP)") << std::endl;
+				} else {
+					std::cerr << "[SimulateWindowsKeyEvent] Warning: Could not map to scan code for JS code '" << eventCode << "'. Using VK." << std::endl;
+					goto useVirtualKey;
 				}
-				if (!isKeyDown) {
-					input.ki.dwFlags |= KEYEVENTF_KEYUP;
-				}
-				std::cout << "[SimulateWindowsKeyEvent] Sending Input (VK Fallback after Scan Fail) - JSCode: '" << eventCode
-					<< "', VK: " << virtualKeyCode
-					<< ", Flags: 0x" << std::hex << input.ki.dwFlags << std::dec
-					<< (isKeyDown ? " (DOWN)" : " (UP)") << std::endl;
 			}
-		}else {
+		} else {
+			useVirtualKey:
 			input.ki.wVk = virtualKeyCode;
 			input.ki.dwFlags = 0;
 			if (isExtendedKey) {
@@ -183,15 +292,11 @@ namespace KeyInputHandler {
 
 	void messagePollingLoop() {
 		std::cout << "[KeyInputHandler] Starting message polling loop..." << std::endl;
-		while (isRunning && !ShutdownManager::IsShutdown()) {
-			char* cMsg = getDataChannelMessage();
+		while (isRunning.load() && !ShutdownManager::IsShutdown()) {
+			std::string message = getDataChannelMessageString();
 
-			if (cMsg != nullptr) {
-				std::string message;
+			if (!message.empty()) {
 				try {
-					message = cMsg;
-					//free(cMsg);
-					//cMsg = nullptr;
 					std::cout << "[KeyInputHandler] Received message string: " << message << std::endl;
 
 					json j = json::parse(message);
@@ -245,17 +350,9 @@ namespace KeyInputHandler {
 				}
 				catch (const json::parse_error& e) {
 					std::cerr << "[KeyInputHandler] JSON Parsing Error: " << e.what() << ". Message: " << message << std::endl;
-					if (cMsg != nullptr) {
-						/*free(cMsg);
-						cMsg = nullptr;*/
-					}
 				}
 				catch (const std::exception& e) {
 					std::cerr << "[KeyInputHandler] Generic Error Processing Message: " << e.what() << ". Message: " << message << std::endl;
-					if (cMsg != nullptr) {
-						/*free(cMsg);
-						cMsg = nullptr;*/
-					}
 				}
 			}
 			else {
@@ -297,8 +394,8 @@ namespace KeyInputHandler {
 	}
 
 	void initializeDataChannel() {
-		if (!isRunning) {
-			isRunning = true;
+		if (!isRunning.load()) {
+			isRunning.store(true);
 			std::lock_guard<std::mutex> lock(clientKeysMutex);
 			clientReportedKeysDown.clear();
 			vkDownToJsCode.clear();
@@ -311,8 +408,8 @@ namespace KeyInputHandler {
 	}
 
 	void cleanup() {
-		if (isRunning) {
-			isRunning = false;
+		if (isRunning.load()) {
+			isRunning.store(false);
 			if (messageThread.joinable()) {
 				messageThread.join();
 			}
