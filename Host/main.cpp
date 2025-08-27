@@ -208,6 +208,9 @@ int main()
             // Optional color range control (default full range true)
             bool fullRange = vcfg.value("fullRange", true);
             Encoder::SetFullRangeColor(fullRange);
+            // Optional: enable GPU timing instrumentation for VideoProcessor
+            bool gpuTiming = vcfg.value("gpuTiming", false);
+            Encoder::SetGpuTimingEnabled(gpuTiming);
             // Optional fixed pacing
             if (vcfg.contains("pacingFixedUs")) {
                 Encoder::SetPacingFixedUs(std::max(1, vcfg["pacingFixedUs"].get<int>()));

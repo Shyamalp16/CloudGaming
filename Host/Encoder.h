@@ -71,6 +71,9 @@ namespace Encoder {
     bool IsBacklogged(int recent_window_ms, int min_events);
     void GetAndResetBackpressureStats(int &eagainEvents);
 
+    // Enable/disable GPU timing instrumentation around VideoProcessorBlt
+    void SetGpuTimingEnabled(bool enable);
+
     extern "C" int sendVideoSample(uint8_t* data, int size, int64_t durationUs);
 
     extern int currentWidth;

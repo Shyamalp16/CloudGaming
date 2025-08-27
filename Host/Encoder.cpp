@@ -55,6 +55,11 @@ static int g_vpHeight = 0;
 static std::unordered_map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView>> g_inputViewCache;
 static std::unordered_map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView>> g_outputViewCache;
 static constexpr size_t kMaxViewCacheEntries = 512; // cap to avoid unbounded growth
+// Optional GPU timestamp queries for VideoProcessorBlt
+static bool g_gpuTimingEnabled = false;
+static Microsoft::WRL::ComPtr<ID3D11Query> g_tsDisjoint;
+static Microsoft::WRL::ComPtr<ID3D11Query> g_tsStart;
+static Microsoft::WRL::ComPtr<ID3D11Query> g_tsEnd;
 
 // Hardware frame ring
 static std::vector<AVFrame*> g_hwFrames;
@@ -218,6 +223,10 @@ static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height
 }
 
 namespace Encoder {
+    void SetGpuTimingEnabled(bool enable) {
+        std::lock_guard<std::mutex> lock(g_encoderMutex);
+        g_gpuTimingEnabled = enable;
+    }
     bool AcquireHwInputSurface(int &slotIndexOut, ID3D11Texture2D** nv12TextureOut) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
         if (!codecCtx || g_hwFrames.empty()) return false;
@@ -259,7 +268,50 @@ namespace Encoder {
             g_outputViewCache[nv12] = outView;
         }
         D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
-        return SUCCEEDED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream));
+
+        if (!g_gpuTimingEnabled) {
+            return SUCCEEDED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream));
+        }
+
+        // Lazy-create timestamp queries on first use
+        if (!g_tsDisjoint) {
+            D3D11_QUERY_DESC qd{}; qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT; qd.MiscFlags = 0;
+            ((ID3D11Device*)GetD3DDevice().get())->CreateQuery(&qd, g_tsDisjoint.GetAddressOf());
+        }
+        if (!g_tsStart) {
+            D3D11_QUERY_DESC q{}; q.Query = D3D11_QUERY_TIMESTAMP; q.MiscFlags = 0;
+            ((ID3D11Device*)GetD3DDevice().get())->CreateQuery(&q, g_tsStart.GetAddressOf());
+        }
+        if (!g_tsEnd) {
+            D3D11_QUERY_DESC q{}; q.Query = D3D11_QUERY_TIMESTAMP; q.MiscFlags = 0;
+            ((ID3D11Device*)GetD3DDevice().get())->CreateQuery(&q, g_tsEnd.GetAddressOf());
+        }
+
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediate;
+        ((ID3D11Device*)GetD3DDevice().get())->GetImmediateContext(immediate.GetAddressOf());
+
+        immediate->Begin(g_tsDisjoint.Get());
+        immediate->End(g_tsStart.Get());
+        HRESULT bltHr = g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream);
+        immediate->End(g_tsEnd.Get());
+        immediate->End(g_tsDisjoint.Get());
+
+        // Readback timing (non-blocking try; if not ready, skip logging)
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
+        if (SUCCEEDED(immediate->GetData(g_tsDisjoint.Get(), &disjoint, sizeof(disjoint), 0)) && !disjoint.Disjoint) {
+            UINT64 startTs = 0, endTs = 0;
+            if (SUCCEEDED(immediate->GetData(g_tsStart.Get(), &startTs, sizeof(startTs), 0)) &&
+                SUCCEEDED(immediate->GetData(g_tsEnd.Get(), &endTs, sizeof(endTs), 0)) && endTs > startTs) {
+                double gpuMs = (double)(endTs - startTs) / (double)disjoint.Frequency * 1000.0;
+                static auto lastLog = std::chrono::steady_clock::now();
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - lastLog).count() >= 1) {
+                    std::wcout << L"[VP] VideoProcessorBlt GPU time ~" << gpuMs << L" ms" << std::endl;
+                    lastLog = now;
+                }
+            }
+        }
+        return SUCCEEDED(bltHr);
     }
 
     bool SubmitHwFrame(int slotIndex, int64_t timestampUs) {

@@ -25,7 +25,8 @@
       "surfaces": 8,
       "ignorePli": true,
       "minPliIntervalMs": 500,
-      "minPliLossThreshold": 0.03
+      "minPliLossThreshold": 0.03,
+      "gpuTiming": true
     },
     "capture": {
       "copyPoolSize": 16,
