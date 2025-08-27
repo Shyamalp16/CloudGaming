@@ -1,5 +1,6 @@
 #include "KeyInputHandler.h"
 #include "ShutdownManager.h" 
+#include <unordered_map>
 
 using json = nlohmann::json;
 
@@ -13,6 +14,7 @@ namespace KeyInputHandler {
 	static std::thread messageThread;
 	static std::set<WORD> clientReportedKeysDown;
 	static std::mutex clientKeysMutex;
+	static std::unordered_map<WORD, std::string> vkDownToJsCode;
 
 	static const std::map<std::string, WORD> vkMap = {
 		//Letters
@@ -100,12 +102,10 @@ namespace KeyInputHandler {
 			virtualKeyCode == VK_HOME || virtualKeyCode == VK_END ||
 			virtualKeyCode == VK_PRIOR || virtualKeyCode == VK_NEXT ||
 			virtualKeyCode == VK_INSERT || virtualKeyCode == VK_DELETE ||
-			virtualKeyCode == VK_NUMLOCK || virtualKeyCode == VK_RETURN ||
-			virtualKeyCode == VK_LSHIFT || virtualKeyCode == VK_RSHIFT ||
-			virtualKeyCode == VK_LCONTROL || virtualKeyCode == VK_RCONTROL ||
-			virtualKeyCode == VK_LMENU || virtualKeyCode == VK_RMENU ||
+			virtualKeyCode == VK_RCONTROL || virtualKeyCode == VK_RMENU ||
 			virtualKeyCode == VK_LWIN || virtualKeyCode == VK_RWIN ||
-			virtualKeyCode == VK_APPS || (eventCode == "NumpadEnter")
+			virtualKeyCode == VK_APPS ||
+			(virtualKeyCode == VK_RETURN && eventCode == "NumpadEnter")
 		);
 
 		bool useScanCode = true;
@@ -151,7 +151,7 @@ namespace KeyInputHandler {
 		}else {
 			input.ki.wVk = virtualKeyCode;
 			input.ki.dwFlags = 0;
-			if (isExtendedKey && virtualKeyCode != VK_LSHIFT && virtualKeyCode != VK_RSHIFT && virtualKeyCode != VK_LCONTROL && virtualKeyCode != VK_RCONTROL && virtualKeyCode != VK_LMENU && virtualKeyCode != VK_RMENU) {
+			if (isExtendedKey) {
 				input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
 			}
 			if (!isKeyDown) {
@@ -214,10 +214,12 @@ namespace KeyInputHandler {
 							actionIsDown = true;
 							if (clientReportedKeysDown.find(vkCode) == clientReportedKeysDown.end()) {
 								clientReportedKeysDown.insert(vkCode);
+								vkDownToJsCode[vkCode] = jsCode;
 								simulateAction = true;
 								std::cout << "[KeyInputHandler] State: New keydown for '" << jsCode << "' (VK:" << vkCode << "). Simulating press." << std::endl;
 							}
 							else {
+								vkDownToJsCode[vkCode] = jsCode;
 								simulateAction = true;
 								std::cout << "[KeyInputHandler] State: Held keydown for '" << jsCode << "' (VK:" << vkCode << "). Re-simulating press." << std::endl;
 							}
@@ -226,6 +228,7 @@ namespace KeyInputHandler {
 							actionIsDown = false;
 							if (clientReportedKeysDown.count(vkCode)) {
 								clientReportedKeysDown.erase(vkCode);
+								vkDownToJsCode.erase(vkCode);
 								simulateAction = true;
 								std::cout << "[KeyInputHandler] State: Keyup for '" << jsCode << "' (VK:" << vkCode << "). Simulating release." << std::endl;
 							}
@@ -265,27 +268,31 @@ namespace KeyInputHandler {
 		std::lock_guard<std::mutex> lock(clientKeysMutex);
 
 		for (WORD vkCodeToRelease : clientReportedKeysDown) {
-			std::cout << "[KeyInputHandler] Sending cleanup keyup for VK: " << vkCodeToRelease << std::endl;
-			// Find a jsCode that maps to this vkCode to call SimulateWindowsKeyEvent
 			std::string jsCodeToRelease = "";
-			for (const auto& pair : vkMap) {
-				if (pair.second == vkCodeToRelease) {
-					jsCodeToRelease = pair.first;
-					std::cout << "[KeyInputHandler] Cleanup: Found jsCode '" << jsCodeToRelease << "' for VK: " << vkCodeToRelease << std::endl;
-					break;
-				}
+			auto it = vkDownToJsCode.find(vkCodeToRelease);
+			if (it != vkDownToJsCode.end()) {
+				jsCodeToRelease = it->second;
 			}
 			if (!jsCodeToRelease.empty()) {
-				SimulateWindowsKeyEvent(jsCodeToRelease, false); // false for keyup
+				std::cout << "[KeyInputHandler] Cleanup: Releasing '" << jsCodeToRelease << "' (VK:" << vkCodeToRelease << ")" << std::endl;
+				SimulateWindowsKeyEvent(jsCodeToRelease, false);
 			}
 			else {
-				std::cerr << "[KeyInputHandler] Cleanup: Could not find jsCode for VK: " << vkCodeToRelease << std::endl;
-				// As a last resort for unknown VK codes, send a generic keyup
-				// This would require modifying SimulateWindowsKeyEvent or having another function.
-				// For now rely on finding the jsCode.
+				std::cout << "[KeyInputHandler] Cleanup: No original jsCode for VK:" << vkCodeToRelease << ". Falling back to first mapping." << std::endl;
+				// Fallback: pick first mapping as before
+				for (const auto& pair : vkMap) {
+					if (pair.second == vkCodeToRelease) {
+						jsCodeToRelease = pair.first;
+						break;
+					}
+				}
+				if (!jsCodeToRelease.empty()) {
+					SimulateWindowsKeyEvent(jsCodeToRelease, false);
+				}
 			}
 		}
 		clientReportedKeysDown.clear();
+		vkDownToJsCode.clear();
 		std::cout << "[KeyInputHandler] Cleanup keyup finished." << std::endl;
 	}
 
@@ -294,6 +301,7 @@ namespace KeyInputHandler {
 			isRunning = true;
 			std::lock_guard<std::mutex> lock(clientKeysMutex);
 			clientReportedKeysDown.clear();
+			vkDownToJsCode.clear();
 
 			messageThread = std::thread(messagePollingLoop);
 			std::cout << "[KeyInputHandler] Polling started for data channel messages" << std::endl;
