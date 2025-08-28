@@ -31,6 +31,12 @@ inline std::atomic<uint64_t>& fsmStaleTransitions() { static std::atomic<uint64_
 inline std::atomic<uint64_t>& fsmEmergencyReleases() { static std::atomic<uint64_t> v{0}; return v; }
 inline std::atomic<uint64_t>& fsmStateResets() { static std::atomic<uint64_t> v{0}; return v; }
 
+// Mouse coordinate transformation metrics
+inline std::atomic<uint64_t>& mouseCoordTransformSuccess() { static std::atomic<uint64_t> v{0}; return v; }
+inline std::atomic<uint64_t>& mouseCoordTransformErrors() { static std::atomic<uint64_t> v{0}; return v; }
+inline std::atomic<uint64_t>& mouseCoordClipped() { static std::atomic<uint64_t> v{0}; return v; }
+inline std::atomic<uint64_t>& mouseCoordOutOfBounds() { static std::atomic<uint64_t> v{0}; return v; }
+
 // Last error codes
 inline std::atomic<uint32_t>& lastSendInputError() { static std::atomic<uint32_t> v{0}; return v; }
 inline std::atomic<uint32_t>& lastError() { static std::atomic<uint32_t> v{0}; return v; }

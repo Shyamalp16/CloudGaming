@@ -66,6 +66,15 @@ std::string StatsLogger::getStatsString() {
        << mouse.clicks_processed.load() << " click, "
        << mouse.wheel_events.load() << " wheel | ";
 
+    // Coordinate transformation stats
+    auto coordSuccess = InputMetrics::load(InputMetrics::mouseCoordTransformSuccess());
+    auto coordErrors = InputMetrics::load(InputMetrics::mouseCoordTransformErrors());
+    auto coordClipped = InputMetrics::load(InputMetrics::mouseCoordClipped());
+
+    if (coordSuccess + coordErrors > 0) {
+        ss << "Coord: " << coordSuccess << " success, " << coordErrors << " err, " << coordClipped << " clip | ";
+    }
+
     // Rates
     ss << "Rates: KB "
        << (kb.injection_success_rate * 100.0) << "% inj, "

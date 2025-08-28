@@ -15,11 +15,32 @@
 #include "InputSchema.h"
 #include "InputInjection.h"
 #include "InputStats.h"
+#include "MouseCoordinateTransform.h"
 
 
 using json = nlohmann::json;
 
 namespace MouseInputHandler {
+
+	// Configuration for coordinate transformation
+	static int gClientViewWidth = 1920;  // Default client view width
+	static int gClientViewHeight = 1080; // Default client view height
+	static MouseCoordinateTransform::TransformConfig gCoordTransformConfig = {
+		false, // enableClipping
+		false, // enableClipCursor
+		true,  // accountForScaling
+		1.0,   // captureScaleX
+		1.0    // captureScaleY
+	};
+
+	// Function to update coordinate transformation configuration
+	void updateCoordinateTransformConfig(int clientWidth, int clientHeight,
+										 const MouseCoordinateTransform::TransformConfig& config) {
+		gClientViewWidth = clientWidth;
+		gClientViewHeight = clientHeight;
+		gCoordTransformConfig = config;
+		MouseCoordinateTransform::updateGlobalConfig(config);
+	}
     // Simple configurable logging (0=ERROR,1=WARN,2=INFO,3=DEBUG)
     static std::atomic<int> gMouseLogLevel{1};
     static inline void SetMouseLogLevelFromEnv() {
@@ -151,12 +172,31 @@ namespace MouseInputHandler {
 				virtualScreenHeight = GetSystemMetrics(SM_CYSCREEN);
 			}
 
-			// Apply virtual desktop offset and normalize coordinates
-			input.mi.dx = (LONG)(((double)(x - virtualScreenX) / virtualScreenWidth) * 65535.0);
-			input.mi.dy = (LONG)(((double)(y - virtualScreenY) / virtualScreenHeight) * 65535.0);
-			input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+			// Use new DPI-aware coordinate transformation
+			HWND targetWindow = WindowUtils::GetTargetWindow();
+			auto transformResult = MouseCoordinateTransform::globalTransformer.transformClientToAbsolute(
+				x, y, targetWindow, gClientViewWidth, gClientViewHeight);
 
-			std::cout << "[MouseInputHandler] Simulating Mouse Move to: (" << x << ", " << y << ") -> Virtual Desktop Offset (" << virtualScreenX << ", " << virtualScreenY << ") -> Normalized (" << input.mi.dx << ", " << input.mi.dy << ")" << std::endl;
+			if (transformResult.isValid) {
+				input.mi.dx = transformResult.absoluteX;
+				input.mi.dy = transformResult.absoluteY;
+				input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+
+				InputMetrics::inc(InputMetrics::mouseCoordTransformSuccess());
+
+				if (transformResult.wasClipped) {
+					InputMetrics::inc(InputMetrics::mouseCoordClipped());
+				}
+
+				std::cout << "[MouseInputHandler] Transformed Mouse Move: (" << x << ", " << y << ") -> "
+						 << "Virtual Desktop (" << transformResult.virtualDesktopX << ", " << transformResult.virtualDesktopY << ") -> "
+						 << "Absolute (" << input.mi.dx << ", " << input.mi.dy << ")"
+						 << (transformResult.wasClipped ? " [CLIPPED]" : "") << std::endl;
+			} else {
+				InputMetrics::inc(InputMetrics::mouseCoordTransformErrors());
+				std::cerr << "[MouseInputHandler] Coordinate transformation failed: " << transformResult.errorMessage << std::endl;
+				return;
+			}
 		}
 		else if (eventType == "mousedown" || eventType == "mouseup") {
 			switch (button) {
@@ -184,32 +224,32 @@ namespace MouseInputHandler {
 				return;
 			}
 
-			// Include cursor movement with the click for accurate positioning
-			// Clamp coordinates to virtual desktop bounds to prevent cursor jumping to unexpected positions
-			bool wasClamped = false;
-			clampToVirtualDesktop(x, y, wasClamped, false); // Use false to avoid duplicate logging
-
-			// Get virtual desktop metrics for coordinate normalization
-			int virtualScreenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
-			int virtualScreenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
-			int virtualScreenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-			int virtualScreenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-			// Safety fallback (shouldn't happen due to clampToVirtualDesktop, but just in case)
-			if (virtualScreenWidth <= 0 || virtualScreenHeight <= 0) {
-				virtualScreenX = 0;
-				virtualScreenY = 0;
-				virtualScreenWidth = GetSystemMetrics(SM_CXSCREEN);
-				virtualScreenHeight = GetSystemMetrics(SM_CYSCREEN);
-			}
+			// Coordinate transformation is now handled in the individual branches above
 
 			if (gSplitClickMove.load()) {
 				// First, move absolutely to the requested position
 				INPUT moveInput = { 0 };
 				moveInput.type = INPUT_MOUSE;
-				moveInput.mi.dx = (LONG)(((double)(x - virtualScreenX) / virtualScreenWidth) * 65535.0);
-				moveInput.mi.dy = (LONG)(((double)(y - virtualScreenY) / virtualScreenHeight) * 65535.0);
-				moveInput.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+
+				// Use new DPI-aware coordinate transformation for move
+				HWND targetWindow = WindowUtils::GetTargetWindow();
+				auto moveTransformResult = MouseCoordinateTransform::globalTransformer.transformClientToAbsolute(
+					x, y, targetWindow, gClientViewWidth, gClientViewHeight);
+
+				if (moveTransformResult.isValid) {
+					moveInput.mi.dx = moveTransformResult.absoluteX;
+					moveInput.mi.dy = moveTransformResult.absoluteY;
+					moveInput.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+
+					InputMetrics::inc(InputMetrics::mouseCoordTransformSuccess());
+					if (moveTransformResult.wasClipped) {
+						InputMetrics::inc(InputMetrics::mouseCoordClipped());
+					}
+				} else {
+					InputMetrics::inc(InputMetrics::mouseCoordTransformErrors());
+					std::cerr << "[MouseInputHandler] Move coordinate transformation failed: " << moveTransformResult.errorMessage << std::endl;
+					return;
+				}
 
 				// Then, button down/up as a separate event
 				INPUT btnInput = { 0 };
@@ -235,11 +275,27 @@ namespace MouseInputHandler {
 				return;
 			} else {
 				// Combined move + button flags (legacy behavior)
-				input.mi.dx = (LONG)(((double)(x - virtualScreenX) / virtualScreenWidth) * 65535.0);
-				input.mi.dy = (LONG)(((double)(y - virtualScreenY) / virtualScreenHeight) * 65535.0);
-				input.mi.dwFlags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+				// Use new DPI-aware coordinate transformation for combined move+click
+				HWND targetWindow = WindowUtils::GetTargetWindow();
+				auto clickTransformResult = MouseCoordinateTransform::globalTransformer.transformClientToAbsolute(
+					x, y, targetWindow, gClientViewWidth, gClientViewHeight);
 
-				MouseLogDebug(std::string("[MouseInputHandler] Simulating Mouse Button ") + std::to_string(button) + " " + eventType + " at (" + std::to_string(x) + ", " + std::to_string(y) + ") -> Virtual Desktop Offset (" + std::to_string(virtualScreenX) + ", " + std::to_string(virtualScreenY) + ") -> Normalized (" + std::to_string(input.mi.dx) + ", " + std::to_string(input.mi.dy) + ")");
+				if (clickTransformResult.isValid) {
+					input.mi.dx = clickTransformResult.absoluteX;
+					input.mi.dy = clickTransformResult.absoluteY;
+					input.mi.dwFlags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+
+					InputMetrics::inc(InputMetrics::mouseCoordTransformSuccess());
+					if (clickTransformResult.wasClipped) {
+						InputMetrics::inc(InputMetrics::mouseCoordClipped());
+					}
+
+					MouseLogDebug(std::string("[MouseInputHandler] Transformed Mouse Button ") + std::to_string(button) + " " + eventType + " at (" + std::to_string(x) + ", " + std::to_string(y) + ") -> Virtual Desktop (" + std::to_string(clickTransformResult.virtualDesktopX) + ", " + std::to_string(clickTransformResult.virtualDesktopY) + ") -> Absolute (" + std::to_string(input.mi.dx) + ", " + std::to_string(input.mi.dy) + ")");
+				} else {
+					InputMetrics::inc(InputMetrics::mouseCoordTransformErrors());
+					std::cerr << "[MouseInputHandler] Click coordinate transformation failed: " << clickTransformResult.errorMessage << std::endl;
+					return;
+				}
 			}
 		}
 		else if (eventType == "wheel") {
