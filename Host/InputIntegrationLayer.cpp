@@ -6,6 +6,7 @@
 #include <thread>
 #include <chrono>
 #include "ShutdownManager.h"
+#include "InputConfig.h"
 
 namespace InputIntegrationLayer {
 

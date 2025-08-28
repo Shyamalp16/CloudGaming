@@ -12,6 +12,7 @@
 #include "VideoMetrics.h"
 #include "InputIntegrationLayer.h"
 #include "LegacyWebSocketCompat.h"
+#include "InputConfig.h"
 
 // Forward declarations for blocking queue functions
 void enqueueKeyboardMessage(const std::string& message);

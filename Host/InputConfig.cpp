@@ -142,6 +142,9 @@ bool loadFromJson(const nlohmann::json& jsonConfig) {
         if (jsonConfig.contains("enableSequenceRecovery")) {
             globalInputConfig.enableSequenceRecovery = jsonConfig["enableSequenceRecovery"];
         }
+        if (jsonConfig.contains("enableMouseSequencing")) {
+            globalInputConfig.enableMouseSequencing = jsonConfig["enableMouseSequencing"];
+        }
         if (jsonConfig.contains("maxRecoveryAttempts")) {
             globalInputConfig.maxRecoveryAttempts = jsonConfig["maxRecoveryAttempts"];
         }
@@ -217,6 +220,7 @@ nlohmann::json saveToJson() {
     // Recovery and safety
     config["enableStuckKeyRecovery"] = globalInputConfig.enableStuckKeyRecovery;
     config["enableSequenceRecovery"] = globalInputConfig.enableSequenceRecovery;
+    config["enableMouseSequencing"] = globalInputConfig.enableMouseSequencing;
     config["maxRecoveryAttempts"] = globalInputConfig.maxRecoveryAttempts;
 
     // Logging and debugging

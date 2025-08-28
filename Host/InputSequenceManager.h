@@ -21,7 +21,7 @@ struct SequenceConfig {
 // Sequence state for a client session
 struct SequenceState {
     std::atomic<uint64_t> lastReceivedSeq{0};   // Last received sequence number
-    std::atomic<uint64_t> expectedSeq{1};       // Expected next sequence number
+    std::atomic<uint64_t> expectedSeq{0};       // Expected next sequence number
     std::atomic<uint64_t> gapsDetected{0};      // Total gaps detected
     std::atomic<uint64_t> recoveriesTriggered{0}; // Total recoveries triggered
     std::atomic<uint64_t> snapshotsRequested{0}; // Snapshots requested

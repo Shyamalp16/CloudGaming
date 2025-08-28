@@ -192,9 +192,9 @@ void Layer::pionMessageLoop() {
                     stats.pionMessagesReceived++;
                 }
             } else {
-                // Wait for new messages with timeout
+                // Wait for new messages with shorter timeout for responsiveness
                 std::unique_lock<std::mutex> lock(queueMutex);
-                queueCondition.wait_for(lock, std::chrono::milliseconds(100),
+                queueCondition.wait_for(lock, std::chrono::milliseconds(5),
                     [this]() { return shouldStop.load(); });
             }
         } catch (const std::exception& e) {

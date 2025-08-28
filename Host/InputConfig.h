@@ -67,6 +67,7 @@ struct InputConfiguration {
     // Recovery and safety
     bool enableStuckKeyRecovery = true;         // Enable automatic stuck key recovery
     bool enableSequenceRecovery = true;         // Enable sequence-based desynchronization recovery
+    bool enableMouseSequencing = false;         // Enable sequence processing for mouse events
     int maxRecoveryAttempts = 3;                // Max recovery attempts before giving up
 
     // Logging and debugging

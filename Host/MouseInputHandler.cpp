@@ -17,6 +17,7 @@
 #include "InputStats.h"
 #include "MouseCoordinateTransform.h"
 #include "InputSequenceManager.h"
+#include "InputConfig.h"
 
 
 using json = nlohmann::json;
@@ -141,7 +142,10 @@ CoalescedMouseMove globalCoalescedMouseMove;
 
 		// Log significant clamping changes (more than 10 pixels to avoid spam)
 		if (logSignificantChanges && wasClamped && ((abs(x - originalX) > 10) || (abs(y - originalY) > 10))) {
-			std::cout << "[MouseInputHandler] Clamped coordinates: (" << originalX << ", " << originalY << ") -> (" << x << ", " << y << ")" << std::endl;
+			// Log coordinate clamping only if per-event logging is enabled
+			if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+				std::cout << "[MouseInputHandler] Clamped coordinates: (" << originalX << ", " << originalY << ") -> (" << x << ", " << y << ")" << std::endl;
+			}
 		}
 	}
 
@@ -213,10 +217,13 @@ CoalescedMouseMove globalCoalescedMouseMove;
 					InputMetrics::inc(InputMetrics::mouseCoordClipped());
 				}
 
-				std::cout << "[MouseInputHandler] Transformed Mouse Move: (" << x << ", " << y << ") -> "
-						 << "Virtual Desktop (" << transformResult.virtualDesktopX << ", " << transformResult.virtualDesktopY << ") -> "
-						 << "Absolute (" << input.mi.dx << ", " << input.mi.dy << ")"
-						 << (transformResult.wasClipped ? " [CLIPPED]" : "") << std::endl;
+				// Log transformation details only if per-event logging is enabled
+				if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+					std::cout << "[MouseInputHandler] Transformed Mouse Move: (" << x << ", " << y << ") -> "
+							 << "Virtual Desktop (" << transformResult.virtualDesktopX << ", " << transformResult.virtualDesktopY << ") -> "
+							 << "Absolute (" << input.mi.dx << ", " << input.mi.dy << ")"
+							 << (transformResult.wasClipped ? " [CLIPPED]" : "") << std::endl;
+				}
 			} else {
 				InputMetrics::inc(InputMetrics::mouseCoordTransformErrors());
 				std::cerr << "[MouseInputHandler] Coordinate transformation failed: " << transformResult.errorMessage << std::endl;
@@ -343,7 +350,10 @@ CoalescedMouseMove globalCoalescedMouseMove;
 			input.mi.dwFlags = MOUSEEVENTF_WHEEL;
 			input.mi.mouseData = steps * WHEEL_DELTA;
 
-			std::cout << "[MouseInputHandler] Simulating Vertical Wheel - DeltaY: " << y << " -> mouseData: " << input.mi.mouseData << std::endl;
+			// Log wheel simulation details only if per-event logging is enabled
+			if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+				std::cout << "[MouseInputHandler] Simulating Vertical Wheel - DeltaY: " << y << " -> mouseData: " << input.mi.mouseData << std::endl;
+			}
 		}
 		else if (eventType == "hwheel") {
 			// Handle horizontal wheel events
@@ -365,7 +375,10 @@ CoalescedMouseMove globalCoalescedMouseMove;
 			input.mi.dwFlags = MOUSEEVENTF_HWHEEL;
 			input.mi.mouseData = steps * WHEEL_DELTA;
 
-			std::cout << "[MouseInputHandler] Simulating Horizontal Wheel - DeltaX: " << x << " -> mouseData: " << input.mi.mouseData << std::endl;
+			// Log horizontal wheel simulation details only if per-event logging is enabled
+			if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+				std::cout << "[MouseInputHandler] Simulating Horizontal Wheel - DeltaX: " << x << " -> mouseData: " << input.mi.mouseData << std::endl;
+			}
 		}
 		else {
 			std::cerr << "[MouseInputHandler] Unknown event type for mouse simulation: " << eventType << std::endl;
@@ -387,7 +400,10 @@ CoalescedMouseMove globalCoalescedMouseMove;
 		}
 		else {
 			InputMetrics::inc(InputMetrics::injectedMouse());
-			std::cout << "[MouseInputHandler] SendInput succeeded for mouse event '" << eventType << "'" << std::endl;
+			// Log SendInput success only if per-event logging is enabled
+			if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+				std::cout << "[MouseInputHandler] SendInput succeeded for mouse event '" << eventType << "'" << std::endl;
+			}
 			InputInjection::markInjectionSuccess();
 		}
 	}
@@ -426,8 +442,10 @@ CoalescedMouseMove globalCoalescedMouseMove;
 							sequenceId = j["sequenceId"].get<uint64_t>();
 						}
 
-						// Process sequence ID through sequence manager
-						auto gapResult = InputSequenceManager::globalSequenceManager.processSequence(sequenceId, "mouse");
+						// Process sequence ID through sequence manager (if enabled for mouse events)
+						if (InputConfig::globalInputConfig.enableMouseSequencing && sequenceId > 0) {
+							auto gapResult = InputSequenceManager::globalSequenceManager.processSequence(sequenceId, "mouse");
+						}
 
 						// Track mouse event received
 						InputStats::Track::mouseEventReceived();
@@ -487,8 +505,11 @@ CoalescedMouseMove globalCoalescedMouseMove;
 								x = j[InputSchema::kX].get<int>();
 								y = j[InputSchema::kY].get<int>();
 								button = j[InputSchema::kButton].get<int>();
-								std::cout << "[MouseInput] " << (jsType == "mousedown" ? "DOWN" : "UP  ")
-										  << " btn=" << button << " x=" << x << " y=" << y << std::endl;
+								// Log mouse button events only if per-event logging is enabled
+								if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+									std::cout << "[MouseInput] " << (jsType == "mousedown" ? "DOWN" : "UP  ")
+											  << " btn=" << button << " x=" << x << " y=" << y << std::endl;
+								}
 
 								// Collect action parameters inside minimal lock
 								bool simulateAction = false;
@@ -512,7 +533,10 @@ CoalescedMouseMove globalCoalescedMouseMove;
 											simulateAction = true;
 										}
 										else {
-											std::cout << "[MouseInputHandler] State: Mouse button " << button << " already down. Ignoring re-press." << std::endl;
+											// Log state validation issues only if per-event logging is enabled
+											if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+												std::cout << "[MouseInputHandler] State: Mouse button " << button << " already down. Ignoring re-press." << std::endl;
+											}
 										}
 									}
 									else {
@@ -521,7 +545,10 @@ CoalescedMouseMove globalCoalescedMouseMove;
 											simulateAction = true;
 										}
 										else {
-											std::cout << "[MouseInputHandler] State: Mouse button " << button << " was not reported down. Ignoring release." << std::endl;
+											// Log state validation issues only if per-event logging is enabled
+											if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+												std::cout << "[MouseInputHandler] State: Mouse button " << button << " was not reported down. Ignoring release." << std::endl;
+											}
 										}
 									}
 								}

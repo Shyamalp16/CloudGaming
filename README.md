@@ -943,6 +943,7 @@ The input system is configured through the `host.input` section in `config.json`
       "stuckKeyTimeoutMs": 2000,
       "enableStuckKeyRecovery": true,
       "enableSequenceRecovery": true,
+      "enableMouseSequencing": false,
       "maxRecoveryAttempts": 3,
       "enablePerEventLogging": false,
       "enableAggregatedLogging": true,
@@ -986,6 +987,7 @@ The input system is configured through the `host.input` section in `config.json`
 - `stuckKeyTimeoutMs`: Timeout before declaring a key as stuck
 - `enableStuckKeyRecovery`: Enable automatic stuck key recovery
 - `enableSequenceRecovery`: Enable sequence-based desynchronization recovery
+- `enableMouseSequencing`: Enable sequence processing for mouse events (default: false)
 - `maxRecoveryAttempts`: Maximum recovery attempts before giving up
 
 ##### Logging and Debugging:
@@ -1181,12 +1183,37 @@ StateStats{keys:45, mouse:103, stuckDetected:0, stuckRecovered:0, seqGaps:0, inv
 - Error rate tracking
 - Performance degradation alerts
 
+#### Troubleshooting Sequence Issues:
+
+**"Out-of-order message" logs for mouse events:**
+- **Cause**: Mouse events without sequence IDs default to sequence 0, but sequence manager expects sequence 1+
+- **Solution**: Mouse sequencing is disabled by default (`enableMouseSequencing: false`)
+- **Alternative**: If you need mouse sequencing, ensure client sends proper sequence IDs starting from 1
+
+**Gap detection warnings:**
+- **Cause**: Network packet loss or client-side sequencing issues
+- **Solution**: Enable sequence recovery (`enableSequenceRecovery: true`) and stuck key recovery
+- **Monitoring**: Check `sequenceGapsDetected` metric in statistics
+
+**High sequence gap counts:**
+- **Cause**: Network instability or client disconnect/reconnect
+- **Solution**: Reduce `maxGapBeforeRecovery` or increase `recoveryThrottleMs`
+
 ### 23. Configuration Recommendations
 
 #### For Gaming:
 - **Logging**: Disable per-event logging, enable coalescing, 1-minute aggregated stats
-- **Sequence**: Short recovery timeouts, enable all recovery mechanisms
+- **Sequence**: Short recovery timeouts, enable all recovery mechanisms, disable mouse sequencing
 - **Injection**: Allow focus steal, skip foreground checks for overlay support
+
+#### Mouse Sequencing:
+Mouse events are high-frequency and typically don't require strict ordering guarantees like keyboard events. By default, mouse sequencing is disabled to prevent unnecessary "out-of-order" messages. Enable only if your use case requires mouse event ordering:
+
+```json
+{
+  "enableMouseSequencing": false  // Recommended for most applications
+}
+```
 
 #### InputIntegrationLayer Configuration:
 The integration layer provides additional configuration options that are set in code:

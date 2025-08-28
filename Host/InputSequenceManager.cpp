@@ -98,6 +98,12 @@ GapResult SequenceManager::detectGap(uint64_t sequenceId) {
     uint64_t expectedSeq = state_.expectedSeq.load();
     uint64_t lastReceivedSeq = state_.lastReceivedSeq.load();
 
+    // First message - no gap possible
+    if (lastReceivedSeq == 0 && expectedSeq == 0) {
+        result.action = RecoveryAction::NONE;
+        return result;
+    }
+
     // Check for gap
     if (sequenceId > expectedSeq) {
         // Gap detected
@@ -122,10 +128,13 @@ GapResult SequenceManager::detectGap(uint64_t sequenceId) {
                                    result.action == RecoveryAction::RESET_STATE ? "RESET_STATE" : "NONE")
                   << (result.shouldThrottle ? " (THROTTLED)" : "") << std::endl;
 
-    } else if (sequenceId < expectedSeq) {
-        // Out-of-order message (late arrival)
-        std::cout << "[InputSequenceManager] Out-of-order message: expected=" << expectedSeq
-                  << ", received=" << sequenceId << std::endl;
+    } else if (sequenceId < expectedSeq && sequenceId != 0) {
+        // Out-of-order message (late arrival) - but allow sequence 0 as valid first message
+        // Only log if this is a significant out-of-order event (not just sequence 0)
+        if (expectedSeq > 1) {
+            std::cout << "[InputSequenceManager] Out-of-order message: expected=" << expectedSeq
+                      << ", received=" << sequenceId << std::endl;
+        }
     }
 
     return result;
