@@ -1398,6 +1398,80 @@ Key fields:
 - `capture.adaptiveEagainThreshold` (default 10): if EAGAIN events within the window exceed this threshold, increase `minUpdateInterval100ns` by ~10% (capped) to reduce capture rate; if zero events, decrease by ~10% toward the base.
 - `capture.mmcss`: enables Multimedia Class Scheduler (MCSS) "Games" profile for the capture/encode thread with configurable priority.
 
+### Audio Configuration
+
+The Host includes a configurable Opus audio encoder optimized for low-latency gaming. Audio settings are configured in the `host.audio` section of `config.json`:
+
+```json
+{
+  "host": {
+    "audio": {
+      "bitrate": 64000,           // Target bitrate in bps (64-96 kbps recommended for stereo gaming)
+      "complexity": 5,            // Encoder complexity (0-10, 5-6 recommended for low-latency)
+      "expectedLossPerc": 10,     // Expected packet loss percentage for FEC tuning
+      "enableFec": true,          // Enable Forward Error Correction for packet loss resilience
+      "enableDtx": false,         // Enable Discontinuous Transmission (keep disabled for continuous audio)
+      "application": 2049,        // Opus application type (2049 = OPUS_APPLICATION_AUDIO)
+      "frameSizeMs": 10,          // Frame size in milliseconds (10ms optimal for gaming)
+      "channels": 2               // Number of audio channels (2 = stereo)
+    }
+  }
+}
+```
+
+**Audio Configuration Options:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `bitrate` | number | 64000 | Target bitrate in bits per second. Range: 32,000-128,000. 64-96 kbps recommended for stereo gaming. |
+| `complexity` | number | 5 | Encoder complexity (0-10). Higher values = better quality but more CPU. 5-6 recommended for low-latency gaming. |
+| `expectedLossPerc` | number | 10 | Expected packet loss percentage (0-100). Used to tune Forward Error Correction. |
+| `enableFec` | boolean | true | Enable Forward Error Correction. Helps with packet loss but adds slight overhead. |
+| `enableDtx` | boolean | false | Enable Discontinuous Transmission. Keep disabled for continuous gaming/media audio. |
+| `application` | number | 2049 | Opus application type. 2049 = OPUS_APPLICATION_AUDIO (music/gaming). |
+| `frameSizeMs` | number | 10 | Frame size in milliseconds. 10ms = lowest latency, 20ms = more robust. |
+| `channels` | number | 2 | Number of audio channels. 1 = mono, 2 = stereo. |
+
+**Audio Tuning Recommendations:**
+
+#### For Gaming (Low Latency):
+```json
+{
+  "bitrate": 64000,
+  "complexity": 5,
+  "frameSizeMs": 10,
+  "enableFec": true
+}
+```
+
+#### For Voice Chat (Quality):
+```json
+{
+  "bitrate": 96000,
+  "complexity": 6,
+  "frameSizeMs": 20,
+  "enableFec": true
+}
+```
+
+#### For Music Streaming (High Quality):
+```json
+{
+  "bitrate": 128000,
+  "complexity": 8,
+  "frameSizeMs": 20,
+  "enableFec": true
+}
+```
+
+**Audio Features:**
+- **WASAPI Loopback Capture**: Captures system audio output with minimal latency
+- **IAudioClock Timestamps**: Precise timing to prevent A/V drift
+- **DMO Resampler**: High-quality audio resampling when needed
+- **MMCSS Thread Priority**: Ensures audio capture thread priority
+- **Configurable Frame Size**: Balance between latency and robustness
+- **Network Adaptation**: FEC and bitrate tuning for varying network conditions
+
 ### Video Metrics (when `video.exportMetrics` is true)
 - Emitted once per second on the signaling WebSocket as a JSON message with `type: "video-metrics"`:
   - `queueDepth`: current depth of the capture→encode SPSC ring buffer.
