@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <thread>
 #include <chrono>
+#include "WindowUtils.h"
 
 using json = nlohmann::json;
 #include "Metrics.h"
@@ -481,7 +482,13 @@ namespace KeyInputHandler {
 
 						// SendInput outside the lock
 						if (simulateAction && !jsForInject.empty()) {
-							SimulateWindowsKeyEvent(jsForInject, actionIsDown);
+							// Guard: only inject when target window is foreground
+							HWND target = WindowUtils::GetTargetWindow();
+							if (target && GetForegroundWindow() == target) {
+								SimulateWindowsKeyEvent(jsForInject, actionIsDown);
+							} else {
+								LOG_DEBUG("Skipping key inject; target window not in foreground");
+							}
 							if (!actionIsDown) { InputMetrics::inc(InputMetrics::injectedKeys()); }
 						}
 					} else {

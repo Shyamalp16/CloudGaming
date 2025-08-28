@@ -11,6 +11,8 @@
 #include <chrono>
 #include "Metrics.h"
 #include "Config.h"
+#include "WindowUtils.h"
+
 
 using json = nlohmann::json;
 
@@ -334,7 +336,14 @@ namespace MouseInputHandler {
 									lastKnownCursorX = x;
 									lastKnownCursorY = y;
 								}
-								simulateWindowsMouseEvent(jsType, x, y, -1);
+								{
+									HWND target = WindowUtils::GetTargetWindow();
+									if (target && GetForegroundWindow() == target) {
+										simulateWindowsMouseEvent(jsType, x, y, -1);
+									} else {
+										MouseLogDebug("[MouseInput] Skipping MOVE inject; target window not foreground");
+									}
+								}
 							}
 							else {
 								std::cerr << "[MouseInputHandler] Missing 'x' or 'y' in mouse move message." << std::endl;
@@ -386,7 +395,12 @@ namespace MouseInputHandler {
 
 								// SendInput outside the lock
 								if (simulateAction) {
-									simulateWindowsMouseEvent(actionType, actionX, actionY, actionButton);
+									HWND target = WindowUtils::GetTargetWindow();
+									if (target && GetForegroundWindow() == target) {
+										simulateWindowsMouseEvent(actionType, actionX, actionY, actionButton);
+									} else {
+										MouseLogDebug("[MouseInput] Skipping click inject; target window not foreground");
+									}
 								}
 							}
 							else {

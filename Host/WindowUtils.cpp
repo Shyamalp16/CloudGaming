@@ -6,6 +6,16 @@
 
 namespace WindowUtils {
 
+static HWND g_targetWindow = nullptr;
+
+void SetTargetWindow(HWND hwnd) {
+    g_targetWindow = hwnd;
+}
+
+HWND GetTargetWindow() {
+    return g_targetWindow;
+}
+
 bool PickWindowByProcessName(const std::wstring& processName, HWND& outHwnd, DWORD& outProcessId)
 {
     auto matches = FindWindowsByProcessName(processName);
@@ -16,6 +26,7 @@ bool PickWindowByProcessName(const std::wstring& processName, HWND& outHwnd, DWO
     if (matches.empty()) return false;
     outHwnd = matches[0].hwnd;
     outProcessId = matches[0].processId;
+    SetTargetWindow(outHwnd);
     return outHwnd != nullptr;
 }
 

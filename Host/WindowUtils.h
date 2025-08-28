@@ -14,6 +14,10 @@ namespace WindowUtils {
 
     // Create capture item for window
     winrt::Windows::Graphics::Capture::GraphicsCaptureItem CreateItem(HWND hwnd);
+
+    // Target window management for input focus
+    void SetTargetWindow(HWND hwnd);
+    HWND GetTargetWindow();
 }
 
 
