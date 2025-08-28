@@ -153,7 +153,7 @@ extern "C" {
     };
 
     // Safe mouse message retrieval with RAII
-    static CStringWrapper getMouseChannelMessageSafe();
+    CStringWrapper getMouseChannelMessageSafe();
 
 } // namespace WebRTCWrapper
 }
