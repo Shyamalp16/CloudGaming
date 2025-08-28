@@ -7,6 +7,7 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <audiopolicy.h>
+#include <avrt.h>  // MMCSS (Multimedia Class Scheduler Service)
 #include <vector>
 #include <memory>
 #include <chrono>
@@ -59,6 +60,10 @@ private:
 
     // Event-driven capture
     HANDLE m_hCaptureEvent = nullptr;
+
+    // MMCSS (Multimedia Class Scheduler Service) for thread prioritization
+    HANDLE m_hMmcssTask = nullptr;
+    DWORD m_mmcssTaskIndex = 0;
 
     // Persistent audio float buffer to avoid per-packet allocations
     std::vector<float> m_floatBuffer;

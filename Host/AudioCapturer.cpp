@@ -124,6 +124,28 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         return;
     }
 
+    // Register this thread with MMCSS for proper scheduling priority
+    // This helps prevent audio glitching under system load
+    m_hMmcssTask = AvSetMmThreadCharacteristicsW(L"Pro Audio", &m_mmcssTaskIndex);
+    if (m_hMmcssTask == nullptr) {
+        // Fallback to "Audio" if "Pro Audio" is not available
+        m_hMmcssTask = AvSetMmThreadCharacteristicsW(L"Audio", &m_mmcssTaskIndex);
+    }
+
+    if (m_hMmcssTask != nullptr) {
+        // Set thread priority for low-latency audio processing
+        BOOL prioritySet = AvSetMmThreadPriority(m_hMmcssTask, AVRT_PRIORITY_HIGH);
+        if (prioritySet) {
+            std::wcout << L"[AudioCapturer] MMCSS registered successfully (task index: " << m_mmcssTaskIndex
+                       << L", priority: HIGH)" << std::endl;
+        } else {
+            std::wcerr << L"[AudioCapturer] Failed to set MMCSS thread priority: " << GetLastError() << std::endl;
+        }
+    } else {
+        std::wcerr << L"[AudioCapturer] Failed to register thread with MMCSS: " << GetLastError()
+                   << L" (audio may glitch under system load)" << std::endl;
+    }
+
     IMMDeviceCollection* pCollection = NULL;
     IAudioSessionManager2* pSessionManager = NULL;
     IAudioSessionEnumerator* pSessionEnumerator = NULL;
@@ -346,10 +368,110 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         }
     }
 
+    // ============================================================================
+    // FALLBACK: Per-process audio session not found, try default device loopback
+    // ============================================================================
     if (!m_pAudioClient)
     {
         std::wcerr << L"[AudioCapturer] Could not find audio session for process ID: " << targetProcessId << std::endl;
-        goto Exit;
+        std::wcerr << L"[AudioCapturer] This may happen if:" << std::endl;
+        std::wcerr << L"[AudioCapturer]   - The target process is not producing audio" << std::endl;
+        std::wcerr << L"[AudioCapturer]   - The process has already exited" << std::endl;
+        std::wcerr << L"[AudioCapturer]   - Audio is being routed through a different device" << std::endl;
+        std::wcout << L"[AudioCapturer] Attempting fallback to default render device with loopback capture..." << std::endl;
+
+        // Fallback: Try to use the default render device with loopback
+        hr = m_pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &m_pDevice);
+        if (FAILED(hr))
+        {
+            std::wcerr << L"[AudioCapturer] Failed to get default render device: " << _com_error(hr).ErrorMessage()
+                       << L" (HRESULT: 0x" << std::hex << hr << std::dec << L")" << std::endl;
+            std::wcerr << L"[AudioCapturer] Audio capture initialization failed completely." << std::endl;
+            std::wcerr << L"[AudioCapturer] Possible causes:" << std::endl;
+            std::wcerr << L"[AudioCapturer]   - No audio devices available" << std::endl;
+            std::wcerr << L"[AudioCapturer]   - Audio service not running" << std::endl;
+            std::wcerr << L"[AudioCapturer]   - Insufficient permissions" << std::endl;
+            goto Exit;
+        }
+
+        std::wcout << L"[AudioCapturer] Using default render device with loopback capture." << std::endl;
+
+        hr = m_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, reinterpret_cast<void**>(m_pAudioClient.ReleaseAndGetAddressOf()));
+        if (FAILED(hr))
+        {
+            std::wcerr << L"[AudioCapturer] Unable to activate audio client for default device: " << _com_error(hr).ErrorMessage() << std::endl;
+            goto Exit;
+        }
+
+        hr = m_pAudioClient->GetMixFormat(&pwfx);
+        if (FAILED(hr))
+        {
+            std::wcerr << L"[AudioCapturer] Unable to get mix format for default device: " << _com_error(hr).ErrorMessage() << std::endl;
+            goto Exit;
+        }
+
+        std::wcout << L"[AudioCapturer] Default device mix format: wFormatTag=" << pwfx->wFormatTag
+            << L", nChannels=" << pwfx->nChannels
+            << L", nSamplesPerSec=" << pwfx->nSamplesPerSec
+            << L", nAvgBytesPerSec=" << pwfx->nAvgBytesPerSec
+            << L", nBlockAlign=" << pwfx->nBlockAlign
+            << L", wBitsPerSample=" << pwfx->wBitsPerSample
+            << L", cbSize=" << pwfx->cbSize << std::endl;
+
+        // Try event-driven mode first for ultra-low latency
+        DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        hr = m_pAudioClient->Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            streamFlags,
+            hnsRequestedDuration,
+            0,
+            const_cast<const WAVEFORMATEX*>(pwfx),
+            NULL);
+
+        if (FAILED(hr))
+        {
+            std::wcerr << L"[AudioCapturer] Event-driven init failed for default device; retrying in polling mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
+            // Retry without EVENTCALLBACK
+            hr = m_pAudioClient->Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_LOOPBACK,
+                hnsRequestedDuration,
+                0,
+                const_cast<const WAVEFORMATEX*>(pwfx),
+                NULL);
+            if (FAILED(hr)) {
+                std::wcerr << L"[AudioCapturer] Unable to initialize audio client for default device: " << _com_error(hr).ErrorMessage() << std::endl;
+                goto Exit;
+            }
+        }
+
+        hr = m_pAudioClient->GetBufferSize(&bufferFrameCount);
+        if (FAILED(hr))
+        {
+            std::wcerr << L"[AudioCapturer] Unable to get buffer size for default device: " << _com_error(hr).ErrorMessage() << std::endl;
+            goto Exit;
+        }
+
+        std::wcout << L"[AudioCapturer] Default device buffer frame count: " << bufferFrameCount << std::endl;
+
+        hr = m_pAudioClient->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(m_pCaptureClient.ReleaseAndGetAddressOf()));
+        if (FAILED(hr))
+        {
+            std::wcerr << L"[AudioCapturer] Unable to get capture client for default device: " << _com_error(hr).ErrorMessage() << std::endl;
+            goto Exit;
+        }
+
+        // Query IAudioClock for precise timestamps
+        hr = m_pAudioClient->GetService(__uuidof(IAudioClock), reinterpret_cast<void**>(m_pAudioClock.ReleaseAndGetAddressOf()));
+        if (SUCCEEDED(hr) && m_pAudioClock) {
+            UINT64 freq = 0;
+            if (SUCCEEDED(m_pAudioClock->GetFrequency(&freq))) {
+                m_audioClockFreq = freq;
+                std::wcout << L"[AudioCapturer] Default device AudioClock frequency: " << freq << std::endl;
+            }
+        }
+
+        std::wcout << L"[AudioCapturer] Successfully initialized default device with loopback capture." << std::endl;
     }
 
     // Release local COM objects that are no longer needed
@@ -581,6 +703,18 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
 Exit:
     std::wcout << L"[AudioCapturer] Audio capture stopped." << std::endl;
+
+    // Clean up MMCSS registration
+    if (m_hMmcssTask != nullptr) {
+        BOOL mmcssReverted = AvRevertMmThreadCharacteristics(m_hMmcssTask);
+        if (mmcssReverted) {
+            std::wcout << L"[AudioCapturer] MMCSS registration cleaned up successfully." << std::endl;
+        } else {
+            std::wcerr << L"[AudioCapturer] Failed to clean up MMCSS registration: " << GetLastError() << std::endl;
+        }
+        m_hMmcssTask = nullptr;
+        m_mmcssTaskIndex = 0;
+    }
 
     if (m_hCaptureEvent) { CloseHandle(m_hCaptureEvent); m_hCaptureEvent = nullptr; }
     if (pwfx) { CoTaskMemFree(pwfx); pwfx = nullptr; }
