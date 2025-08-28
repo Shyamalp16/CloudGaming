@@ -24,7 +24,8 @@ AudioCapturer::AudioCapturer() :
     m_pCaptureClient(nullptr),
     m_nextFrameTime(0),
     m_rtpTimestamp(0),
-    m_samplesPerFrame(960), // 20ms at 48kHz (will be updated based on Opus settings)
+    m_frameSizeSamples(480), // 10ms at 48kHz (will be updated based on Opus settings)
+    m_samplesPerFrame(960), // 10ms at 48kHz stereo (will be updated based on Opus settings)
     m_accumulatedCount(0)   // Initialize accumulation counter
 {
     // Initialize Opus encoder with optimized settings for low-latency gaming
@@ -33,11 +34,11 @@ AudioCapturer::AudioCapturer() :
     // Pre-allocate all audio buffers to reduce reallocations during runtime
     // Reserve space for multiple frames to handle bursty audio data
 
-    // Accumulation buffer for frame assembly
+    // Accumulation buffer for frame assembly (10ms frames at 48kHz stereo)
     m_accumulatedSamples.reserve(m_samplesPerFrame * 4); // Reserve space for 4 frames
 
     // PCM to float conversion buffer (sized for maximum expected frame size)
-    m_floatBuffer.reserve(m_samplesPerFrame * 2); // Reserve space for stereo processing
+    m_floatBuffer.reserve(m_samplesPerFrame * 2); // Reserve space for stereo processing (10ms frames)
 
     // Frame buffer for encoder input (exact size needed)
     m_frameBuffer.resize(m_samplesPerFrame); // Exact size for encoder
@@ -53,11 +54,18 @@ bool AudioCapturer::StartCapture(DWORD processId)
 {
     m_stopCapture = false;
     
-    // Initialize Opus encoder with optimized settings for low-latency gaming
+    // ============================================================================
+    // OPUS ENCODER CONFIGURATION - Optimized for low-latency gaming
+    // ============================================================================
+    // Frame Size: 10ms (480 samples at 48kHz) - Better latency than 20ms frames
+    // RTP timestamps increment by 480 per frame (not 960) for correct timing
+    // Total samples per frame = frameSize * channels = 480 * 2 = 960 samples
+    // ============================================================================
+
     OpusEncoderWrapper::Settings settings;
     settings.sampleRate = 48000;        // 48 kHz
     settings.channels = 2;              // Stereo for game/media audio
-    settings.frameSize = 480;           // 10ms frames at 48kHz
+    settings.frameSize = 480;           // 10ms frames at 48kHz (optimal for gaming)
     settings.bitrate = 64000;           // 64 kbps for stereo
     settings.complexity = 6;            // Balance between quality and CPU usage
     settings.useVbr = true;             // Variable bitrate
@@ -76,7 +84,8 @@ bool AudioCapturer::StartCapture(DWORD processId)
     m_startTime = std::chrono::high_resolution_clock::now();
     m_nextFrameTime = 0;
     m_rtpTimestamp = 0;
-    m_samplesPerFrame = settings.frameSize * settings.channels;
+    m_frameSizeSamples = settings.frameSize;  // Samples per frame per channel (for RTP timestamps)
+    m_samplesPerFrame = settings.frameSize * settings.channels;  // Total samples per frame
     m_frameBuffer.resize(m_samplesPerFrame);
     
     std::wcout << L"[AudioCapturer] Initialized Opus encoder: " 
@@ -538,7 +547,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     }
 
     // Calculate optimal polling interval aligned with Opus frame timing
-    // Opus uses 10ms frames (480 samples at 48kHz) for low-latency encoding
+    // Opus uses 10ms frames (480 samples at 48kHz) for low-latency gaming
     if (pwfx && pwfx->nSamplesPerSec) {
         // Calculate buffer duration in milliseconds
         DWORD bufferMs = (bufferFrameCount * 1000u) / pwfx->nSamplesPerSec;
@@ -844,8 +853,9 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
     std::copy(samples, samples + sampleCount, m_accumulatedSamples.begin() + currentSize);
     m_accumulatedCount += sampleCount;
 
-    // Process complete frames based on Opus frame size (ensures consistent latency)
-    // m_samplesPerFrame is derived from Opus settings (e.g., 480 for 10ms at 48kHz, 960 for 20ms)
+    // Process complete 10ms frames based on Opus frame size (ensures consistent latency)
+    // m_samplesPerFrame = frameSize * channels = 480 * 2 = 960 total samples (10ms frames)
+    // RTP timestamps increment by m_frameSizeSamples (480) per frame for correct timing
     while (m_accumulatedCount >= m_samplesPerFrame) {
         // Extract one complete frame from the accumulated buffer
         std::copy(m_accumulatedSamples.begin(), m_accumulatedSamples.begin() + m_samplesPerFrame, m_frameBuffer.begin());
@@ -861,8 +871,8 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
                 int64_t relativeTimeUs = timestampUs - m_initialAudioClockTime;
                 rtpTimestamp = static_cast<uint32_t>((relativeTimeUs * 48LL) / 1000LL);
             } else {
-                // Fallback: increment RTP timestamp
-                m_rtpTimestamp += static_cast<uint32_t>(m_samplesPerFrame);
+                // Fallback: increment RTP timestamp by frame size (samples per channel)
+                m_rtpTimestamp += static_cast<uint32_t>(m_frameSizeSamples);
                 rtpTimestamp = m_rtpTimestamp;
             }
 
@@ -1173,13 +1183,14 @@ bool AudioCapturer::ProcessResamplerDMO(const float* inputData, size_t inputSamp
     }
 
     // Validate frame alignment for Opus encoding
-    // Opus frames should be multiples of 480 samples (10ms at 48kHz)
-    size_t outputFrames = outputData.size() / m_currentInputChannels;
-    const size_t OPUS_FRAME_SAMPLES = 480; // 10ms at 48kHz
+    // Opus frames should be multiples of 480 samples per channel (10ms at 48kHz)
+    size_t outputFramesPerChannel = outputData.size() / m_currentInputChannels;
+    const size_t OPUS_FRAME_SAMPLES = 480; // 10ms at 48kHz per channel
 
-    if (outputFrames % OPUS_FRAME_SAMPLES != 0) {
+    if (outputFramesPerChannel % OPUS_FRAME_SAMPLES != 0) {
         std::wcerr << L"[AudioCapturer] Warning: DMO output not aligned with Opus frames. "
-                   << L"Output frames: " << outputFrames << L", expected multiple of " << OPUS_FRAME_SAMPLES << std::endl;
+                   << L"Output samples per channel: " << outputFramesPerChannel
+                   << L", expected multiple of " << OPUS_FRAME_SAMPLES << std::endl;
     }
 
     return true;

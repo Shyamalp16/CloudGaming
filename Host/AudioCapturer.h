@@ -98,7 +98,8 @@ private:
     // Opus encoder
     std::unique_ptr<OpusEncoderWrapper> m_opusEncoder;
     std::vector<float> m_frameBuffer;
-    size_t m_samplesPerFrame;
+    size_t m_samplesPerFrame;     // Total samples per frame (frameSize * channels)
+    size_t m_frameSizeSamples;    // Samples per frame per channel (for RTP timestamps)
 
     // Per-instance audio frame accumulation (replaces static variables)
     std::vector<float> m_accumulatedSamples;
