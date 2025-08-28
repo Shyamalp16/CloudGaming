@@ -69,6 +69,7 @@ private:
     void StopQueueProcessor();
     void QueueProcessorThread();
     bool QueueAudioPacket(std::vector<uint8_t>& data, int64_t timestampUs, uint32_t rtpTimestamp);
+    bool QueueAudioPacket(const uint8_t* buffer, size_t size, int64_t timestampUs, uint32_t rtpTimestamp);
     void ProcessQueuedPackets();
 
     // Dedicated encoder thread methods
@@ -197,9 +198,10 @@ private:
         uint32_t rtpTimestamp;
     };
 
-    // Reusable buffer for encoded audio (avoid per-frame allocations)
-    static constexpr size_t ENCODED_BUFFER_SIZE = 1500; // Opus max packet size
-    std::vector<uint8_t> m_encodedBuffer;
+    // Fixed-size buffer for encoded audio (avoid heap churn)
+    // Opus packets are typically <256 bytes at 64 kbps, so 512 bytes is sufficient
+    static constexpr size_t ENCODED_BUFFER_SIZE = 512; // Optimized for Opus packet sizes
+    std::array<uint8_t, ENCODED_BUFFER_SIZE> m_encodedBuffer;
 
     // Minimal queue for audio packets (effectively zero/one to let WebRTC handle congestion)
     static constexpr size_t MAX_QUEUE_SIZE = 1;

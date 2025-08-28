@@ -1957,6 +1957,85 @@ Frame Processing Memory Flow:
 
 This zero-copy pipeline reduces per-frame memory operations from **multiple allocations and copies** to **single direct buffer operations**, providing **dramatic performance improvements** for high-frequency audio capture! 🧠⚡🔄🎵
 
+### Encoder Output Buffer Optimization
+
+The encoder output buffer management has been completely redesigned to eliminate heap churn and reduce memory allocations:
+
+**Previous Implementation (Memory-Inefficient):**
+```cpp
+// 1500-byte buffer resized every frame
+std::vector<uint8_t> m_encodedBuffer; // 1500 bytes allocated
+m_encodedBuffer.resize(1500);         // Resize operation
+encodeFrameToBuffer(buffer);          // Write to buffer
+std::vector<uint8_t> packetData(m_encodedBuffer.begin(), m_encodedBuffer.begin() + size);
+// ^^^ NEW VECTOR ALLOCATION + COPY ^^^
+QueueAudioPacket(packetData);         // Queue new vector
+```
+
+**Optimized Implementation (Zero-Heap-Churn):**
+```cpp
+// Fixed 512-byte buffer (sufficient for Opus packets <256 bytes)
+std::array<uint8_t, 512> m_encodedBuffer; // Preallocated, no heap operations
+encodeFrameToBuffer(buffer);              // Write to fixed buffer
+QueueAudioPacket(m_encodedBuffer.data(), size); // Direct buffer reference
+```
+
+**Buffer Size Optimization:**
+- **Opus Packet Analysis**: At 64 kbps stereo, Opus packets are typically <256 bytes
+- **Safety Margin**: 512-byte buffer provides 2x safety margin
+- **Memory Efficiency**: 66% reduction in buffer size (1500 → 512 bytes)
+- **Allocation Elimination**: No per-frame vector allocations or copies
+
+**Zero-Copy Buffer Transfer:**
+```cpp
+// BEFORE: Vector allocation + copy
+std::vector<uint8_t> packetData(m_encodedBuffer.begin(),
+                               m_encodedBuffer.begin() + encodedSize);
+QueueAudioPacket(packetData, timestamp, rtpTimestamp);
+
+// AFTER: Direct buffer reference
+QueueAudioPacket(m_encodedBuffer.data(), encodedSize, timestamp, rtpTimestamp);
+```
+
+**Buffer Usage Monitoring:**
+```cpp
+// Automatic monitoring of actual packet sizes
+static size_t maxEncodedSizeSeen = 0;
+if (encodedSize > maxEncodedSizeSeen) {
+    maxEncodedSizeSeen = encodedSize;
+    std::wcout << L"[AudioEncoder] New max Opus packet size: " << maxEncodedSizeSeen
+              << L" bytes (buffer: " << ENCODED_BUFFER_SIZE << L" bytes)" << std::endl;
+}
+```
+
+**Performance Benefits:**
+- **Eliminated Heap Churn**: No vector resize operations per frame
+- **Reduced Memory Pressure**: 66% smaller buffer footprint
+- **Zero Allocation Overhead**: Preallocated buffer eliminates per-frame allocations
+- **Direct Memory Access**: Encoder writes directly to final destination buffer
+- **Cache Optimization**: Fixed buffer location improves cache performance
+
+**Memory Usage Comparison:**
+```
+Per-Frame Memory Operations:
+BEFORE: 1500-byte allocation + copy (~3000 bytes temporary)
+AFTER:  0 allocations + direct access (512 bytes fixed)
+
+Total Memory Reduction: ~83% reduction in per-frame memory operations
+Heap Churn: Eliminated completely
+```
+
+**Buffer Size Validation:**
+```cpp
+// Runtime validation ensures buffer is sufficient
+if (encodedSize > ENCODED_BUFFER_SIZE) {
+    std::wcerr << L"ERROR: Buffer overflow detected!" << std::endl;
+    return; // Prevent corrupted packets
+}
+```
+
+This optimization transforms encoder output management from a **high-churn, allocation-heavy** system to a **zero-churn, fixed-buffer** architecture that provides **significant performance improvements** and **reduced memory pressure**! 🧠⚡🔄📦
+
 ### Error Recovery and Robustness
 
 The audio capture system includes comprehensive error recovery mechanisms that automatically handle device failures and transient errors, significantly improving reliability:

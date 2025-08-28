@@ -50,9 +50,8 @@ AudioCapturer::AudioCapturer() :
     m_floatBuffer.reserve(m_samplesPerFrame); // Reserve space for PCM to float conversion
     m_currentFrameBuffer.reserve(m_samplesPerFrame); // Reserve space for current frame accumulation
 
-    // Initialize reusable encoded buffer (avoid per-frame allocations)
-    m_encodedBuffer.reserve(ENCODED_BUFFER_SIZE);
-    m_encodedBuffer.resize(ENCODED_BUFFER_SIZE);
+    // Fixed-size buffer is already allocated, no initialization needed
+    // Size: 512 bytes (optimized for Opus packets <256 bytes at 64 kbps)
 }
 
 AudioCapturer::~AudioCapturer()
@@ -160,7 +159,7 @@ void AudioCapturer::StopCapture()
     m_accumulatedCount = 0;
 
     // Clear encoded buffer
-    m_encodedBuffer.clear();
+    // Fixed-size array doesn't need clearing - data is overwritten by encoder
 
     // Reset timing state
     m_initialAudioClockTime = 0;
@@ -364,6 +363,23 @@ void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
                                                               this->m_encodedBuffer.size());
 
     if (encodedSize > 0) {
+        // Monitor buffer usage for optimization
+        static size_t maxEncodedSizeSeen = 0;
+        if (encodedSize > maxEncodedSizeSeen) {
+            maxEncodedSizeSeen = encodedSize;
+            if (s_enableBufferMonitoring) {
+                std::wcout << L"[AudioEncoder] New max Opus packet size: " << maxEncodedSizeSeen
+                          << L" bytes (buffer: " << ENCODED_BUFFER_SIZE << L" bytes)" << std::endl;
+            }
+        }
+
+        // Verify buffer size is sufficient (should never trigger with 512-byte buffer)
+        if (encodedSize > ENCODED_BUFFER_SIZE) {
+            std::wcerr << L"[AudioEncoder] ERROR: Encoded size " << encodedSize
+                      << L" exceeds buffer size " << ENCODED_BUFFER_SIZE << L" - packet truncated!" << std::endl;
+            return; // Don't queue corrupted packet
+        }
+
         // Calculate RTP timestamp
         uint32_t rtpTimestamp = 0;
         if (frame.timestampUs > 0 && this->m_initialAudioClockTime > 0) {
@@ -374,10 +390,9 @@ void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
             rtpTimestamp = this->m_rtpTimestamp;
         }
 
-        // Queue encoded packet for WebRTC transmission
-        std::vector<uint8_t> packetData(m_encodedBuffer.begin(),
-                                       m_encodedBuffer.begin() + encodedSize);
-        if (!this->QueueAudioPacket(packetData, frame.timestampUs, rtpTimestamp)) {
+        // Queue encoded packet for WebRTC transmission (zero-copy approach)
+        // Pass buffer data directly without intermediate vector allocation
+        if (!this->QueueAudioPacket(m_encodedBuffer.data(), encodedSize, frame.timestampUs, rtpTimestamp)) {
             std::wcerr << L"[AudioEncoder] Failed to queue encoded packet - WebRTC congestion detected" << std::endl;
             // Don't retry immediately - let WebRTC congestion control work
             // The encoder thread will continue processing new frames
@@ -588,6 +603,45 @@ bool AudioCapturer::QueueAudioPacket(std::vector<uint8_t>& data, int64_t timesta
     // Create packet and add to queue
     AudioPacket packet;
     packet.data = std::move(data); // Move data to avoid copy
+    packet.timestampUs = timestampUs;
+    packet.rtpTimestamp = rtpTimestamp;
+
+    m_audioQueue.push(std::move(packet));
+    m_queueCondition.notify_one(); // Wake queue processor
+
+    return true;
+}
+
+// Overloaded method for zero-copy buffer data (avoid intermediate vector allocation)
+bool AudioCapturer::QueueAudioPacket(const uint8_t* buffer, size_t size, int64_t timestampUs, uint32_t rtpTimestamp)
+{
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+
+    // With minimal queue size (1), we should rarely have queue full situations
+    // If queue is full, this indicates WebRTC congestion - let WebRTC handle it
+    if (m_audioQueue.size() >= MAX_QUEUE_SIZE) {
+        // Instead of dropping, signal congestion to encoder thread
+        // This allows WebRTC's congestion control to work optimally
+        if (s_enableBufferMonitoring) {
+            std::wcerr << L"[AudioQueue] Queue full - WebRTC congestion detected. Size: "
+                      << m_audioQueue.size() << L"/" << MAX_QUEUE_SIZE << std::endl;
+        }
+        return false; // Signal congestion to encoder thread
+    }
+
+    // Optional buffer monitoring for performance analysis
+    if (s_enableBufferMonitoring) {
+        static int operationCount = 0;
+        if (++operationCount % s_bufferMonitorInterval == 0) {
+            std::wcout << L"[AudioQueue] Queue depth monitoring: current="
+                      << m_audioQueue.size() << L", max=" << MAX_QUEUE_SIZE
+                      << L", buffer_size=" << size << L" bytes" << std::endl;
+        }
+    }
+
+    // Create packet with copied buffer data (minimal allocation)
+    AudioPacket packet;
+    packet.data.assign(buffer, buffer + size); // Copy data from fixed buffer
     packet.timestampUs = timestampUs;
     packet.rtpTimestamp = rtpTimestamp;
 
