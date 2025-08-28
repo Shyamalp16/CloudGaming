@@ -48,7 +48,7 @@ struct LoggingConfig {
     bool enablePerEventLogging = false;      // Enable detailed per-event logging
     bool enableAggregatedLogging = true;     // Enable 10Hz aggregated stats
     bool enableMouseMoveCoalescing = true;   // Coalesce rapid mouse moves
-    uint32_t aggregatedLogIntervalMs = 100;  // 10Hz = 100ms interval
+    uint32_t aggregatedLogIntervalMs = 60000;  // 1 minute interval
     uint32_t maxMouseMovesPerFrame = 1;      // Max mouse moves to process per frame
 };
 

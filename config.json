@@ -60,7 +60,7 @@
       "maxRecoveryAttempts": 3,
       "enablePerEventLogging": false,
       "enableAggregatedLogging": true,
-      "logIntervalMs": 100,
+      "logIntervalMs": 60000,
       "usePionDataChannels": true,
       "enableLegacyWebSocket": false,
       "maxPendingMessages": 100,

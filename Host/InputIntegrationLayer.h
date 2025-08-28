@@ -40,7 +40,7 @@ struct IntegrationConfig {
     bool enableNewArchitecture = true;         // Use new InputTransportLayer + InputStateManager
     bool enableLegacyCompatibility = false;    // Keep old direct WebRTC polling for compatibility
     bool enableStatisticsReporting = true;     // Report transport and state statistics
-    std::chrono::milliseconds statsReportInterval = std::chrono::milliseconds(5000);
+    std::chrono::milliseconds statsReportInterval = std::chrono::milliseconds(60000);
 };
 
 /**

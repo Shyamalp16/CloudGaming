@@ -946,7 +946,7 @@ The input system is configured through the `host.input` section in `config.json`
       "maxRecoveryAttempts": 3,
       "enablePerEventLogging": false,
       "enableAggregatedLogging": true,
-      "logIntervalMs": 100,
+      "logIntervalMs": 60000,
       "usePionDataChannels": true,
       "enableLegacyWebSocket": false,
       "maxPendingMessages": 100,
@@ -991,7 +991,7 @@ The input system is configured through the `host.input` section in `config.json`
 ##### Logging and Debugging:
 - `enablePerEventLogging`: Log every input event (performance impact)
 - `enableAggregatedLogging`: Log aggregated statistics
-- `logIntervalMs`: Statistics logging interval
+- `logIntervalMs`: Statistics logging interval in milliseconds (default: 60000 = 1 minute)
 
 ##### Transport Layer:
 - `usePionDataChannels`: Use new Pion WebRTC data channel architecture
@@ -1184,9 +1184,22 @@ StateStats{keys:45, mouse:103, stuckDetected:0, stuckRecovered:0, seqGaps:0, inv
 ### 23. Configuration Recommendations
 
 #### For Gaming:
-- **Logging**: Disable per-event logging, enable coalescing, 10Hz aggregated stats
+- **Logging**: Disable per-event logging, enable coalescing, 1-minute aggregated stats
 - **Sequence**: Short recovery timeouts, enable all recovery mechanisms
 - **Injection**: Allow focus steal, skip foreground checks for overlay support
+
+#### InputIntegrationLayer Configuration:
+The integration layer provides additional configuration options that are set in code:
+
+```cpp
+InputIntegrationLayer::IntegrationConfig config;
+config.enableNewArchitecture = true;         // Use new transport + state management
+config.enableLegacyCompatibility = false;    // Enable legacy WebSocket fallback
+config.enableStatisticsReporting = true;     // Enable periodic statistics logging
+config.statsReportInterval = std::chrono::milliseconds(60000); // 1 minute interval
+```
+
+These settings control how the new input architecture integrates with existing handlers and can be modified by updating the `globalIntegrationConfig` in `InputIntegrationLayer.cpp`.
 - **FSM**: Short timeouts for quick stuck key recovery
 - **Coordinates**: Enable DPI scaling, disable clipping for multi-monitor setups
 - **Key Mapping**: Layout-aware mapping essential for non-US keyboard layouts
