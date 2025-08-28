@@ -1526,6 +1526,7 @@ The system implements comprehensive AV synchronization to prevent drift and ensu
 **RTP Timing:**
 - **Audio**: 48kHz RTP clock rate (48,000 ticks/second)
 - **Video**: 90kHz RTP clock rate (90,000 ticks/second)
+- **Audio RTP Management**: Running increment (prev + samplesPerChannel) for stable inter-packet intervals
 - **Synchronization**: PTS alignment prevents A/V drift over time
 
 **Benefits:**
@@ -1533,6 +1534,7 @@ The system implements comprehensive AV synchronization to prevent drift and ensu
 - **Hardware Precision**: Uses hardware clocks when available
 - **Robust Fallbacks**: Graceful degradation to software clocks
 - **Network Adaptive**: Works with WebRTC's congestion control
+- **Stable RTP Timing**: Predictable inter-packet intervals for optimal jitter buffer performance
 
 ### Minimal Audio Buffering
 
