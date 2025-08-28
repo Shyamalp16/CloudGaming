@@ -42,4 +42,7 @@ extern "C" void resetInputStats();
 extern "C" void resetSequenceState();
 extern "C" const char* getSequenceStats();
 
+// Key mapping test API
+extern "C" bool runKeyMappingTests();
+
 #endif

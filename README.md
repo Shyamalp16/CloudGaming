@@ -611,7 +611,71 @@ bool shouldBlock = shouldBlockKey("MetaLeft"); // Returns true
 - **MetaRight**: Right Windows key (⊞ Win) - blocked by default
 - **Custom Blocking**: Can be extended to block other system keys
 
-### 7. Input Statistics Configuration
+### 8. Key Mapping and Extended Keys Configuration
+
+Advanced keyboard mapping with extended key support and keyboard layout awareness.
+
+```cpp
+#include "KeyInputHandler.h"
+
+// Test extended key mapping (unit tests)
+bool testsPassed = runKeyMappingTests();
+// Returns true if all extended key tests pass
+
+// Extended keys that require KEYEVENTF_EXTENDEDKEY flag:
+// Right-side modifier keys: VK_RCONTROL, VK_RMENU (AltGr)
+// Navigation keys: VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT
+// Editing keys: VK_INSERT, VK_DELETE, VK_HOME, VK_END, VK_PRIOR, VK_NEXT
+// Numpad: VK_RETURN (numpad enter), VK_DIVIDE
+// Function keys: VK_F11, VK_F12 (can be extended)
+// Other: VK_NUMLOCK, VK_SCROLL
+```
+
+#### Key Mapping Features:
+- **Extended Key Detection**: Automatically detects keys requiring `KEYEVENTF_EXTENDEDKEY` flag
+- **Layout-Aware Mapping**: Uses target window's keyboard layout instead of foreground layout
+- **Comprehensive Testing**: Unit tests verify correct extended key handling
+- **Fallback Mechanisms**: Graceful fallback when layout-specific mapping unavailable
+
+#### Extended Key Matrix:
+
+| Key Category | Keys | Extended Flag Required |
+|-------------|------|----------------------|
+| **Right Modifiers** | Right Ctrl, Right Alt (AltGr) | ✅ Yes |
+| **Navigation** | Arrow keys (Up, Down, Left, Right) | ✅ Yes |
+| **Editing** | Insert, Delete, Home, End, PgUp, PgDn | ✅ Yes |
+| **Numpad** | Numpad Enter, Numpad / | ✅ Yes |
+| **Left Modifiers** | Left Ctrl, Left Alt, Shift | ❌ No |
+| **Regular Keys** | Letters, Numbers, Space, Tab | ❌ No |
+| **Function Keys** | F1-F10 | ❌ No (F11-F12 can be extended) |
+
+#### Keyboard Layout Awareness:
+```cpp
+// The system automatically:
+// 1. Gets target window's thread ID
+// 2. Retrieves keyboard layout for that thread
+// 3. Maps VK codes to scan codes using correct layout
+// 4. Falls back to current layout if target unavailable
+
+// This prevents issues when:
+// - Target app uses different keyboard layout than foreground
+// - Non-US layouts are active (German, French, etc.)
+// - Special characters need correct mapping
+```
+
+#### Testing and Validation:
+```cpp
+// Run comprehensive key mapping tests
+extern "C" bool runKeyMappingTests();
+
+// Tests verify:
+// - Extended key flag correctness
+// - VK to scan code mapping accuracy
+// - Keyboard layout awareness
+// - Fallback behavior
+```
+
+### 9. Input Statistics Configuration
 
 Controls how input statistics are collected and reported.
 
@@ -626,7 +690,7 @@ statsConfig.aggregatedLogIntervalMs = 100;         // How often to log stats (10
 // The StatsLogger automatically uses these settings
 ```
 
-### 8. Complete Configuration Example
+### 10. Complete Configuration Example
 
 Here's a complete example showing all input systems configured for optimal gaming performance:
 
@@ -682,6 +746,12 @@ MouseCoordinateTransform::updateGlobalConfig(transformConfig);
 
 // Note: Windows key blocking is handled automatically in KeyInputHandler
 // MetaLeft and MetaRight keys are blocked by default to prevent system interference
+
+// 6. Validate key mapping (optional - run tests to ensure correctness)
+// bool keyMappingTestsPass = runKeyMappingTests();
+// if (!keyMappingTestsPass) {
+//     std::cerr << "Warning: Key mapping tests failed!" << std::endl;
+// }
 ```
 
 ### Configuration Recommendations
@@ -692,6 +762,7 @@ MouseCoordinateTransform::updateGlobalConfig(transformConfig);
 - **Injection**: Allow focus steal, skip foreground checks for overlay support
 - **FSM**: Short timeouts for quick stuck key recovery
 - **Coordinates**: Enable DPI scaling, disable clipping for multi-monitor setups
+- **Key Mapping**: Layout-aware mapping essential for non-US keyboard layouts
 
 #### For Office/Productivity:
 - **Logging**: Enable aggregated logging, disable coalescing for precision
@@ -699,6 +770,7 @@ MouseCoordinateTransform::updateGlobalConfig(transformConfig);
 - **Injection**: Strict foreground checking, no focus steal
 - **FSM**: Longer timeouts, modifier-only recovery
 - **Coordinates**: Enable clipping and DPI scaling
+- **Key Mapping**: Extended key accuracy critical for navigation and editing
 
 #### For Development/Debugging:
 - **Logging**: Enable per-event logging, disable coalescing, 1Hz aggregated stats
@@ -706,6 +778,13 @@ MouseCoordinateTransform::updateGlobalConfig(transformConfig);
 - **Injection**: Relaxed checks for testing
 - **FSM**: Enable all timeouts and recovery mechanisms
 - **Coordinates**: Enable all features for comprehensive testing
+- **Key Mapping**: Run `runKeyMappingTests()` to validate extended key handling
+
+#### For International Users (Non-US Layouts):
+- **Key Mapping**: Essential - prevents character mapping issues
+- **Layout Awareness**: Use target window's layout instead of system layout
+- **Extended Keys**: Critical for proper navigation key behavior
+- **Testing**: Regularly run key mapping tests when layouts change
 
 ## Building and Running
 

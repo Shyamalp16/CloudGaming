@@ -254,7 +254,81 @@ namespace KeyInputHandler {
 		{"NumpadDivide", 0x35}
 	};
 
-	WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
+// Extended key detection - determines if a VK requires KEYEVENTF_EXTENDEDKEY flag
+bool IsExtendedKey(WORD vkCode) {
+    // Extended keys that require KEYEVENTF_EXTENDEDKEY flag
+    switch (vkCode) {
+        // Right-side modifier keys
+        case VK_RCONTROL:
+        case VK_RMENU:      // Right Alt (AltGr)
+
+        // Navigation keys
+        case VK_UP:
+        case VK_DOWN:
+        case VK_LEFT:
+        case VK_RIGHT:
+
+        // Editing keys
+        case VK_INSERT:
+        case VK_DELETE:
+        case VK_HOME:
+        case VK_END:
+        case VK_PRIOR:      // Page Up
+        case VK_NEXT:       // Page Down
+
+        // Numpad Enter (distinguished from regular Enter)
+        case VK_RETURN:     // Only when from numpad - context dependent
+
+        // Function keys that can be extended
+        case VK_F11:
+        case VK_F12:
+
+        // Other extended keys
+        case VK_DIVIDE:     // Numpad /
+        case VK_NUMLOCK:
+        case VK_SCROLL:
+
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+// Get keyboard layout for target window thread
+HKL GetTargetWindowKeyboardLayout(HWND targetHwnd) {
+    if (!targetHwnd) {
+        return GetKeyboardLayout(0); // Fallback to current thread layout
+    }
+
+    // Get the thread ID of the target window
+    DWORD targetThreadId = GetWindowThreadProcessId(targetHwnd, nullptr);
+
+    // Get the keyboard layout for that thread
+    HKL targetLayout = GetKeyboardLayout(targetThreadId);
+
+    if (!targetLayout) {
+        // Fallback to current layout if target layout unavailable
+        targetLayout = GetKeyboardLayout(0);
+    }
+
+    return targetLayout;
+}
+
+// Enhanced key mapping with keyboard layout awareness
+UINT MapVKToScanCodeWithLayout(WORD vkCode, HKL hkl) {
+    // Use MapVirtualKeyEx to get scan code for specific keyboard layout
+    UINT scanCode = MapVirtualKeyExW(vkCode, MAPVK_VK_TO_VSC_EX, hkl);
+
+    // If that fails, try without layout-specific mapping
+    if (scanCode == 0) {
+        scanCode = MapVirtualKeyW(vkCode, MAPVK_VK_TO_VSC);
+    }
+
+    return scanCode;
+}
+
+WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 		auto it = vkMap.find(jsCode);
 		if (it != vkMap.end()) {
 			return it->second;
@@ -385,9 +459,12 @@ namespace KeyInputHandler {
 					<< ", Flags: 0x" << std::hex << input.ki.dwFlags << std::dec
 					<< (isKeyDown ? " (DOWN)" : " (UP)") << std::endl;
 			} else {
-				// Fallback: try to convert VK to scancode with current foreground layout
-				HKL hkl = GetKeyboardLayout(GetWindowThreadProcessId(GetForegroundWindow(), nullptr));
-				scanCode = MapVirtualKeyEx(virtualKeyCode, MAPVK_VK_TO_VSC_EX, hkl);
+				// Use target window's keyboard layout instead of foreground window
+				HWND targetHwnd = GetTargetWindow();
+				HKL hkl = GetTargetWindowKeyboardLayout(targetHwnd);
+
+				// Convert VK to scancode using target window's layout
+				scanCode = MapVKToScanCodeWithLayout(virtualKeyCode, hkl);
 				if (scanCode != 0) {
 					input.ki.wScan = scanCode;
 					input.ki.dwFlags = KEYEVENTF_SCANCODE;
@@ -761,4 +838,9 @@ extern "C" const char* getSequenceStats() {
 	              ", snapshots_recv=" + std::to_string(state.snapshotsReceived.load());
 
 	return statsString.c_str();
+}
+
+// Key mapping test API implementation
+extern "C" bool runKeyMappingTests() {
+	return KeyMappingTest::runAllKeyMappingTests();
 }
