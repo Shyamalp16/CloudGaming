@@ -35,11 +35,18 @@ private:
     std::unique_ptr<OpusEncoderWrapper> m_opusEncoder;
     std::vector<float> m_frameBuffer;
     size_t m_samplesPerFrame;
+
+    // Per-instance audio frame accumulation (replaces static variables)
+    std::vector<float> m_accumulatedSamples;
+    size_t m_accumulatedCount = 0;
     
     // Timing for 20ms frames
     std::chrono::high_resolution_clock::time_point m_startTime;
     int64_t m_nextFrameTime;
     uint32_t m_rtpTimestamp;
+
+    // Audio clock timing (single source of truth)
+    int64_t m_initialAudioClockTime = 0; // Initial audio clock timestamp in microseconds
     
     // COM interfaces (smart pointers)
     Microsoft::WRL::ComPtr<IMMDeviceEnumerator> m_pEnumerator;

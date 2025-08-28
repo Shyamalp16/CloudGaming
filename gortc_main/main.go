@@ -164,9 +164,19 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	payload := getSampleBuf(n)
 	C.memcpy(unsafe.Pointer(&payload[0]), data, C.size_t(n))
 
-	// Opus uses 48kHz clock; derive timestamp from pts (us)
+	// Opus uses 48kHz clock; derive RTP timestamp from pts (us) with improved precision
+	// Use the pts as the authoritative source timestamp from IAudioClock
 	ptsSeconds := float64(pts) / 1_000_000.0
-	currentAudioTS = uint32(ptsSeconds * 48000.0)
+	rtpTimestampFromPts := uint32(ptsSeconds * 48000.0)
+
+	// Ensure monotonic RTP timestamps by tracking the last timestamp
+	if rtpTimestampFromPts > currentAudioTS {
+		currentAudioTS = rtpTimestampFromPts
+	} else {
+		// If the new timestamp is not monotonically increasing, increment by frame size
+		// This handles cases where IAudioClock might have slight variations
+		currentAudioTS += 960 // 20ms at 48kHz
+	}
 
 	pkt := &rtp.Packet{
 		Header: rtp.Header{
@@ -355,12 +365,18 @@ func createPeerConnectionGo() C.int {
 		lastAnswerSDP = ""
 		pendingRemoteCandidates = nil
 		pingTimestamps = make(map[uint64]int64) // Initialize/clear the map
+		// Reset audio RTP state for new connection
+		currentAudioSeq = 0
+		currentAudioTS = 0
 		log.Println(
 			"[Go/Pion] createPeerConnectionGo: Closed previous PeerConnection and reset state.",
 		)
 	} else {
 		// This is the first run, initialize the map.
 		pingTimestamps = make(map[uint64]int64)
+		// Initialize audio RTP state for first connection
+		currentAudioSeq = 0
+		currentAudioTS = 0
 		log.Println("[Go/Pion] createPeerConnectionGo: Initializing pingTimestamps for new PeerConnection.")
 	}
 

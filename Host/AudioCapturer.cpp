@@ -421,16 +421,28 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 processedSamples.swap(resampled);
             }
 
-            // Calculate timestamp for this audio data using IAudioClock if available
+            // Calculate timestamp for this audio data using IAudioClock (single source of truth)
             int64_t timestampUs = 0;
+            UINT64 audioClockPos = 0;
+            UINT64 audioClockQpc = 0;
+
             if (m_pAudioClock && m_audioClockFreq > 0) {
-                UINT64 pos = 0;
-                UINT64 qpc = 0;
-                if (SUCCEEDED(m_pAudioClock->GetPosition(&pos, &qpc))) {
-                    timestampUs = static_cast<int64_t>((pos * 1000000ULL) / m_audioClockFreq);
+                if (SUCCEEDED(m_pAudioClock->GetPosition(&audioClockPos, &audioClockQpc))) {
+                    // Convert audio clock position to microseconds using the audio clock frequency
+                    timestampUs = static_cast<int64_t>((audioClockPos * 1000000ULL) / m_audioClockFreq);
+
+                    // Store the initial audio clock time for RTP timestamp calculation
+                    if (m_initialAudioClockTime == 0) {
+                        m_initialAudioClockTime = timestampUs;
+                        std::wcout << L"[AudioCapturer] Initial audio clock time: " << m_initialAudioClockTime << L" us" << std::endl;
+                    }
+                } else {
+                    std::wcerr << L"[AudioCapturer] Failed to get audio clock position, using fallback" << std::endl;
+                    auto currentTime = std::chrono::high_resolution_clock::now();
+                    timestampUs = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - m_startTime).count();
                 }
-            }
-            if (timestampUs == 0) {
+            } else {
+                std::wcerr << L"[AudioCapturer] Audio clock not available, using system clock fallback" << std::endl;
                 auto currentTime = std::chrono::high_resolution_clock::now();
                 timestampUs = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - m_startTime).count();
             }
@@ -565,24 +577,30 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
         // Encode with Opus
         std::vector<uint8_t> encodedData;
         if (m_opusEncoder->encodeFrame(m_frameBuffer.data(), encodedData)) {
-            // Calculate RTP timestamp (48kHz clock, increment by 960 per 20ms frame)
-            m_rtpTimestamp += 960;
-            
-            // Calculate microsecond timestamp for this frame
-            auto currentTime = std::chrono::high_resolution_clock::now();
-            auto elapsedTime = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - m_startTime);
-            int64_t frameTimestampUs = elapsedTime.count();
-            
-            // Send to WebRTC
-            int result = sendAudioPacket(encodedData.data(), static_cast<int>(encodedData.size()), frameTimestampUs);
+            // Calculate RTP timestamp using the provided timestamp (48kHz clock)
+            // Convert microseconds to RTP timestamp units (48kHz = 48000 ticks per second)
+            uint32_t rtpTimestamp = 0;
+            if (timestampUs > 0 && m_initialAudioClockTime > 0) {
+                // Calculate RTP timestamp relative to initial audio clock time
+                int64_t relativeTimeUs = timestampUs - m_initialAudioClockTime;
+                rtpTimestamp = static_cast<uint32_t>((relativeTimeUs * 48LL) / 1000LL);
+            } else {
+                // Fallback: increment RTP timestamp
+                m_rtpTimestamp += 960;
+                rtpTimestamp = m_rtpTimestamp;
+            }
+
+            // Send to WebRTC with the original timestamp (pts) for backward compatibility
+            // In the future, we could send RTP timestamp directly, but for now we maintain the existing interface
+            int result = sendAudioPacket(encodedData.data(), static_cast<int>(encodedData.size()), timestampUs);
             if (result != 0) {
                 std::wcerr << L"[AudioCapturer] Failed to send audio packet to WebRTC. Error: " << result << std::endl;
             } else {
                 // Log every 100 frames (disabled during streaming)
                 // static int frameCount = 0;
                 // if (++frameCount % 100 == 0) {
-                //     std::wcout << L"[AudioCapturer] Sent Opus frame " << frameCount << L", size: " << encodedData.size() 
-                //                << L" bytes, RTP timestamp: " << m_rtpTimestamp << std::endl;
+                //     std::wcout << L"[AudioCapturer] Sent Opus frame " << frameCount << L", size: " << encodedData.size()
+                //                << L" bytes, RTP timestamp: " << rtpTimestamp << L", pts: " << timestampUs << L" us" << std::endl;
                 // }
             }
         } else {
