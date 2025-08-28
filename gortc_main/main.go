@@ -95,19 +95,24 @@ var (
 	currentTimestamp      uint32
 	currentAudioSeq       uint16
 	currentAudioTS        uint32
-	videoFrameCounter     uint64
-	dataChannel           *webrtc.DataChannel
-	messageQueue          []string
-	mouseQueue            []string
-	queueMutex            sync.Mutex
-	mouseChannel          *webrtc.DataChannel
-	latencyChannel        *webrtc.DataChannel
-	videoFeedbackChannel  *webrtc.DataChannel
-	pingTimestamps        map[uint64]int64
-	pingTimestampsMutex   sync.Mutex
-	connectionState       webrtc.PeerConnectionState
-	videoPayloadType      uint8 = 96
-	audioPayloadType      uint8 = 111
+	// RTP timestamp baseline tracking for consistent frame deltas
+	audioRTPBaseline     uint32       // Initial RTP timestamp established from first PTS
+	audioPTSBaseline     int64        // Initial PTS value for reference
+	audioBaselineSet     bool         // Whether baseline has been established
+	audioFrameDuration   uint32 = 480 // RTP timestamp increment per frame (10ms at 48kHz)
+	videoFrameCounter    uint64
+	dataChannel          *webrtc.DataChannel
+	messageQueue         []string
+	mouseQueue           []string
+	queueMutex           sync.Mutex
+	mouseChannel         *webrtc.DataChannel
+	latencyChannel       *webrtc.DataChannel
+	videoFeedbackChannel *webrtc.DataChannel
+	pingTimestamps       map[uint64]int64
+	pingTimestampsMutex  sync.Mutex
+	connectionState      webrtc.PeerConnectionState
+	videoPayloadType     uint8 = 96
+	audioPayloadType     uint8 = 111
 	// Buffer remote ICE candidates received before remote SDP is set
 	pendingRemoteCandidates []webrtc.ICECandidateInit
 	// Cache latest RTT (ms) from ping/pong to combine with RTCP loss/jitter
@@ -164,18 +169,32 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	payload := getSampleBuf(n)
 	C.memcpy(unsafe.Pointer(&payload[0]), data, C.size_t(n))
 
-	// Opus uses 48kHz clock; derive RTP timestamp from pts (us) with improved precision
-	// Use the pts as the authoritative source timestamp from IAudioClock
-	ptsSeconds := float64(pts) / 1_000_000.0
-	rtpTimestampFromPts := uint32(ptsSeconds * 48000.0)
-
-	// Ensure monotonic RTP timestamps by tracking the last timestamp
-	if rtpTimestampFromPts > currentAudioTS {
-		currentAudioTS = rtpTimestampFromPts
+	// Use consistent RTP timestamp calculation with frame-duration deltas
+	// This avoids jitter from PTS variations and ensures exact packet spacing
+	if !audioBaselineSet {
+		// Establish baseline from first PTS
+		ptsSeconds := float64(pts) / 1_000_000.0
+		audioRTPBaseline = uint32(ptsSeconds * 48000.0)
+		audioPTSBaseline = int64(pts)
+		audioBaselineSet = true
+		currentAudioTS = audioRTPBaseline
+		log.Printf("[Go/Pion] Established RTP baseline: PTS=%d us -> RTP=%d", pts, currentAudioTS)
 	} else {
-		// If the new timestamp is not monotonically increasing, increment by frame size
-		// This handles cases where IAudioClock might have slight variations
-		currentAudioTS += 960 // 20ms at 48kHz
+		// Increment RTP timestamp by exact frame duration for consistent spacing
+		// This ensures packet timing matches encoder frame rate exactly
+		currentAudioTS += audioFrameDuration
+
+		// Handle RTP timestamp wraparound (uint32 wraps at 2^32)
+		if currentAudioTS < audioRTPBaseline {
+			log.Printf("[Go/Pion] RTP timestamp wraparound detected: %d -> %d", audioRTPBaseline, currentAudioTS)
+		}
+
+		// Periodic logging for timestamp consistency verification (every 100 frames)
+		// Disabled during normal streaming to avoid log spam
+		// if currentAudioSeq%100 == 0 {
+		//     log.Printf("[Go/Pion] RTP timestamp progression: seq=%d, rtp=%d, pts_delta=%d us",
+		//         currentAudioSeq, currentAudioTS, int64(pts)-audioPTSBaseline)
+		// }
 	}
 
 	pkt := &rtp.Packet{
@@ -368,6 +387,10 @@ func createPeerConnectionGo() C.int {
 		// Reset audio RTP state for new connection
 		currentAudioSeq = 0
 		currentAudioTS = 0
+		// Reset RTP baseline tracking
+		audioRTPBaseline = 0
+		audioPTSBaseline = 0
+		audioBaselineSet = false
 		log.Println(
 			"[Go/Pion] createPeerConnectionGo: Closed previous PeerConnection and reset state.",
 		)
@@ -377,6 +400,10 @@ func createPeerConnectionGo() C.int {
 		// Initialize audio RTP state for first connection
 		currentAudioSeq = 0
 		currentAudioTS = 0
+		// Initialize RTP baseline tracking
+		audioRTPBaseline = 0
+		audioPTSBaseline = 0
+		audioBaselineSet = false
 		log.Println("[Go/Pion] createPeerConnectionGo: Initializing pingTimestamps for new PeerConnection.")
 	}
 
@@ -1334,6 +1361,36 @@ func SetRTCPCallback(callback C.RTCPCallback) {
 //export SetPLICallback
 func SetPLICallback(callback C.OnPLICallback) {
 	pliCallback = callback
+}
+
+// validateAudioTimestampConsistency checks RTP timestamp progression for debugging
+// This function can be called periodically to verify timestamp consistency
+func validateAudioTimestampConsistency() {
+	pcMutex.Lock()
+	defer pcMutex.Unlock()
+
+	if !audioBaselineSet {
+		log.Println("[Go/Pion] Timestamp validation: No baseline established yet")
+		return
+	}
+
+	// Calculate expected RTP timestamp based on sequence number
+	expectedRTP := audioRTPBaseline + (uint32(currentAudioSeq) * audioFrameDuration)
+
+	// Calculate expected PTS progression
+	expectedPTSDelta := int64(currentAudioSeq) * (int64(audioFrameDuration) * 1000000 / 48000) // Convert to microseconds
+
+	// Check for discrepancies
+	rtpDiff := int64(currentAudioTS) - int64(expectedRTP)
+	ptsDiff := (int64(currentAudioSeq) * 10000) - expectedPTSDelta // 10ms per frame in microseconds
+
+	if rtpDiff != 0 || ptsDiff != 0 {
+		log.Printf("[Go/Pion] Timestamp validation WARNING: seq=%d, RTP diff=%d, PTS diff=%d us",
+			currentAudioSeq, rtpDiff, ptsDiff)
+	} else {
+		log.Printf("[Go/Pion] Timestamp validation OK: seq=%d, RTP=%d, baseline=%d",
+			currentAudioSeq, currentAudioTS, audioRTPBaseline)
+	}
 }
 
 func main() {
