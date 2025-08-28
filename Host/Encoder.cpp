@@ -18,6 +18,8 @@
 #include <deque>
 #include <cstring>
 #include <list>
+#include <avrt.h>
+#pragma comment(lib, "Avrt.lib")
 
 // Removed unused software conversion components
 int Encoder::currentWidth = 0;
@@ -168,6 +170,12 @@ static std::thread g_senderThread;
 static constexpr size_t kMaxSendQueue = 3; // drop oldest when backlogged to avoid growth
 
 static void SenderLoop() {
+    // Elevate sender thread to MMCSS 'Games' for timely packet delivery
+    DWORD taskIndex = 0;
+    HANDLE mmcssTask = AvSetMmThreadCharacteristicsW(L"Games", &taskIndex);
+    if (mmcssTask) {
+        AvSetMmThreadPriority(mmcssTask, AVRT_PRIORITY_HIGH);
+    }
     // Simple 1Hz logging
     int sentCount = 0;
     auto lastLog = std::chrono::steady_clock::now();
@@ -182,7 +190,11 @@ static void SenderLoop() {
             g_sendQueue.pop_front();
         }
         if (!sample.data.empty()) {
+            auto ffiStart = std::chrono::steady_clock::now();
             int result = sendVideoSample(sample.data.data(), static_cast<int>(sample.data.size()), sample.durationUs);
+            auto ffiEnd = std::chrono::steady_clock::now();
+            double ffiMs = std::chrono::duration<double, std::milli>(ffiEnd - ffiStart).count();
+            VideoMetrics::ewmaUpdate(VideoMetrics::ffiSendLatencyMsAvg(), ffiMs);
             (void)result; // errors are logged inside sendVideoSample caller historically
             sentCount++;
         }
@@ -262,6 +274,7 @@ static inline void EnqueueEncodedSample(std::vector<uint8_t>&& bytes, int64_t du
             VideoMetrics::inc(VideoMetrics::sendQueueDrops());
         }
         g_sendQueue.push_back(QueuedSample{ std::move(bytes), durationUs });
+        VideoMetrics::sendQueueDepth().store(static_cast<uint64_t>(g_sendQueue.size()), std::memory_order_relaxed);
     }
     g_sendCV.notify_one();
 }
@@ -399,7 +412,7 @@ namespace Encoder {
                 static auto lastLog = std::chrono::steady_clock::now();
                 auto now = std::chrono::steady_clock::now();
                 if (std::chrono::duration_cast<std::chrono::seconds>(now - lastLog).count() >= 1) {
-                    std::wcout << L"[VP] VideoProcessorBlt GPU time ~" << gpuMs << L" ms" << std::endl;
+                    // std::wcout << L"[VP] VideoProcessorBlt GPU time ~" << gpuMs << L" ms" << std::endl;
                     lastLog = now;
                 }
             }
@@ -415,6 +428,7 @@ namespace Encoder {
             if (!codecCtx || slotIndex < 0 || slotIndex >= (int)g_hwFrames.size()) return false;
             AVFrame* hw = g_hwFrames[slotIndex];
             hw->pts = av_rescale_q(timestampUs, {1, 1000000}, codecCtx->time_base);
+            auto tSendStart = std::chrono::steady_clock::now();
             int ret = avcodec_send_frame(codecCtx, hw);
             if (ret == AVERROR(EAGAIN)) {
                 g_eagainCount.fetch_add(1);
@@ -445,10 +459,16 @@ namespace Encoder {
                 }
                 av_packet_unref(packet);
             }
+            auto tSendEnd = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(tSendEnd - tSendStart).count();
+            VideoMetrics::ewmaUpdate(VideoMetrics::avSendMsAvg(), ms);
         }
         if (!merged.empty()) {
+            // Track average packets per frame by counting Annex B NAL join segments
+            double pkts = 1.0; // treat merged chunk as 1 unless split observed earlier
+            VideoMetrics::ewmaUpdate(VideoMetrics::packetsPerFrameAvg(), pkts);
             // This EncodeFrame variant does not receive capture timestamp; use smoothed/default pacing
-            int64_t frameDurationUs = UpdatePacingFromTimestamp(0);
+            int64_t frameDurationUs = UpdatePacingFromTimestamp(timestampUs);
             if (frameDurationUs <= 0) frameDurationUs = 8333;
             EnqueueEncodedSample(std::move(merged), frameDurationUs);
         }
@@ -880,7 +900,7 @@ namespace Encoder {
             int fps = fpsDen != 0 ? fpsNum / fpsDen : 60;
             if (fps <= 0) fps = 60;
             int target = g_reopenTargetBitrate.load();
-            std::wcout << L"[Encoder] Reopening encoder to apply bitrate=" << target << L" bps" << std::endl;
+            // std::wcout << L"[Encoder] Reopening encoder to apply bitrate=" << target << L" bps" << std::endl;
             FlushEncoder();
             FinalizeEncoder();
             InitializeEncoder("output.mp4", currentWidth, currentHeight, fps);
@@ -1050,8 +1070,7 @@ namespace Encoder {
         }
         }
         if (!merged.empty()) {
-            // int64_t frameDurationUs = UpdatePacingFromTimestamp(timestampUs);
-            int64_t frameDurationUs = UpdatePacingFromTimestamp(0);
+            int64_t frameDurationUs = UpdatePacingFromTimestamp(pts);
             if (frameDurationUs <= 0) frameDurationUs = 8333;
             EnqueueEncodedSample(std::move(merged), frameDurationUs);
         }
@@ -1060,7 +1079,7 @@ namespace Encoder {
     void FlushEncoder() {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
         if (!codecCtx) return;
-        std::wcout << L"[DEBUG] Flushing encoder\n";
+        // std::wcout << L"[DEBUG] Flushing encoder\n";
         int ret = avcodec_send_frame(codecCtx, nullptr); // Send flush frame
         if (ret < 0) {
             std::cerr << "[Encoder] Failed to send flush frame to encoder.\n";

@@ -578,12 +578,12 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
             if (result != 0) {
                 std::wcerr << L"[AudioCapturer] Failed to send audio packet to WebRTC. Error: " << result << std::endl;
             } else {
-                // Log every 100 frames (2 seconds) to avoid spam
-                static int frameCount = 0;
-                if (++frameCount % 100 == 0) {
-                    std::wcout << L"[AudioCapturer] Sent Opus frame " << frameCount << L", size: " << encodedData.size() 
-                               << L" bytes, RTP timestamp: " << m_rtpTimestamp << std::endl;
-                }
+                // Log every 100 frames (disabled during streaming)
+                // static int frameCount = 0;
+                // if (++frameCount % 100 == 0) {
+                //     std::wcout << L"[AudioCapturer] Sent Opus frame " << frameCount << L", size: " << encodedData.size() 
+                //                << L" bytes, RTP timestamp: " << m_rtpTimestamp << std::endl;
+                // }
             }
         } else {
             std::wcerr << L"[AudioCapturer] Failed to encode audio frame with Opus" << std::endl;

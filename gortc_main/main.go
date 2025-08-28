@@ -43,6 +43,42 @@ import (
 	"github.com/pion/webrtc/v3/pkg/media"
 )
 
+// normalizeToMs converts seconds/ms/us/ns epoch or relative values to milliseconds.
+func normalizeToMs(v interface{}) (float64, bool) {
+	var x float64
+	switch t := v.(type) {
+	case float64:
+		x = t
+	case string:
+		f, err := strconv.ParseFloat(t, 64)
+		if err != nil {
+			return 0, false
+		}
+		x = f
+	default:
+		return 0, false
+	}
+	if x <= 0 {
+		return 0, false
+	}
+	if x >= 1e17 { // ns epoch
+		return x / 1e6, true
+	}
+	if x >= 1e15 { // us epoch
+		return x / 1e3, true
+	}
+	if x >= 1e12 { // ms epoch
+		return x, true
+	}
+	if x >= 1e9 { // s epoch
+		return x * 1e3, true
+	}
+	if x >= 1e6 { // already ms-scale relative
+		return x, true
+	}
+	return x * 1e3, true // treat as seconds otherwise
+}
+
 var rtcpCallback C.RTCPCallback
 var pliCallback C.OnPLICallback
 
@@ -177,10 +213,10 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 	// Return buffer to pool after write
 	putSampleBuf(buf)
 
-	// Debug: log send rate once per second (use globals to persist across calls)
+	// Debug: log send rate once per second (disabled during streaming)
 	sendCount++
 	if time.Since(sendLastLog) >= time.Second {
-		log.Printf("[Pion] send samples/s: %d", sendCount)
+		// log.Printf("[Pion] send samples/s: %d", sendCount)
 		sendCount = 0
 		sendLastLog = time.Now()
 	}
@@ -210,7 +246,7 @@ func enqueueMessage(msg string) {
 	messageQueue = append(messageQueue, msg)
 	msgEnqueueCount++
 	if time.Since(lastEnqueueLog) >= time.Second {
-		log.Printf("[Go/Pion] queued key msgs=%d mouse=%d", msgEnqueueCount, mouseEnqueueCount)
+		// log.Printf("[Go/Pion] queued key msgs=%d mouse=%d", msgEnqueueCount, mouseEnqueueCount)
 		msgEnqueueCount = 0
 		mouseEnqueueCount = 0
 		lastEnqueueLog = time.Now()
@@ -225,7 +261,7 @@ func enqueueMouseEvent(msg string) {
 	mouseQueue = append(mouseQueue, msg)
 	mouseEnqueueCount++
 	if time.Since(lastEnqueueLog) >= time.Second {
-		log.Printf("[Go/Pion] queued key msgs=%d mouse=%d", msgEnqueueCount, mouseEnqueueCount)
+		// log.Printf("[Go/Pion] queued key msgs=%d mouse=%d", msgEnqueueCount, mouseEnqueueCount)
 		msgEnqueueCount = 0
 		mouseEnqueueCount = 0
 		lastEnqueueLog = time.Now()
@@ -266,11 +302,11 @@ func getMouseChannelMessage() *C.char {
 	}
 	msg := mouseQueue[0]
 	mouseQueue = mouseQueue[1:]
-	log.Printf(
-		"[Go/Pion] <-- getMouseChannelMessage: Dequeued: '%s'. Queue size AFTER: %d",
-		msg,
-		len(mouseQueue),
-	)
+	// log.Printf(
+	// 	"[Go/Pion] <-- getMouseChannelMessage: Dequeued: '%s'. Queue size AFTER: %d",
+	// 	msg,
+	// 	len(mouseQueue),
+	// )
 	return C.CString(msg)
 }
 
@@ -477,8 +513,13 @@ func createPeerConnectionGo() C.int {
 				var messageData map[string]interface{}
 				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
 					if clientSendTime, ok := messageData["client_send_time"].(float64); ok {
+						// Normalize to milliseconds: if value looks like seconds, convert
+						clientMs := clientSendTime
+						if clientMs < 1e11 { // seconds-range epoch
+							clientMs = clientMs * 1000.0
+						}
 						hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
-						oneWayLatency := hostReceiveTime - clientSendTime
+						oneWayLatency := hostReceiveTime - clientMs
 						// No per-message log; only significant latency spikes
 						if oneWayLatency > 100 {
 							log.Printf("[Go/Pion] Keyboard latency high: %.1f ms", oneWayLatency)
@@ -568,8 +609,13 @@ func createPeerConnectionGo() C.int {
 				var messageData map[string]interface{}
 				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
 					if clientSendTime, ok := messageData["client_send_time"].(float64); ok {
+						// Normalize to milliseconds: if value looks like seconds, convert
+						clientMs := clientSendTime
+						if clientMs < 1e11 { // seconds-range epoch
+							clientMs = clientMs * 1000.0
+						}
 						hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
-						oneWayLatency := hostReceiveTime - clientSendTime
+						oneWayLatency := hostReceiveTime - clientMs
 						if oneWayLatency > 100 {
 							log.Printf("[Go/Pion] Mouse latency high: %.1f ms", oneWayLatency)
 						}
@@ -1120,10 +1166,10 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	// Return buffer to pool after write
 	putSampleBuf(buf)
 
-	// Debug: log send rate once per second (shared counters)
+	// Debug: log send rate once per second (shared counters, disabled during streaming)
 	sendCount++
 	if time.Since(sendLastLog) >= time.Second {
-		log.Printf("[Pion] send samples/s: %d", sendCount)
+		// log.Printf("[Pion] send samples/s: %d", sendCount)
 		sendCount = 0
 		sendLastLog = time.Now()
 	}
@@ -1241,9 +1287,9 @@ func getPeerConnectionState() C.int {
 	}
 
 	state := connectionState
-	if state != webrtc.PeerConnectionStateConnected {
-		log.Printf("[Go/Pion] PeerConnection state: %s\n", state.String())
-	}
+	// if state != webrtc.PeerConnectionStateConnected {
+	// 	log.Printf("[Go/Pion] PeerConnection state: %s\n", state.String())
+	// }
 
 	switch state {
 	case webrtc.PeerConnectionStateNew:

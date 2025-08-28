@@ -226,9 +226,9 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
 
             send_message(pong_response);
 
-            std::cout << "[Host] Received ping " << sequence_number
-                      << " from client at " << client_timestamp
-                      << ", host receive time: " << host_receive_time_ms << std::endl;
+            // std::cout << "[Host] Received ping " << sequence_number
+            //           << " from client at " << client_timestamp
+            //           << ", host receive time: " << host_receive_time_ms << std::endl;
         }
         else if (type == "keydown" || type == "keyup" || type == "mousemove" || type == "mousedown" || type == "mouseup") {
             // Basic per-type rate limiting
@@ -253,10 +253,10 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
             long long one_way_latency = client_send_time > 0 ? (host_receive_time_ms - client_send_time) : -1;
 
             if (msSince >= 200) { // log at most every 200ms to avoid spam
-                std::cout << "[Host] Received " << type << " event."
-                          << " Client send time: " << client_send_time
-                          << ", Host receive time: " << host_receive_time_ms
-                          << ", One-way latency: " << one_way_latency << " ms" << std::endl;
+                // std::cout << "[Host] Received " << type << " event."
+                //           << " Client send time: " << client_send_time
+                //           << ", Host receive time: " << host_receive_time_ms
+                //           << ", One-way latency: " << one_way_latency << " ms" << std::endl;
                 lastInputLog = now;
             }
 

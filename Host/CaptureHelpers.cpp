@@ -17,6 +17,8 @@
 #include "Encoder.h"
 #include "VideoMetrics.h"
 #include "EtwMarkers.h"
+#include <avrt.h>
+#pragma comment(lib, "Avrt.lib")
 
 // Constants to replace magic numbers
 static constexpr int kDefaultFramePoolBuffers = 3;
@@ -229,19 +231,21 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                         // Fallback to steady_clock if SRT unavailable
                         timestamp = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
                     }
-                    // --- Debug: capture fps ---
+                    // Update capture fps EWMA instead of printing
                     {
                         static int capCount = 0;
-                        static int64_t lastTs = 0;
+                        static int64_t windowStartUs = 0;
                         capCount++;
-                        if (lastTs == 0) lastTs = timestamp;
-                        if (timestamp - lastTs >= kOneSecondUs) { // 1s
-                            std::wcout << L"[WGC] frames/s: " << capCount << std::endl;
+                        if (windowStartUs == 0) windowStartUs = timestamp;
+                        int64_t elapsed = timestamp - windowStartUs;
+                        if (elapsed >= kOneSecondUs) { // ~1s window
+                            double fps = static_cast<double>(capCount) * 1'000'000.0 / static_cast<double>(elapsed);
+                            VideoMetrics::ewmaUpdate(VideoMetrics::captureFps(), fps);
                             capCount = 0;
-                            lastTs = timestamp;
+                            windowStartUs = timestamp;
                         }
                     }
-                    // Log ContentSize when it changes
+                    // Log ContentSize when it changes (disabled during streaming)
                     try {
                         auto cs = frame.ContentSize();
                         static std::atomic<int> lastLoggedW{ 0 };
@@ -271,6 +275,7 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                     // Ultra-light: push surface + timestamp into SPSC ring (latest-frame-wins)
                     if (g_ringCapacity > 0) {
                         ETW_MARK("Capture_Enqueue_Start");
+                        int64_t enqueueStartUs = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
                         // Compute next head and detect full
                         size_t head = g_ringHead.load(std::memory_order_relaxed);
                         size_t nextHead = (head + 1) % g_ringCapacity;
@@ -288,6 +293,9 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                         // Notify consumer
                         g_ringCV.notify_one();
                         ETW_MARK("Capture_Enqueue_End");
+                        int64_t enqueueEndUs = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+                        double dtUs = static_cast<double>(enqueueEndUs - enqueueStartUs);
+                        if (dtUs > 0) VideoMetrics::ewmaUpdate(VideoMetrics::captureToEnqueueUsAvg(), dtUs);
                     }
                 }
             }
@@ -328,6 +336,21 @@ void StartCapture() {
 
     // Single encode/transmit consumer thread
     workerThreads.emplace_back([](){
+        // Elevate this consumer thread to MMCSS 'Games' if enabled
+        HANDLE mmcssHandle = nullptr;
+        if (g_enableMmcss.load()) {
+            DWORD taskIndex = 0;
+            mmcssHandle = AvSetMmThreadCharacteristicsW(L"Games", &taskIndex);
+            if (mmcssHandle) {
+                int prio = g_mmcssPriority.load();
+                AVRT_PRIORITY mapped = AVRT_PRIORITY_NORMAL;
+                if (prio <= 0) mapped = AVRT_PRIORITY_LOW;
+                else if (prio == 1) mapped = AVRT_PRIORITY_NORMAL;
+                else if (prio == 2) mapped = AVRT_PRIORITY_HIGH;
+                else mapped = AVRT_PRIORITY_CRITICAL;
+                AvSetMmThreadPriority(mmcssHandle, mapped);
+            }
+        }
         auto device = GetD3DDevice();
         winrt::com_ptr<ID3D11DeviceContext> context;
         device->GetImmediateContext(context.put());
@@ -415,19 +438,22 @@ void StartCapture() {
                 size_t qsz = RingSize();
                 VideoMetrics::queueDepth().store(static_cast<uint64_t>(qsz), std::memory_order_relaxed);
                 uint64_t oo = g_outOfOrder.load(std::memory_order_relaxed);
-                std::wcout << L"[Stats] Encode=" << submitCount
-                           << L"/s, Target=" << g_targetFps.load()
-                           << L" fps, QueueDepth=" << qsz
-                           << L", OverwriteDrops/s=" << (od - lastOverwriteDrops)
-                           << L", BPSkips/s=" << (bp - lastBpSkips)
-                           << L", OutOfOrder/s=" << (oo - lastOutOfOrder)
-                           << std::endl;
+                // std::wcout << L"[Stats] Encode=" << submitCount
+                //            << L"/s, Target=" << g_targetFps.load()
+                //            << L" fps, QueueDepth=" << qsz
+                //            << L", OverwriteDrops/s=" << (od - lastOverwriteDrops)
+                //            << L", BPSkips/s=" << (bp - lastBpSkips)
+                //            << L", OutOfOrder/s=" << (oo - lastOutOfOrder)
+                //            << std::endl;
                 lastOverwriteDrops = od;
                 lastBpSkips = bp;
                 lastOutOfOrder = oo;
                 submitCount = 0;
                 lastLog = nowDbg;
             }
+        }
+        if (mmcssHandle) {
+            AvRevertMmThreadCharacteristics(mmcssHandle);
         }
     });
 }
