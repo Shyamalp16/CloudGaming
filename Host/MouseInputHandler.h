@@ -20,6 +20,7 @@
 namespace MouseInputHandler {
     void initializeMouseChannel();
     void cleanup();
+    void enqueueMessage(const std::string& message);
 
     // Mouse coordinate transformation configuration
     void updateCoordinateTransformConfig(int clientWidth, int clientHeight,

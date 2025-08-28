@@ -201,7 +201,7 @@ void processInputMessage(const InputTransportLayer::InputMessage& message) {
         } else if (globalIntegrationConfig.enableLegacyCompatibility) {
             // Fall back to legacy processing
             if (message.type == "pion_data") {
-                enqueueMouseMessage(message.data);
+                MouseInputHandler::enqueueMessage(message.data);
             }
         } else {
             LOG_WARNING(ErrorUtils::ErrorCategory::INPUT,

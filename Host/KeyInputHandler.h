@@ -23,6 +23,7 @@ namespace KeyInputHandler {
     void cleanup();
     void wakeKeyboardThreadInternal();
     void releaseAllKeysEmergency();
+    void enqueueMessage(const std::string& message);
 
     // Internal functions
     void SimulateWindowsKeyEvent(const std::string& eventCode, bool isKeyDown);

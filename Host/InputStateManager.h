@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <cstdint>
 
 #include "InputConfig.h"
 #include "InputTransportLayer.h"
@@ -40,9 +41,9 @@ enum class MouseButtonState {
  */
 struct KeyInfo {
     KeyState state = KeyState::Released;
-    uint64_t lastEventTime = 0;     // Timestamp of last state change
-    uint64_t downTime = 0;          // Timestamp when key was pressed
-    uint32_t sequenceId = 0;        // Last sequence ID for this key
+    std::uint64_t lastEventTime = 0;     // Timestamp of last state change
+    std::uint64_t downTime = 0;          // Timestamp when key was pressed
+    std::uint32_t sequenceId = 0;        // Last sequence ID for this key
     bool isModifier = false;        // Whether this is a modifier key
 
     KeyInfo() = default;
@@ -55,9 +56,9 @@ struct KeyInfo {
  */
 struct MouseButtonInfo {
     MouseButtonState state = MouseButtonState::Released;
-    uint64_t lastEventTime = 0;     // Timestamp of last state change
-    uint64_t downTime = 0;          // Timestamp when button was pressed
-    uint32_t sequenceId = 0;        // Last sequence ID for this button
+    std::uint64_t lastEventTime = 0;     // Timestamp of last state change
+    std::uint64_t downTime = 0;          // Timestamp when button was pressed
+    std::uint32_t sequenceId = 0;        // Last sequence ID for this button
 
     MouseButtonInfo() = default;
     MouseButtonInfo(MouseButtonState s, uint64_t time, uint32_t seq = 0)
@@ -72,7 +73,7 @@ struct MousePosition {
     int y = 0;
     int deltaX = 0;
     int deltaY = 0;
-    uint64_t timestamp = 0;
+    std::uint64_t timestamp = 0;
     bool isAbsolute = false;        // Whether coordinates are absolute or relative
 
     MousePosition() = default;
