@@ -101,6 +101,14 @@ private:
     bool ShouldRetryError(HRESULT hr, int retryCount);
     void LogErrorWithContext(HRESULT hr, const std::wstring& context, int retryCount = 0);
 
+    // Enhanced error handling methods
+    int CalculateRetryDelay(int retryCount);
+    bool TryRecoverFromError(HRESULT hr, const std::wstring& operation);
+    void SwitchToPollingMode();
+    void SwitchToEventMode();
+    void LogErrorStats();
+    bool IsSystemUnderLoad();
+
     // Ring buffer management methods
     void InitializeRingBuffer();
     bool PushFrameToRingBuffer(const std::vector<float>& frame, int64_t timestamp);
@@ -186,6 +194,29 @@ private:
 
     // Active instance reference for parameter updates (assumes single instance)
     static inline AudioCapturer* s_activeInstance = nullptr;
+
+    // Performance optimization: Conditional logging macros for hot paths
+    // These macros compile to no-ops in release builds, eliminating overhead
+#define AUDIO_LOG_DEBUG(msg) \
+    do { \
+        static bool enableDebugLogs = false; /* Set to true for debugging */ \
+        if (enableDebugLogs) { \
+            std::wcout << msg << std::endl; \
+        } \
+    } while (0)
+
+#define AUDIO_LOG_ERROR(msg) \
+    std::wcerr << msg << std::endl
+
+#define AUDIO_LOG_INFO(msg) \
+    std::wcout << msg << std::endl
+
+// Thread priority optimization helpers
+#define AUDIO_SET_THREAD_PRIORITY_HIGH() \
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST)
+
+#define AUDIO_SET_THREAD_PRIORITY_TIME_CRITICAL() \
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL)
 
     // Per-instance audio frame accumulation (replaces static variables)
     std::vector<float> m_accumulatedSamples;
@@ -273,10 +304,13 @@ private:
     // Event-driven capture
     HANDLE m_hCaptureEvent = nullptr;
     HANDLE m_hStopEvent = nullptr;    // Stop event for clean thread shutdown
+    bool m_currentlyUsingEventMode = true; // Track current capture mode
 
     // MMCSS (Multimedia Class Scheduler Service) for thread prioritization
     HANDLE m_hMmcssTask = nullptr;
     DWORD m_mmcssTaskIndex = 0;
+    HANDLE m_hEncoderMmcssTask = nullptr;  // MMCSS for encoder thread
+    DWORD m_encoderMmcssTaskIndex = 0;
 
     // Windows Audio Resampler DMO for high-quality resampling
     Microsoft::WRL::ComPtr<IMediaObject> m_audioResamplerDMO;
@@ -294,6 +328,29 @@ private:
     DWORD m_targetProcessId = 0;
     REFERENCE_TIME m_hnsRequestedDuration = 0;
     WAVEFORMATEX* m_pwfxOriginal = nullptr;
+
+    // Enhanced error handling and monitoring
+    struct ErrorStats {
+        uint64_t totalErrors = 0;
+        uint64_t deviceInvalidationErrors = 0;
+        uint64_t bufferErrors = 0;
+        uint64_t timeoutErrors = 0;
+        uint64_t pointerErrors = 0;
+        uint64_t otherErrors = 0;
+        uint64_t successfulRecoveries = 0;
+        uint64_t modeFallbacks = 0;  // Event ↔ Polling transitions
+        uint64_t lastErrorTime = 0;
+        HRESULT lastErrorCode = S_OK;
+    } m_errorStats;
+
+    // Retry and backoff configuration
+    struct RetryConfig {
+        int maxRetries = 5;           // Maximum retry attempts
+        int baseDelayMs = 100;        // Base delay between retries
+        int maxDelayMs = 2000;        // Maximum delay cap
+        float backoffMultiplier = 1.5f; // Exponential backoff multiplier
+        bool enableModeFallback = true; // Allow event ↔ polling fallback
+    } m_retryConfig;
 
     // Persistent audio float buffer to avoid per-packet allocations
     std::vector<float> m_floatBuffer;

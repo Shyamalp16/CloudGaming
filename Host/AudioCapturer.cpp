@@ -52,6 +52,13 @@ AudioCapturer::AudioCapturer() :
 
     // Fixed-size buffer is already allocated, no initialization needed
     // Size: 512 bytes (optimized for Opus packets <256 bytes at 64 kbps)
+
+    // Initialize error handling structures
+    m_errorStats = {}; // Zero-initialize all error statistics
+    AUDIO_LOG_INFO(L"[AudioCapturer] Enhanced error handling initialized with "
+                  << m_retryConfig.maxRetries << L" max retries, "
+                  << m_retryConfig.baseDelayMs << L"ms base delay, "
+                  << m_retryConfig.backoffMultiplier << L"x backoff multiplier");
 }
 
 AudioCapturer::~AudioCapturer()
@@ -62,7 +69,7 @@ AudioCapturer::~AudioCapturer()
 bool AudioCapturer::StartCapture(DWORD processId)
 {
     m_stopCapture = false;
-
+    
     // Store initialization parameters for potential reinitialization
     m_targetProcessId = processId;
     m_hnsRequestedDuration = 20000000; // 2 seconds default (can be made configurable)
@@ -111,19 +118,16 @@ bool AudioCapturer::StartCapture(DWORD processId)
     m_samplesPerFrame = settings.frameSize;  // Total samples per frame (already includes channels)
     m_frameBuffer.resize(m_samplesPerFrame);
     
-    std::wcout << L"[AudioCapturer] Initialized Opus encoder: "
-               << settings.sampleRate << L"Hz, "
-               << settings.channels << L" channels, "
-               << settings.frameSize << L" total samples/frame ("
-               << (settings.frameSize / settings.channels) << L" per channel), "
-               << settings.bitrate << L" bps" << std::endl;
+    AUDIO_LOG_INFO(L"[AudioCapturer] Initialized Opus encoder: " << settings.sampleRate << L"Hz, "
+                  << settings.channels << L" channels, " << settings.frameSize << L" total samples/frame ("
+                  << (settings.frameSize / settings.channels) << L" per channel), " << settings.bitrate << L" bps");
     
     // Start the dedicated encoder thread for offloading Opus encoding from capture thread
     StartEncoderThread();
 
     // Start the queue processor thread for async audio packet processing
     StartQueueProcessor();
-
+    
     m_captureThread = std::thread(&AudioCapturer::CaptureThread, this, processId);
     return true;
 }
@@ -278,18 +282,56 @@ void AudioCapturer::StartEncoderThread()
     // Set thread affinity if requested (for heavy encoder loads)
     if (m_useThreadAffinity && m_encoderThreadAffinityMask != 0) {
         m_encoderThread = std::thread([this]() {
+            // Register encoder thread with MMCSS for real-time priority
+            m_hEncoderMmcssTask = AvSetMmThreadCharacteristicsW(L"Pro Audio", &m_encoderMmcssTaskIndex);
+            if (m_hEncoderMmcssTask == nullptr) {
+                // Fallback to "Audio" if "Pro Audio" is not available
+                m_hEncoderMmcssTask = AvSetMmThreadCharacteristicsW(L"Audio", &m_encoderMmcssTaskIndex);
+            }
+
+            if (m_hEncoderMmcssTask != nullptr) {
+                BOOL prioritySet = AvSetMmThreadPriority(m_hEncoderMmcssTask, AVRT_PRIORITY_HIGH);
+                AUDIO_LOG_INFO(L"[AudioEncoder] MMCSS registered successfully (task index: " << m_encoderMmcssTaskIndex
+                             << L", priority: HIGH)");
+            } else {
+                AUDIO_LOG_ERROR(L"[AudioEncoder] Failed to register encoder thread with MMCSS: " << GetLastError()
+                               << L" (encoding may be affected by system load)");
+            }
+
             // Set thread affinity before starting work
             if (!SetThreadAffinityMask(GetCurrentThread(), m_encoderThreadAffinityMask)) {
-                std::wcerr << L"[AudioEncoder] Failed to set thread affinity mask: "
-                          << GetLastError() << std::endl;
+                AUDIO_LOG_ERROR(L"[AudioEncoder] Failed to set thread affinity mask: " << GetLastError());
             }
+
+            // Set thread priority for real-time audio processing
+            AUDIO_SET_THREAD_PRIORITY_HIGH();
             EncoderThread();
         });
-        std::wcout << L"[AudioEncoder] Started with thread affinity mask: 0x" << std::hex
-                  << m_encoderThreadAffinityMask << std::dec << std::endl;
+        AUDIO_LOG_INFO(L"[AudioEncoder] Started with thread affinity mask: 0x" << std::hex
+                      << m_encoderThreadAffinityMask << std::dec);
     } else {
-        m_encoderThread = std::thread(&AudioCapturer::EncoderThread, this);
-        std::wcout << L"[AudioEncoder] Started without thread affinity" << std::endl;
+        m_encoderThread = std::thread([this]() {
+            // Register encoder thread with MMCSS even without thread affinity
+            m_hEncoderMmcssTask = AvSetMmThreadCharacteristicsW(L"Pro Audio", &m_encoderMmcssTaskIndex);
+            if (m_hEncoderMmcssTask == nullptr) {
+                // Fallback to "Audio" if "Pro Audio" is not available
+                m_hEncoderMmcssTask = AvSetMmThreadCharacteristicsW(L"Audio", &m_encoderMmcssTaskIndex);
+            }
+
+            if (m_hEncoderMmcssTask != nullptr) {
+                BOOL prioritySet = AvSetMmThreadPriority(m_hEncoderMmcssTask, AVRT_PRIORITY_HIGH);
+                AUDIO_LOG_INFO(L"[AudioEncoder] MMCSS registered successfully (task index: " << m_encoderMmcssTaskIndex
+                             << L", priority: HIGH)");
+            } else {
+                AUDIO_LOG_ERROR(L"[AudioEncoder] Failed to register encoder thread with MMCSS: " << GetLastError()
+                               << L" (encoding may be affected by system load)");
+            }
+
+            // Set thread priority for real-time audio processing
+            AUDIO_SET_THREAD_PRIORITY_HIGH();
+            EncoderThread();
+        });
+        AUDIO_LOG_INFO(L"[AudioEncoder] Started with MMCSS (no thread affinity)");
     }
 }
 
@@ -307,18 +349,26 @@ void AudioCapturer::StopEncoderThread()
         try {
             m_encoderThread.join();
         } catch (const std::system_error& e) {
-            std::wcerr << L"[AudioEncoder] Error joining encoder thread: " << e.what() << std::endl;
+            AUDIO_LOG_ERROR(L"[AudioEncoder] Error joining encoder thread: " << e.what());
         }
+    }
+
+    // Clean up MMCSS registration
+    if (m_hEncoderMmcssTask != nullptr) {
+        AvRevertMmThreadCharacteristics(m_hEncoderMmcssTask);
+        m_hEncoderMmcssTask = nullptr;
+        m_encoderMmcssTaskIndex = 0;
+        AUDIO_LOG_DEBUG(L"[AudioEncoder] MMCSS registration cleaned up");
     }
 }
 
 void AudioCapturer::EncoderThread()
 {
-    std::wcout << L"[AudioEncoder] Dedicated encoder thread started" << std::endl;
+    AUDIO_LOG_INFO(L"[AudioEncoder] Dedicated encoder thread started");
 
     // Ensure encoder is initialized
     if (!m_opusEncoder) {
-        std::wcerr << L"[AudioEncoder] Opus encoder not initialized!" << std::endl;
+        AUDIO_LOG_ERROR(L"[AudioEncoder] Opus encoder not initialized!");
         return;
     }
 
@@ -393,12 +443,12 @@ void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
         // Queue encoded packet for WebRTC transmission (zero-copy approach)
         // Pass buffer data directly without intermediate vector allocation
         if (!this->QueueAudioPacket(m_encodedBuffer.data(), encodedSize, frame.timestampUs, rtpTimestamp)) {
-            std::wcerr << L"[AudioEncoder] Failed to queue encoded packet - WebRTC congestion detected" << std::endl;
+            AUDIO_LOG_DEBUG(L"[AudioEncoder] Failed to queue encoded packet - WebRTC congestion detected");
             // Don't retry immediately - let WebRTC congestion control work
             // The encoder thread will continue processing new frames
         }
     } else {
-        std::wcerr << L"[AudioEncoder] Failed to encode audio frame" << std::endl;
+                    AUDIO_LOG_ERROR(L"[AudioEncoder] Failed to encode audio frame");
     }
 }
 
@@ -707,7 +757,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     IAudioSessionControl* pSessionControl = NULL;
     IAudioSessionControl2* pSessionControl2 = NULL;
 
-    std::wcout << L"[AudioCapturer] Target Process ID: " << targetProcessId << std::endl;
+    AUDIO_LOG_INFO(L"[AudioCapturer] Target Process ID: " << targetProcessId);
 
     const CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
     const IID IID_IMMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
@@ -737,7 +787,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         goto Exit;
     }
 
-    std::wcout << L"[AudioCapturer] Found " << deviceCount << L" audio devices." << std::endl;
+    AUDIO_LOG_INFO(L"[AudioCapturer] Found " << deviceCount << L" audio devices");
 
     for (UINT i = 0; i < deviceCount; ++i)
     {
@@ -946,7 +996,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             std::wcerr << L"[AudioCapturer]   - No audio devices available" << std::endl;
             std::wcerr << L"[AudioCapturer]   - Audio service not running" << std::endl;
             std::wcerr << L"[AudioCapturer]   - Insufficient permissions" << std::endl;
-            goto Exit;
+        goto Exit;
         }
 
         std::wcout << L"[AudioCapturer] Using default render device with loopback capture." << std::endl;
@@ -1060,17 +1110,22 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             hr = m_pAudioClient->SetEventHandle(m_hCaptureEvent);
             if (SUCCEEDED(hr)) {
                 eventMode = true;
-                std::wcout << L"[AudioCapturer] Using event-driven capture mode (optimal latency)." << std::endl;
+                m_currentlyUsingEventMode = true;
+                AUDIO_LOG_INFO(L"[AudioCapturer] Using event-driven capture mode (optimal latency)");
             } else {
-                std::wcerr << L"[AudioCapturer] Event-driven mode setup failed (HRESULT: 0x" << std::hex << hr
-                           << std::dec << L"), falling back to polling mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
+                eventMode = false;
+                m_currentlyUsingEventMode = false;
+                AUDIO_LOG_ERROR(L"[AudioCapturer] Event-driven mode setup failed (HRESULT: 0x" << std::hex << hr
+                               << std::dec << L"), falling back to polling mode. Error: " << _com_error(hr).ErrorMessage());
 
                 // Clean up event handle since we can't use it
                 CloseHandle(m_hCaptureEvent);
                 m_hCaptureEvent = nullptr;
             }
         } else {
-            std::wcerr << L"[AudioCapturer] Event handle creation failed, using polling mode." << std::endl;
+            eventMode = false;
+            m_currentlyUsingEventMode = false;
+            AUDIO_LOG_ERROR(L"[AudioCapturer] Event handle creation failed, using polling mode");
         }
     }
 
@@ -1126,7 +1181,12 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     {
         captureCycles++;
 
-        if (eventMode && m_hCaptureEvent && m_hStopEvent) {
+        // Periodic error statistics logging (every 1000 cycles if there were errors)
+        if (captureCycles % 1000 == 0 && m_errorStats.totalErrors > 0) {
+            LogErrorStats();
+        }
+
+        if (m_currentlyUsingEventMode && m_hCaptureEvent && m_hStopEvent) {
             // Use WaitForMultipleObjects for clean stop signaling
             // Wait on both capture event (data available) and stop event (shutdown requested)
             HANDLE handles[2] = { m_hCaptureEvent, m_hStopEvent };
@@ -1142,7 +1202,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 // This shouldn't happen with INFINITE timeout, but handle it
                 std::wcerr << L"[AudioCapturer] WaitForMultipleObjects timeout (unexpected)" << std::endl;
                 continue;
-            } else {
+        } else {
                 // Wait failed - log error and continue
                 std::wcerr << L"[AudioCapturer] WaitForMultipleObjects failed: " << GetLastError() << std::endl;
                 continue;
@@ -1165,25 +1225,39 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         {
             LogErrorWithContext(hr, L"Failed to get next packet size", m_consecutiveErrorCount);
 
-            // Try to recover from the error
+            // Try enhanced recovery with exponential backoff
             if (ShouldRetryError(hr, m_consecutiveErrorCount)) {
                 m_consecutiveErrorCount++;
 
-                if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-                    // Device was invalidated, try to reinitialize
-                    if (ReinitializeAudioClient()) {
-                        std::wcout << L"[AudioCapturer] Successfully recovered from device invalidation" << std::endl;
-                        continue; // Continue with the reinitialized client
-                    }
+                // Try comprehensive recovery
+                if (TryRecoverFromError(hr, L"GetNextPacketSize")) {
+                    // Recovery successful, continue
+                    m_consecutiveErrorCount = 0; // Reset on success
+                    continue;
                 } else {
-                    // For other transient errors, just retry after a short delay
-                    Sleep(100);
+                    // Recovery failed, try exponential backoff
+                    int delay = CalculateRetryDelay(m_consecutiveErrorCount);
+                    AUDIO_LOG_DEBUG(L"[AudioCapturer] Recovery failed, backing off for " << delay << L"ms");
+                    Sleep(delay);
                     continue;
                 }
             }
 
+            // Check if system is under load and we should be more aggressive with retries
+            if (IsSystemUnderLoad() && m_consecutiveErrorCount < m_retryConfig.maxRetries * 2) {
+                AUDIO_LOG_DEBUG(L"[AudioCapturer] System under load, extending retry attempts");
+                int delay = CalculateRetryDelay(m_consecutiveErrorCount);
+                Sleep(delay);
+                m_consecutiveErrorCount++;
+                continue;
+            }
+
+            // Log error statistics before giving up
+            LogErrorStats();
+
             // If we can't recover, exit
-            std::wcerr << L"[AudioCapturer] Unable to recover from error, terminating capture" << std::endl;
+            AUDIO_LOG_ERROR(L"[AudioCapturer] Unable to recover from GetNextPacketSize error after "
+                          << m_consecutiveErrorCount << L" attempts, terminating capture");
             goto Exit;
         }
 
@@ -1206,25 +1280,39 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             {
                 LogErrorWithContext(hr, L"Failed to get buffer", m_consecutiveErrorCount);
 
-                // Try to recover from the error
+                // Try enhanced recovery with exponential backoff
                 if (ShouldRetryError(hr, m_consecutiveErrorCount)) {
                     m_consecutiveErrorCount++;
 
-                    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-                        // Device was invalidated, try to reinitialize
-                        if (ReinitializeAudioClient()) {
-                            std::wcout << L"[AudioCapturer] Successfully recovered from device invalidation during GetBuffer" << std::endl;
-                            break; // Break out of the inner loop to restart the outer loop
-                        }
+                    // Try comprehensive recovery
+                    if (TryRecoverFromError(hr, L"GetBuffer")) {
+                        // Recovery successful, break to restart outer loop if needed
+                        m_consecutiveErrorCount = 0; // Reset on success
+                        break;
                     } else {
-                        // For other transient errors, just retry after a short delay
-                        Sleep(100);
+                        // Recovery failed, try exponential backoff
+                        int delay = CalculateRetryDelay(m_consecutiveErrorCount);
+                        AUDIO_LOG_DEBUG(L"[AudioCapturer] GetBuffer recovery failed, backing off for " << delay << L"ms");
+                        Sleep(delay);
                         continue;
                     }
                 }
 
+                // Check if system is under load and extend retry attempts
+                if (IsSystemUnderLoad() && m_consecutiveErrorCount < m_retryConfig.maxRetries * 2) {
+                    AUDIO_LOG_DEBUG(L"[AudioCapturer] System under load, extending GetBuffer retry attempts");
+                    int delay = CalculateRetryDelay(m_consecutiveErrorCount);
+                    Sleep(delay);
+                    m_consecutiveErrorCount++;
+                    continue;
+                }
+
+                // Log error statistics before giving up
+                LogErrorStats();
+
                 // If we can't recover, exit
-                std::wcerr << L"[AudioCapturer] Unable to recover from GetBuffer error, terminating capture" << std::endl;
+                AUDIO_LOG_ERROR(L"[AudioCapturer] Unable to recover from GetBuffer error after "
+                              << m_consecutiveErrorCount << L" attempts, terminating capture");
                 goto Exit;
             }
 
@@ -1254,7 +1342,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             } else {
                 // Convert PCM data to float format in-place
                 if (!ConvertPCMToFloat(pData, numFramesAvailable, static_cast<void*>(pwfx), m_floatBuffer)) {
-                    std::wcerr << L"[AudioCapturer] Failed to convert PCM to float format" << std::endl;
+                    AUDIO_LOG_ERROR(L"[AudioCapturer] Failed to convert PCM to float format");
                     goto Exit;
                 }
             }
@@ -1311,25 +1399,39 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             {
                 LogErrorWithContext(hr, L"Failed to release buffer", m_consecutiveErrorCount);
 
-                // Try to recover from the error
+                // Try enhanced recovery with exponential backoff
                 if (ShouldRetryError(hr, m_consecutiveErrorCount)) {
                     m_consecutiveErrorCount++;
 
-                    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-                        // Device was invalidated, try to reinitialize
-                        if (ReinitializeAudioClient()) {
-                            std::wcout << L"[AudioCapturer] Successfully recovered from device invalidation during ReleaseBuffer" << std::endl;
-                            break; // Break out of the inner loop to restart the outer loop
-                        }
+                    // Try comprehensive recovery
+                    if (TryRecoverFromError(hr, L"ReleaseBuffer")) {
+                        // Recovery successful, break to restart outer loop if needed
+                        m_consecutiveErrorCount = 0; // Reset on success
+                        break;
                     } else {
-                        // For other transient errors, just retry after a short delay
-                        Sleep(100);
+                        // Recovery failed, try exponential backoff
+                        int delay = CalculateRetryDelay(m_consecutiveErrorCount);
+                        AUDIO_LOG_DEBUG(L"[AudioCapturer] ReleaseBuffer recovery failed, backing off for " << delay << L"ms");
+                        Sleep(delay);
                         continue;
                     }
                 }
 
+                // Check if system is under load and extend retry attempts
+                if (IsSystemUnderLoad() && m_consecutiveErrorCount < m_retryConfig.maxRetries * 2) {
+                    AUDIO_LOG_DEBUG(L"[AudioCapturer] System under load, extending ReleaseBuffer retry attempts");
+                    int delay = CalculateRetryDelay(m_consecutiveErrorCount);
+                    Sleep(delay);
+                    m_consecutiveErrorCount++;
+                    continue;
+                }
+
+                // Log error statistics before giving up
+                LogErrorStats();
+
                 // If we can't recover, exit
-                std::wcerr << L"[AudioCapturer] Unable to recover from ReleaseBuffer error, terminating capture" << std::endl;
+                AUDIO_LOG_ERROR(L"[AudioCapturer] Unable to recover from ReleaseBuffer error after "
+                              << m_consecutiveErrorCount << L" attempts, terminating capture");
                 goto Exit;
             }
 
@@ -1374,15 +1476,14 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             double cyclesPerSecond = captureCycles / elapsedSeconds;
             double packetsPerSecond = dataPacketsProcessed / elapsedSeconds;
 
-            std::wcout << L"[AudioCapturer] Performance: " << cyclesPerSecond << L" cycles/sec, "
-                       << packetsPerSecond << L" packets/sec";
-
-            if (eventMode) {
+            if (m_currentlyUsingEventMode) {
                 double timeoutRate = (timeoutCount * 100.0) / captureCycles;
-                std::wcout << L", timeouts: " << timeoutRate << L"%";
+                AUDIO_LOG_INFO(L"[AudioCapturer] Performance: " << cyclesPerSecond << L" cycles/sec, "
+                             << packetsPerSecond << L" packets/sec, timeouts: " << timeoutRate << L"%");
+            } else {
+                AUDIO_LOG_INFO(L"[AudioCapturer] Performance: " << cyclesPerSecond << L" cycles/sec, "
+                             << packetsPerSecond << L" packets/sec");
             }
-
-            std::wcout << std::endl;
 
             // Reset counters
             captureCycles = 0;
@@ -1505,7 +1606,7 @@ bool AudioCapturer::ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, voi
 void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs)
 {
     if (!samples || sampleCount == 0) return;
-
+    
     // Zero-copy audio processing pipeline - direct frame processing without accumulation
 
     // If this is the first sample of a new frame, store the timestamp
@@ -1535,7 +1636,7 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
         if (PushFrameToRingBuffer(m_currentFrameBuffer, m_currentFrameTimestamp)) {
             // Frame successfully queued to ring buffer
             // Encoder thread polls continuously, so no explicit wake-up needed
-        } else {
+            } else {
             std::wcerr << L"[AudioCapturer] Failed to push frame to ring buffer - encoder congestion" << std::endl;
         }
 
@@ -1903,6 +2004,164 @@ bool AudioCapturer::ReinitializeAudioClient()
 
     std::wcout << L"[AudioCapturer] Successfully reinitialized audio client" << std::endl;
     return true;
+}
+
+// ============================================================================
+// ENHANCED ERROR HANDLING AND RECOVERY
+// ============================================================================
+
+int AudioCapturer::CalculateRetryDelay(int retryCount)
+{
+    // Exponential backoff with jitter to prevent thundering herd
+    int delay = static_cast<int>(m_retryConfig.baseDelayMs * pow(m_retryConfig.backoffMultiplier, retryCount));
+
+    // Cap at maximum delay
+    if (delay > m_retryConfig.maxDelayMs) {
+        delay = m_retryConfig.maxDelayMs;
+    }
+
+    // Add small random jitter (±25%) to prevent synchronized retries
+    int jitter = (rand() % (delay / 2)) - (delay / 4);
+    delay += jitter;
+
+    return (std::max)(1, delay); // Ensure minimum 1ms delay
+}
+
+bool AudioCapturer::TryRecoverFromError(HRESULT hr, const std::wstring& operation)
+{
+    m_errorStats.totalErrors++;
+    m_errorStats.lastErrorCode = hr;
+    m_errorStats.lastErrorTime = GetTickCount64();
+
+    // Categorize the error for statistics
+    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+        m_errorStats.deviceInvalidationErrors++;
+    } else if (hr == AUDCLNT_E_BUFFER_ERROR) {
+        m_errorStats.bufferErrors++;
+    } else if (hr == HRESULT_FROM_WIN32(ERROR_TIMEOUT)) {
+        m_errorStats.timeoutErrors++;
+    } else if (hr == E_POINTER) {
+        m_errorStats.pointerErrors++;
+    } else {
+        m_errorStats.otherErrors++;
+    }
+
+    // Try recovery strategies in order of preference
+    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+        AUDIO_LOG_INFO(L"[AudioCapturer] Device invalidated, attempting recovery...");
+
+        // Try device reinitialization first
+        if (ReinitializeAudioClient()) {
+            m_errorStats.successfulRecoveries++;
+            AUDIO_LOG_INFO(L"[AudioCapturer] Successfully recovered from device invalidation");
+            return true;
+        }
+
+        // If reinitialization fails and fallback is enabled, try mode switching
+        if (m_retryConfig.enableModeFallback) {
+            if (m_currentlyUsingEventMode) {
+                AUDIO_LOG_INFO(L"[AudioCapturer] Switching to polling mode as fallback");
+                SwitchToPollingMode();
+                m_errorStats.modeFallbacks++;
+                return true;
+            } else {
+                AUDIO_LOG_INFO(L"[AudioCapturer] Already in polling mode, trying event mode");
+                SwitchToEventMode();
+                m_errorStats.modeFallbacks++;
+                return true;
+            }
+        }
+    } else if (hr == AUDCLNT_E_BUFFER_ERROR || hr == HRESULT_FROM_WIN32(ERROR_TIMEOUT)) {
+        // For buffer/timeout errors, try a quick mode switch
+        if (m_retryConfig.enableModeFallback) {
+            if (m_currentlyUsingEventMode) {
+                AUDIO_LOG_DEBUG(L"[AudioCapturer] Buffer error in event mode, switching to polling");
+                SwitchToPollingMode();
+                m_errorStats.modeFallbacks++;
+                return true;
+            }
+        }
+    }
+
+    return false; // Recovery failed
+}
+
+void AudioCapturer::SwitchToPollingMode()
+{
+    if (!m_currentlyUsingEventMode) {
+        return; // Already in polling mode
+    }
+
+    AUDIO_LOG_INFO(L"[AudioCapturer] Switching from event-driven to polling mode");
+
+    // Clean up event handles
+    if (m_hCaptureEvent) {
+        CloseHandle(m_hCaptureEvent);
+        m_hCaptureEvent = nullptr;
+    }
+
+    m_currentlyUsingEventMode = false;
+    m_errorStats.modeFallbacks++;
+}
+
+void AudioCapturer::SwitchToEventMode()
+{
+    if (m_currentlyUsingEventMode) {
+        return; // Already in event mode
+    }
+
+    AUDIO_LOG_INFO(L"[AudioCapturer] Attempting to switch from polling to event-driven mode");
+
+    // Recreate event handle if it was closed during polling mode
+    if (!m_hCaptureEvent) {
+        m_hCaptureEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (!m_hCaptureEvent) {
+            AUDIO_LOG_ERROR(L"[AudioCapturer] Failed to create capture event for mode switch");
+            return;
+        }
+    }
+
+    // Try to set up event-driven mode
+    if (m_pAudioClient) {
+        HRESULT hr = m_pAudioClient->SetEventHandle(m_hCaptureEvent);
+        if (SUCCEEDED(hr)) {
+            m_currentlyUsingEventMode = true;
+            AUDIO_LOG_INFO(L"[AudioCapturer] Successfully switched to event-driven mode");
+            m_errorStats.modeFallbacks++;
+        } else {
+            AUDIO_LOG_ERROR(L"[AudioCapturer] Failed to switch to event mode: " << _com_error(hr).ErrorMessage());
+            // Clean up the event handle if setting it failed
+            CloseHandle(m_hCaptureEvent);
+            m_hCaptureEvent = nullptr;
+        }
+    }
+}
+
+void AudioCapturer::LogErrorStats()
+{
+    if (!s_enableBufferMonitoring) {
+        return;
+    }
+
+    uint64_t currentTime = GetTickCount64();
+    if (currentTime - m_errorStats.lastErrorTime > 60000) { // Log every minute if there were errors
+        AUDIO_LOG_INFO(L"[AudioCapturer] Error Stats - Total: " << m_errorStats.totalErrors
+                      << L", Device Invalidations: " << m_errorStats.deviceInvalidationErrors
+                      << L", Buffer Errors: " << m_errorStats.bufferErrors
+                      << L", Timeouts: " << m_errorStats.timeoutErrors
+                      << L", Recoveries: " << m_errorStats.successfulRecoveries
+                      << L", Mode Switches: " << m_errorStats.modeFallbacks);
+    }
+}
+
+bool AudioCapturer::IsSystemUnderLoad()
+{
+    // Simple heuristic: check if we're getting frequent errors
+    uint64_t currentTime = GetTickCount64();
+    uint64_t timeSinceLastError = currentTime - m_errorStats.lastErrorTime;
+
+    // Consider system under load if errors are frequent (< 30 seconds apart)
+    return (m_errorStats.totalErrors > 0 && timeSinceLastError < 30000);
 }
 
 // ============================================================================
