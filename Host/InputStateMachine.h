@@ -38,11 +38,19 @@ struct KeyStateInfo {
 
 // Configuration for the state machine
 struct FSMConfig {
-    std::chrono::milliseconds stuckKeyTimeout = std::chrono::milliseconds(2000); // 2 seconds
+    // General settings
     std::chrono::milliseconds watchdogInterval = std::chrono::milliseconds(500); // Check every 500ms
     bool enableRecovery = true;
     bool enableStaleDetection = true;
     std::chrono::milliseconds staleThreshold = std::chrono::milliseconds(100); // 100ms
+
+    // Timeout settings - separate for modifiers vs regular keys
+    std::chrono::milliseconds modifierKeyTimeout = std::chrono::milliseconds(5000); // 5 seconds for modifiers
+    std::chrono::milliseconds regularKeyTimeout = std::chrono::milliseconds(30000); // 30 seconds for regular keys
+    bool enableRegularKeyTimeout = false; // Disabled by default for regular keys
+
+    // Modifier key detection
+    bool onlyRecoverModifiers = true; // Only apply timeout recovery to modifier keys
 };
 
 // Main FSM class
@@ -95,6 +103,12 @@ private:
 
     // Check if an event is stale
     bool isStaleEvent(const KeyStateInfo& stateInfo, std::chrono::steady_clock::time_point eventTime);
+
+    // Check if a key is a modifier key that should be monitored for stuck state
+    bool isModifierKey(const std::string& jsCode);
+
+    // Get the appropriate timeout for a key based on its type
+    std::chrono::milliseconds getKeyTimeout(const std::string& jsCode);
 
     // Perform recovery for a stuck key
     void recoverStuckKey(const std::string& jsCode);

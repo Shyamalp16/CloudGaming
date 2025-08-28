@@ -14,6 +14,7 @@
 #include "WindowUtils.h"
 #include "InputSchema.h"
 #include "InputInjection.h"
+#include "InputStats.h"
 
 
 using json = nlohmann::json;
@@ -338,6 +339,9 @@ namespace MouseInputHandler {
 					MouseLogDebug(std::string("[MouseInputHandler] Processing mouse message from queue: ") + message);
 					json j = json::parse(message);
 					if (j.is_object() && j.contains(InputSchema::kType)) {
+						// Track mouse event received
+						InputStats::Track::mouseEventReceived();
+
 						std::string jsType = j[InputSchema::kType].get<std::string>();
 						int x = -1, y = -1, button = -1;
 
@@ -356,7 +360,9 @@ namespace MouseInputHandler {
 									HWND target = WindowUtils::GetTargetWindow();
 									if (target && GetForegroundWindow() == target) {
 										simulateWindowsMouseEvent(jsType, x, y, -1);
+										InputStats::Track::mouseEventInjected();
 									} else {
+										InputStats::Track::mouseEventSkippedForeground();
 										MouseLogDebug("[MouseInput] Skipping MOVE inject; target window not foreground");
 									}
 								}
@@ -410,11 +416,14 @@ namespace MouseInputHandler {
 								}
 
 								// SendInput outside the lock
-								if (simulateAction) {
+								if (simulateAction) 								{
+									InputStats::Track::mouseClickProcessed();
 									HWND target = WindowUtils::GetTargetWindow();
 									if (target && GetForegroundWindow() == target) {
 										simulateWindowsMouseEvent(actionType, actionX, actionY, actionButton);
+										InputStats::Track::mouseEventInjected();
 									} else {
+										InputStats::Track::mouseEventSkippedForeground();
 										MouseLogDebug("[MouseInput] Skipping click inject; target window not foreground");
 									}
 								}
@@ -441,7 +450,9 @@ namespace MouseInputHandler {
 								// For wheel events, we pass deltaX/deltaY as x/y parameters
 								// and use button parameter to distinguish wheel type (0=vertical, 1=horizontal)
 								int wheelType = (jsType == "hwheel") ? 1 : 0;
+								InputStats::Track::mouseWheelEvent();
 								simulateWindowsMouseEvent(jsType, deltaX, deltaY, wheelType);
+								InputStats::Track::mouseEventInjected();
 							}
 							else {
 								std::cerr << "[MouseInputHandler] Malformed wheel message (missing deltaX/deltaY): " << message << std::endl;

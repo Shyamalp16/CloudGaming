@@ -17,6 +17,7 @@
 #include "InputSchema.h"
 #include "InputInjection.h"
 #include "InputStateMachine.h"
+#include "InputStats.h"
 
 
 using json = nlohmann::json;
@@ -45,7 +46,15 @@ namespace KeyInputHandler {
 	static std::unordered_map<uint16_t, std::string> scanIdDownToJs;
 
 	// FSM instance for state management and recovery
-	static InputStateMachine::KeyStateFSM keyStateFSM;
+	static InputStateMachine::FSMConfig fsmConfig = []() {
+		InputStateMachine::FSMConfig config;
+		config.modifierKeyTimeout = std::chrono::milliseconds(5000); // 5 seconds for modifiers
+		config.regularKeyTimeout = std::chrono::milliseconds(30000); // 30 seconds for regular keys
+		config.enableRegularKeyTimeout = false; // Disable regular key timeout by default
+		config.onlyRecoverModifiers = true; // Only recover modifier keys
+		return config;
+	}();
+	static InputStateMachine::KeyStateFSM keyStateFSM{fsmConfig};
 
 	// Blocking queue infrastructure
 	static std::queue<std::string> keyboardMessageQueue;
@@ -438,6 +447,9 @@ namespace KeyInputHandler {
 
 					json j = json::parse(message);
 					if (j.is_object() && j.contains(InputSchema::kCode) && j.contains(InputSchema::kType)) {
+						// Track keyboard event received
+						InputStats::Track::keyboardEventReceived();
+
 						std::string jsCode = j[InputSchema::kCode].get<std::string>();
 						std::string jsType = j[InputSchema::kType].get<std::string>();
 						bool isClientKeyDown = (jsType == "keydown");
@@ -507,12 +519,16 @@ namespace KeyInputHandler {
 									// Check injection preconditions before injecting
 									if (!InputInjection::shouldInjectInput(InputInjection::getDefaultPolicy(), "keyboard")) {
 										// Skip injection based on policy (logged by shouldInjectInput)
+										InputStats::Track::keyboardEventSkippedForeground();
 										break;
 									}
 
 									// Inject the key event
 									SimulateWindowsKeyEvent(jsForInject, actionIsDown);
 									InputInjection::markInjectionSuccess();
+
+									// Track successful injection
+									InputStats::Track::keyboardEventInjected();
 
 									// Update legacy metrics for compatibility
 									if (!actionIsDown) {
@@ -521,14 +537,17 @@ namespace KeyInputHandler {
 									break;
 
 								case InputStateMachine::TransitionResult::IGNORED_INVALID:
+									InputStats::Track::keyboardEventDroppedInvalid();
 									std::cout << "[KeyInput] FSM ignored invalid transition for '" << jsForInject << "' (" << (actionIsDown ? "down" : "up") << ")" << std::endl;
 									break;
 
 								case InputStateMachine::TransitionResult::IGNORED_STALE:
+									InputStats::Track::keyboardEventStaleIgnored();
 									std::cout << "[KeyInput] FSM ignored stale event for '" << jsForInject << "' (" << (actionIsDown ? "down" : "up") << ")" << std::endl;
 									break;
 
 								case InputStateMachine::TransitionResult::RECOVERED:
+									InputStats::Track::keyboardRecoverySuccess();
 									std::cout << "[KeyInput] FSM recovered stuck key '" << jsForInject << "'" << std::endl;
 									break;
 							}
@@ -625,6 +644,7 @@ namespace KeyInputHandler {
 	void emergencyReleaseAllKeys() {
 		std::cout << "[KeyInputHandler] Emergency release of all keys requested" << std::endl;
 		keyStateFSM.releaseAllKeys();
+		InputStats::Track::keyboardEmergencyRelease();
 		InputMetrics::inc(InputMetrics::fsmEmergencyReleases());
 	}
 
@@ -640,6 +660,16 @@ extern "C" void stopKeyInputHandler() {
 
 extern "C" void emergencyReleaseAllKeys() {
 	KeyInputHandler::emergencyReleaseAllKeys();
+}
+
+extern "C" const char* getInputStatsSummary() {
+	static std::string statsString;
+	statsString = InputStats::getStatsSummary();
+	return statsString.c_str();
+}
+
+extern "C" void resetInputStats() {
+	InputStats::resetAllStats();
 }
 
 extern "C" void wakeKeyboardThread() {

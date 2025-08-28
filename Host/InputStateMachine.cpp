@@ -1,6 +1,8 @@
 #include "InputStateMachine.h"
+#include "InputStats.h"
 #include <iostream>
 #include <algorithm>
+#include <unordered_set>
 
 namespace InputStateMachine {
 
@@ -116,10 +118,22 @@ void KeyStateFSM::watchdogLoop() {
             if ((stateInfo.state == KeyState::DOWN || stateInfo.state == KeyState::STUCK_RECOVERY) &&
                 config_.enableRecovery) {
 
+                // Skip recovery for regular keys if disabled, or if only recovering modifiers
+                if (config_.onlyRecoverModifiers && !isModifierKey(jsCode)) {
+                    continue;
+                }
+
+                // Skip recovery for regular keys if regular key timeout is disabled
+                if (!isModifierKey(jsCode) && !config_.enableRegularKeyTimeout) {
+                    continue;
+                }
+
                 auto timeSinceLastSeen = std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - stateInfo.lastSeen);
 
-                if (timeSinceLastSeen > config_.stuckKeyTimeout) {
+                auto keyTimeout = getKeyTimeout(jsCode);
+
+                if (timeSinceLastSeen > keyTimeout) {
                     recoverStuckKey(jsCode);
                 }
             }
@@ -158,13 +172,47 @@ bool KeyStateFSM::isStaleEvent(const KeyStateInfo& stateInfo,
     return timeDiff < -config_.staleThreshold;
 }
 
+bool KeyStateFSM::isModifierKey(const std::string& jsCode) {
+    // Common modifier keys that can get stuck and cause issues
+    static const std::unordered_set<std::string> modifierKeys = {
+        // Control keys
+        "ControlLeft", "ControlRight", "Control",
+
+        // Shift keys
+        "ShiftLeft", "ShiftRight", "Shift",
+
+        // Alt keys
+        "AltLeft", "AltRight", "Alt",
+
+        // Windows/Meta keys
+        "MetaLeft", "MetaRight", "Meta", "OSLeft", "OSRight",
+
+        // Function keys that might be problematic
+        "CapsLock", "NumLock", "ScrollLock"
+    };
+
+    return modifierKeys.find(jsCode) != modifierKeys.end();
+}
+
+std::chrono::milliseconds KeyStateFSM::getKeyTimeout(const std::string& jsCode) {
+    if (isModifierKey(jsCode)) {
+        return config_.modifierKeyTimeout;
+    } else {
+        return config_.regularKeyTimeout;
+    }
+}
+
 void KeyStateFSM::recoverStuckKey(const std::string& jsCode) {
     auto& stateInfo = keyStates_[jsCode];
+    auto timeHeld = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - stateInfo.lastSeen).count();
 
-    std::cout << "[InputStateMachine] Recovering stuck key: " << jsCode
-              << " (last seen " << std::chrono::duration_cast<std::chrono::milliseconds>(
-                     std::chrono::steady_clock::now() - stateInfo.lastSeen).count()
-              << "ms ago)" << std::endl;
+    bool isModifier = isModifierKey(jsCode);
+    auto timeoutUsed = getKeyTimeout(jsCode);
+
+    std::cout << "[InputStateMachine] Recovering stuck " << (isModifier ? "modifier" : "regular")
+              << " key: " << jsCode << " (held " << timeHeld << "ms, timeout: "
+              << timeoutUsed.count() << "ms)" << std::endl;
 
     // Inject key-up to release the stuck key
     if (injectCallback_) {
@@ -176,8 +224,8 @@ void KeyStateFSM::recoverStuckKey(const std::string& jsCode) {
     stateInfo.recoveryCount++;
     totalRecoveries_.fetch_add(1);
 
-    // Update metrics
-    InputMetrics::inc(InputMetrics::fsmRecoveries());
+    // Update metrics with modifier information
+    InputStats::Track::keyboardEventTimeoutReleased(isModifier);
 }
 
 void KeyStateFSM::updateMetrics(TransitionResult result) {

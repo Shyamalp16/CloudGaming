@@ -34,4 +34,8 @@ namespace KeyInputHandler {
 extern "C" void initKeyInputHandler();
 extern "C" void emergencyReleaseAllKeys();
 
+// Input statistics API
+extern "C" const char* getInputStatsSummary();
+extern "C" void resetInputStats();
+
 #endif
