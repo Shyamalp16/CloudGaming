@@ -86,6 +86,7 @@ var pliCallback C.OnPLICallback
 var (
 	peerConnection        *webrtc.PeerConnection
 	pcMutex               sync.Mutex
+	audioMutex            sync.Mutex                     // Separate mutex for audio RTP state to reduce contention
 	videoTrack            *webrtc.TrackLocalStaticSample // switched to sample track for pacing
 	audioTrack            *webrtc.TrackLocalStaticRTP
 	trackSSRC             uint32
@@ -155,6 +156,9 @@ func init() {
 // validateAudioTimestampStability checks RTP timestamp progression for debugging
 // This function can be called periodically to verify timestamp consistency
 func validateAudioTimestampStability() {
+	audioMutex.Lock()
+	defer audioMutex.Unlock()
+
 	if !audioBaselineSet {
 		return
 	}
@@ -178,20 +182,41 @@ func validateAudioTimestampStability() {
 
 //export sendAudioPacket
 func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
-	pcMutex.Lock()
-	defer pcMutex.Unlock()
+	// Non-blocking audio RTP write implementation
+	// Uses granular locking to reduce contention:
+	// 1. Minimal global lock (pcMutex) for connection state checks only
+	// 2. Dedicated audio mutex for RTP state (sequence, timestamp, baseline)
+	// 3. No locks held during WriteRTP() - eliminates stalls from blocking I/O
+	// This prevents audio writes from blocking control operations and vice versa
 
+	// Check connection state and track availability with minimal lock time
+	pcMutex.Lock()
 	if peerConnection == nil || audioTrack == nil {
+		pcMutex.Unlock()
 		return -1
 	}
 	if connectionState != webrtc.PeerConnectionStateConnected {
+		pcMutex.Unlock()
 		return 0
 	}
+
+	// Get a copy of the track pointer and other shared state while holding the lock
+	track := audioTrack
+	payloadType := audioPayloadType
+	ssrc := audioSSRC
+	pcMutex.Unlock() // Release global lock immediately
 
 	// Reuse buffer from pool to avoid per-call allocation
 	n := int(size)
 	payload := getSampleBuf(n)
 	C.memcpy(unsafe.Pointer(&payload[0]), data, C.size_t(n))
+
+	// Handle RTP timestamp calculation with dedicated audio mutex
+	// This allows concurrent audio processing while other operations use pcMutex
+	audioMutex.Lock()
+
+	var seq uint16
+	var ts uint32
 
 	// Use stable RTP timestamp calculation with running increment
 	// This avoids timestamp wobble from PTS rounding and ensures steady jitter buffer behavior
@@ -230,23 +255,50 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		}
 	}
 
+	// Get sequence and timestamp values for the packet
+	seq = currentAudioSeq
+	ts = currentAudioTS
+
+	// Increment sequence number
+	currentAudioSeq++
+
+	audioMutex.Unlock() // Release audio mutex before potentially blocking WriteRTP
+
+	// Create RTP packet (no locks needed for this)
 	pkt := &rtp.Packet{
 		Header: rtp.Header{
 			Version:        2,
-			PayloadType:    audioPayloadType,
-			SequenceNumber: currentAudioSeq,
-			Timestamp:      currentAudioTS,
-			SSRC:           audioSSRC,
+			PayloadType:    payloadType,
+			SequenceNumber: seq,
+			Timestamp:      ts,
+			SSRC:           ssrc,
 			Marker:         true, // Mark each audio frame boundary for better jitter buffer behavior
 		},
 		Payload: payload,
 	}
-	currentAudioSeq++
 
-	if err := audioTrack.WriteRTP(pkt); err != nil {
+	// Write RTP packet without holding any locks - this is the potentially blocking operation
+	// This eliminates contention with other control paths while RTP write completes
+	if err := track.WriteRTP(pkt); err != nil {
+		log.Printf("[Go/Pion] Error writing audio RTP packet: %v", err)
+		putSampleBuf(payload)
 		return -1
 	}
-	// Return buffer to pool after write
+
+	// Optional performance logging (disabled during normal operation to avoid spam)
+	// To enable performance monitoring, uncomment the following block:
+	// writeStart := time.Now()
+	// if err := track.WriteRTP(pkt); err != nil {
+	//     log.Printf("[Go/Pion] Error writing audio RTP packet: %v", err)
+	//     putSampleBuf(payload)
+	//     return -1
+	// }
+	// writeDuration := time.Since(writeStart)
+	// if seq%1000 == 0 {
+	//     log.Printf("[Go/Pion] Audio RTP write performance: seq=%d, write_time=%v", seq, writeDuration)
+	// }
+
+	// Return buffer to pool after successful write
 	putSampleBuf(payload)
 	return 0
 }
@@ -418,12 +470,14 @@ func createPeerConnectionGo() C.int {
 		pendingRemoteCandidates = nil
 		pingTimestamps = make(map[uint64]int64) // Initialize/clear the map
 		// Reset audio RTP state for new connection
+		audioMutex.Lock()
 		currentAudioSeq = 0
 		currentAudioTS = 0
 		// Reset RTP baseline tracking
 		audioRTPBaseline = 0
 		audioPTSBaseline = 0
 		audioBaselineSet = false
+		audioMutex.Unlock()
 		log.Println("[Go/Pion] Audio RTP state reset for new connection")
 		log.Println(
 			"[Go/Pion] createPeerConnectionGo: Closed previous PeerConnection and reset state.",
@@ -432,12 +486,14 @@ func createPeerConnectionGo() C.int {
 		// This is the first run, initialize the map.
 		pingTimestamps = make(map[uint64]int64)
 		// Initialize audio RTP state for first connection
+		audioMutex.Lock()
 		currentAudioSeq = 0
 		currentAudioTS = 0
 		// Initialize RTP baseline tracking
 		audioRTPBaseline = 0
 		audioPTSBaseline = 0
 		audioBaselineSet = false
+		audioMutex.Unlock()
 		log.Println("[Go/Pion] Audio RTP state initialized for first connection")
 		log.Println("[Go/Pion] createPeerConnectionGo: Initializing pingTimestamps for new PeerConnection.")
 	}
