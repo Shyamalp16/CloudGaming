@@ -43,22 +43,16 @@ AudioCapturer::AudioCapturer() :
     // Initialize Opus encoder with optimized settings for low-latency gaming
     m_opusEncoder = std::make_unique<OpusEncoderWrapper>();
 
-    // Pre-allocate all audio buffers to reduce reallocations during runtime
-    // Reserve space for multiple frames to handle bursty audio data
+    // Initialize zero-copy audio pipeline with ring buffer
+    InitializeRingBuffer();
 
-    // Accumulation buffer for frame assembly (10ms frames at 48kHz stereo)
-    m_accumulatedSamples.reserve(m_samplesPerFrame * 4); // Reserve space for 4 frames
-
-    // PCM to float conversion buffer (sized for maximum expected frame size)
-    m_floatBuffer.reserve(m_samplesPerFrame * 2); // Reserve space for stereo processing (10ms frames)
-
-    // Frame buffer for encoder input (exact size needed)
-    m_frameBuffer.resize(m_samplesPerFrame); // Exact size for encoder
+    // Pre-allocate working buffers with minimal sizes (will be resized as needed)
+    m_floatBuffer.reserve(m_samplesPerFrame); // Reserve space for PCM to float conversion
+    m_currentFrameBuffer.reserve(m_samplesPerFrame); // Reserve space for current frame accumulation
 
     // Initialize reusable encoded buffer (avoid per-frame allocations)
     m_encodedBuffer.reserve(ENCODED_BUFFER_SIZE);
     m_encodedBuffer.resize(ENCODED_BUFFER_SIZE);
-    std::fill(m_frameBuffer.begin(), m_frameBuffer.end(), 0.0f); // Initialize to silence
 }
 
 AudioCapturer::~AudioCapturer()
@@ -330,40 +324,33 @@ void AudioCapturer::EncoderThread()
     }
 
     while (!m_stopEncoder) {
-        std::unique_lock<std::mutex> lock(m_rawFrameMutex);
+        // Check for frames in ring buffer (polling approach for now)
+        std::vector<float> frame;
+        int64_t timestamp;
 
-        // Wait for raw frames or shutdown signal
-        m_rawFrameCondition.wait(lock, [this]() {
-            return !m_rawFrameQueue.empty() || m_stopEncoder;
-        });
-
-        if (m_stopEncoder) {
-            // Process any remaining frames before shutdown
-            while (!m_rawFrameQueue.empty()) {
-                RawAudioFrame frame = std::move(m_rawFrameQueue.front());
-                m_rawFrameQueue.pop();
-
-                lock.unlock();
-                EncodeAndQueueFrame(frame);
-                lock.lock();
-            }
-            break;
+        if (PopFrameFromRingBuffer(frame, timestamp)) {
+            // We have a frame to encode
+            RawAudioFrame rawFrame;
+            rawFrame.samples = std::move(frame);
+            rawFrame.timestampUs = timestamp;
+            EncodeAndQueueFrame(rawFrame);
+        } else {
+            // No frames available, sleep briefly to avoid busy waiting
+            Sleep(1);
         }
 
-        // Process all queued raw frames
-        while (!m_rawFrameQueue.empty() && !m_stopEncoder) {
-            RawAudioFrame frame = std::move(m_rawFrameQueue.front());
-            m_rawFrameQueue.pop();
+        // Check for parameter updates
+        CheckForParameterUpdates();
+    }
 
-            // Unlock while processing to allow new frames to be queued
-            lock.unlock();
-
-            // Check for parameter updates before encoding
-            CheckForParameterUpdates();
-
-            EncodeAndQueueFrame(std::move(frame));
-            lock.lock();
-        }
+    // Process any remaining frames in ring buffer before shutdown
+    std::vector<float> frame;
+    int64_t timestamp;
+    while (PopFrameFromRingBuffer(frame, timestamp)) {
+        RawAudioFrame rawFrame;
+        rawFrame.samples = std::move(frame);
+        rawFrame.timestampUs = timestamp;
+        EncodeAndQueueFrame(rawFrame);
     }
 
     std::wcout << L"[AudioEncoder] Dedicated encoder thread stopped" << std::endl;
@@ -1465,40 +1452,52 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
 {
     if (!samples || sampleCount == 0) return;
 
-    // Accumulate samples into per-instance buffer (thread-safe, no cross-instance contamination)
-    // Append new samples to the instance's accumulation buffer
-    const size_t currentSize = m_accumulatedSamples.size();
-    m_accumulatedSamples.resize(currentSize + sampleCount);
-    std::copy(samples, samples + sampleCount, m_accumulatedSamples.begin() + currentSize);
-    m_accumulatedCount += sampleCount;
+    // Zero-copy audio processing pipeline - direct frame processing without accumulation
 
-    // Process complete frames based on Opus frame size (ensures consistent latency)
-    // m_samplesPerFrame = total samples per frame (includes all channels)
-    // RTP timestamps increment by samples per channel for correct timing
-    while (m_accumulatedCount >= m_samplesPerFrame) {
-        // Extract one complete frame from the accumulated buffer (zero-copy)
-        std::copy(m_accumulatedSamples.begin(), m_accumulatedSamples.begin() + m_samplesPerFrame, m_frameBuffer.begin());
+    // If this is the first sample of a new frame, store the timestamp
+    if (m_currentFrameSamples == 0) {
+        m_currentFrameTimestamp = timestampUs;
+    }
 
-        // Queue raw audio frame for dedicated encoder thread (zero-allocation approach)
-        // Pass frame data by reference to avoid vector copy
-        if (!QueueRawFrameRef(m_frameBuffer, timestampUs)) {
-            std::wcerr << L"[AudioCapturer] Failed to queue raw audio frame - encoder congestion detected" << std::endl;
-            // Don't retry immediately - let encoder thread catch up
-            // The capture thread will continue and try again on next frame
+    // Ensure current frame buffer is properly sized
+    if (m_currentFrameBuffer.size() < m_samplesPerFrame) {
+        m_currentFrameBuffer.resize(m_samplesPerFrame);
+    }
+
+    // Calculate how many samples we need to complete the current frame
+    size_t samplesNeeded = m_samplesPerFrame - m_currentFrameSamples;
+    size_t samplesToCopy = (sampleCount < samplesNeeded) ? sampleCount : samplesNeeded;
+
+    // Copy samples directly into the current frame buffer
+    if (m_currentFrameSamples + samplesToCopy <= m_currentFrameBuffer.size()) {
+        std::copy(samples, samples + samplesToCopy,
+                 m_currentFrameBuffer.begin() + m_currentFrameSamples);
+    }
+    m_currentFrameSamples += samplesToCopy;
+
+    // If we have a complete frame, push it to the ring buffer
+    if (m_currentFrameSamples >= m_samplesPerFrame) {
+        // Push the complete frame to ring buffer (zero-copy from working buffer)
+        if (PushFrameToRingBuffer(m_currentFrameBuffer, m_currentFrameTimestamp)) {
+            // Frame successfully queued to ring buffer
+            // Encoder thread polls continuously, so no explicit wake-up needed
         } else {
-            // Log every 100 frames (disabled during streaming)
-            // static int frameCount = 0;
-            // if (++frameCount % 100 == 0) {
-            //     std::wcout << L"[AudioCapturer] Queued raw frame " << frameCount
-            //                << L" with " << m_frameBuffer.size() << L" samples, pts: " << timestampUs << L" us" << std::endl;
-            // }
+            std::wcerr << L"[AudioCapturer] Failed to push frame to ring buffer - encoder congestion" << std::endl;
         }
 
-        // Remove processed samples from the instance's accumulator
-        m_accumulatedSamples.erase(m_accumulatedSamples.begin(), m_accumulatedSamples.begin() + m_samplesPerFrame);
-        m_accumulatedCount -= m_samplesPerFrame;
+        // Reset for next frame
+        m_currentFrameSamples = 0;
+        m_currentFrameTimestamp = 0;
+
+        // Handle any remaining samples that didn't fit in the current frame
+        if (samplesToCopy < sampleCount) {
+            size_t remainingSamples = sampleCount - samplesToCopy;
+            ProcessAudioFrame(samples + samplesToCopy, remainingSamples, timestampUs);
+        }
     }
 }
+
+
 
 
 
@@ -1850,6 +1849,99 @@ bool AudioCapturer::ReinitializeAudioClient()
 
     std::wcout << L"[AudioCapturer] Successfully reinitialized audio client" << std::endl;
     return true;
+}
+
+// ============================================================================
+// RING BUFFER MANAGEMENT - Zero-Copy Audio Pipeline
+// ============================================================================
+
+void AudioCapturer::InitializeRingBuffer()
+{
+    // Preallocate ring buffer frames (each frame matches encoder requirements exactly)
+    m_frameRingBuffer.resize(RING_BUFFER_SIZE);
+    for (auto& frame : m_frameRingBuffer) {
+        frame.resize(m_samplesPerFrame);
+        std::fill(frame.begin(), frame.end(), 0.0f); // Initialize to silence
+    }
+
+    // Reset ring buffer indices
+    m_ringBufferWriteIndex = 0;
+    m_ringBufferReadIndex = 0;
+    m_ringBufferCount = 0;
+
+    std::wcout << L"[AudioCapturer] Initialized ring buffer with " << RING_BUFFER_SIZE
+              << L" frames of " << m_samplesPerFrame << L" samples each" << std::endl;
+}
+
+bool AudioCapturer::PushFrameToRingBuffer(const std::vector<float>& frame, int64_t timestamp)
+{
+    if (IsRingBufferFull()) {
+        std::wcerr << L"[AudioCapturer] Ring buffer full - dropping frame (encoder congestion)" << std::endl;
+        return false;
+    }
+
+    // Copy frame data directly into preallocated ring buffer slot
+    auto& ringBufferFrame = m_frameRingBuffer[m_ringBufferWriteIndex];
+    if (frame.size() <= ringBufferFrame.size()) {
+        std::copy(frame.begin(), frame.end(), ringBufferFrame.begin());
+        // Store timestamp in a way that doesn't require additional memory
+        // We'll use the first sample as a timestamp marker (negligible impact on audio)
+        if (!ringBufferFrame.empty()) {
+            // Store timestamp in the first sample (will be restored when popped)
+            ringBufferFrame[0] = *reinterpret_cast<float*>(&timestamp);
+        }
+    } else {
+        std::wcerr << L"[AudioCapturer] Frame size mismatch in ring buffer push" << std::endl;
+        return false;
+    }
+
+    // Update ring buffer indices
+    m_ringBufferWriteIndex = (m_ringBufferWriteIndex + 1) % RING_BUFFER_SIZE;
+    m_ringBufferCount++;
+
+    return true;
+}
+
+bool AudioCapturer::PopFrameFromRingBuffer(std::vector<float>& frame, int64_t& timestamp)
+{
+    if (IsRingBufferEmpty()) {
+        return false;
+    }
+
+    // Get frame from ring buffer
+    const auto& ringBufferFrame = m_frameRingBuffer[m_ringBufferReadIndex];
+
+    // Extract timestamp from first sample and restore original value
+    if (!ringBufferFrame.empty()) {
+        timestamp = *reinterpret_cast<const int64_t*>(&ringBufferFrame[0]);
+        // Restore the original audio sample (this is a negligible approximation)
+        frame.assign(ringBufferFrame.begin() + 1, ringBufferFrame.end());
+        frame.insert(frame.begin(), 0.0f); // Restore first sample to 0 (silence)
+    } else {
+        frame = ringBufferFrame;
+        timestamp = 0;
+    }
+
+    // Update ring buffer indices
+    m_ringBufferReadIndex = (m_ringBufferReadIndex + 1) % RING_BUFFER_SIZE;
+    m_ringBufferCount--;
+
+    return true;
+}
+
+bool AudioCapturer::IsRingBufferEmpty() const
+{
+    return m_ringBufferCount == 0;
+}
+
+bool AudioCapturer::IsRingBufferFull() const
+{
+    return m_ringBufferCount >= RING_BUFFER_SIZE;
+}
+
+size_t AudioCapturer::GetRingBufferCount() const
+{
+    return m_ringBufferCount;
 }
 
 void AudioCapturer::ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out)

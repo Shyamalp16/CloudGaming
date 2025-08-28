@@ -100,6 +100,14 @@ private:
     bool ShouldRetryError(HRESULT hr, int retryCount);
     void LogErrorWithContext(HRESULT hr, const std::wstring& context, int retryCount = 0);
 
+    // Ring buffer management methods
+    void InitializeRingBuffer();
+    bool PushFrameToRingBuffer(const std::vector<float>& frame, int64_t timestamp);
+    bool PopFrameFromRingBuffer(std::vector<float>& frame, int64_t& timestamp);
+    bool IsRingBufferEmpty() const;
+    bool IsRingBufferFull() const;
+    size_t GetRingBufferCount() const;
+
     // Simple MediaBuffer implementation for DMO
     class CMediaBuffer : public IMediaBuffer {
     public:
@@ -287,6 +295,18 @@ private:
 
     // Persistent audio float buffer to avoid per-packet allocations
     std::vector<float> m_floatBuffer;
+
+    // Ring buffer for encoder frames (zero-copy audio pipeline)
+    static const size_t RING_BUFFER_SIZE = 16; // 16 frames of buffering
+    std::vector<std::vector<float>> m_frameRingBuffer; // Preallocated frame buffers
+    size_t m_ringBufferWriteIndex = 0;
+    size_t m_ringBufferReadIndex = 0;
+    size_t m_ringBufferCount = 0;
+
+    // Direct frame processing (eliminates accumulation buffer)
+    std::vector<float> m_currentFrameBuffer; // Working buffer for current frame
+    size_t m_currentFrameSamples = 0; // Samples accumulated in current frame
+    int64_t m_currentFrameTimestamp = 0; // Timestamp for current frame
 
     // Simple resampler state for linear interpolation between callbacks
     std::vector<float> m_resampleRemainder; // per-channel remainder sample
