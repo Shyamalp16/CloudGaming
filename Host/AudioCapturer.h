@@ -51,7 +51,7 @@ public:
     static void OnRtcpFeedback(double packetLoss, double rtt, double jitter);
 
     // Dynamic Opus parameter updates
-    static void UpdateOpusParameters(int bitrate, int expectedLossPerc);
+    static void UpdateOpusParameters(int bitrate, int expectedLossPerc, int complexity);
 
 private:
     void CaptureThread(DWORD processId);
@@ -160,6 +160,9 @@ private:
         DWORD encoderThreadAffinityMask = 0; // CPU affinity mask (0 = no affinity)
     };
     static AudioConfig s_audioConfig;
+
+    // Active instance reference for parameter updates (assumes single instance)
+    static inline AudioCapturer* s_activeInstance = nullptr;
 
     // Per-instance audio frame accumulation (replaces static variables)
     std::vector<float> m_accumulatedSamples;

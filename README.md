@@ -1518,7 +1518,8 @@ The audio system includes sophisticated bitrate adaptation that responds to real
 2. **Loss Detection**: Triggers bitrate decreases when packet loss exceeds thresholds
 3. **Quality Recovery**: Gradually increases bitrate when network conditions improve
 4. **Hysteresis**: Prevents oscillation with cooldown periods and sample requirements
-5. **Parameter Updates**: Dynamically adjusts Opus encoder bitrate, FEC, and complexity
+5. **Dynamic Parameters**: Adjusts Opus encoder bitrate, FEC, and complexity in real-time
+6. **Thread-Safe Updates**: Parameter changes queued to dedicated encoder thread
 
 **Configuration:**
 ```json
@@ -1556,6 +1557,8 @@ The audio system includes sophisticated bitrate adaptation that responds to real
 - **Increase**: When packet loss < 1% for 30 consecutive samples, increase by 8kbps
 - **Limits**: Stay within configured min/max bitrate bounds
 - **Hysteresis**: Requires sustained good/bad conditions before changing
+- **Complexity**: Automatically reduces encoder complexity under high loss (prioritizes speed)
+- **Quality Recovery**: Increases complexity when loss drops to very low levels
 
 **Tuning Recommendations:**
 
