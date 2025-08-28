@@ -10,6 +10,8 @@
 #include "Config.h"
 #include "Metrics.h"
 #include "VideoMetrics.h"
+#include "InputIntegrationLayer.h"
+#include "LegacyWebSocketCompat.h"
 
 // Forward declarations for blocking queue functions
 void enqueueKeyboardMessage(const std::string& message);
@@ -123,83 +125,88 @@ void startMetricsExport(bool enable) {
 static void startInputPollers() {
     bool expected = false;
     if (!g_input_poll_running.compare_exchange_strong(expected, true)) return;
-    // Keyboard poller with proper blocking and shutdown coordination
-    g_kb_poller = std::thread([](){
-        std::cout << "[WebSocket] Starting keyboard poller thread" << std::endl;
-        while (g_input_poll_running.load() && !ShutdownManager::IsShutdown()) {
-            try {
-                std::string msg = WebRTCWrapper::getDataChannelMessageString();
-                if (!msg.empty()) {
-                    enqueueKeyboardMessage(msg);
-                } else {
-                    // Use condition variable for efficient blocking instead of busy-waiting
-                    std::unique_lock<std::mutex> lock(g_poller_mutex);
-                    g_poller_cv.wait_for(lock, std::chrono::milliseconds(100), [](){
-                        return !g_input_poll_running.load() || ShutdownManager::IsShutdown();
-                    });
-                }
-            } catch (...) {
-                // On error, use slightly longer wait to avoid tight error loops
-                std::unique_lock<std::mutex> lock(g_poller_mutex);
-                g_poller_cv.wait_for(lock, std::chrono::milliseconds(200), [](){
-                    return !g_input_poll_running.load() || ShutdownManager::IsShutdown();
-                });
-            }
-        }
-        std::cout << "[WebSocket] Keyboard poller thread exited" << std::endl;
-    });
 
-    // Mouse poller with proper blocking and shutdown coordination
-    g_mouse_poller = std::thread([](){
-        std::cout << "[WebSocket] Starting mouse poller thread" << std::endl;
-        while (g_input_poll_running.load() && !ShutdownManager::IsShutdown()) {
-            try {
-                // Use RAII wrapper for safe memory management
-                auto msgWrapper = WebRTCWrapper::getMouseChannelMessageSafe();
-                if (msgWrapper) {
-                    // RAII wrapper automatically frees memory when it goes out of scope
-                    std::string msg = msgWrapper; // Implicit conversion to string
-                    enqueueMouseMessage(msg);
-                } else {
-                    // Use condition variable for efficient blocking instead of busy-waiting
-                    std::unique_lock<std::mutex> lock(g_poller_mutex);
-                    g_poller_cv.wait_for(lock, std::chrono::milliseconds(100), [](){
-                        return !g_input_poll_running.load() || ShutdownManager::IsShutdown();
-                    });
-                }
-            } catch (...) {
-                // On error, use slightly longer wait to avoid tight error loops
-                std::unique_lock<std::mutex> lock(g_poller_mutex);
-                g_poller_cv.wait_for(lock, std::chrono::milliseconds(200), [](){
-                    return !g_input_poll_running.load() || ShutdownManager::IsShutdown();
-                });
-            }
+    // Check if new architecture is enabled in configuration
+    if (InputConfig::globalInputConfig.usePionDataChannels) {
+        // Initialize and start the new input integration layer
+        if (!InputIntegrationLayer::initialize()) {
+            std::cerr << "[WebSocket] Failed to initialize input integration layer, falling back to legacy mode" << std::endl;
+            g_input_poll_running.store(false);
+            return;
         }
-        std::cout << "[WebSocket] Mouse poller thread exited" << std::endl;
-    });
+
+        if (!InputIntegrationLayer::start()) {
+            std::cerr << "[WebSocket] Failed to start input integration layer" << std::endl;
+            g_input_poll_running.store(false);
+            return;
+        }
+
+        std::cout << "[WebSocket] New input architecture started successfully" << std::endl;
+
+        // Check if legacy compatibility is also enabled
+        if (InputConfig::globalInputConfig.enableLegacyWebSocket) {
+            std::cout << "[WebSocket] Legacy WebSocket compatibility enabled - starting legacy polling threads" << std::endl;
+
+            if (!LegacyWebSocketCompat::startLegacyPolling()) {
+                std::cerr << "[WebSocket] Failed to start legacy polling threads" << std::endl;
+                // Continue with new architecture even if legacy fails
+            }
+        } else {
+            std::cout << "[WebSocket] Legacy WebSocket compatibility disabled - using new architecture only" << std::endl;
+        }
+
+    } else if (InputConfig::globalInputConfig.enableLegacyWebSocket) {
+        // Only legacy WebSocket is enabled
+        std::cout << "[WebSocket] Using legacy WebSocket polling only (new architecture disabled)" << std::endl;
+
+        if (!LegacyWebSocketCompat::startLegacyPolling()) {
+            std::cerr << "[WebSocket] Failed to start legacy polling threads" << std::endl;
+            g_input_poll_running.store(false);
+            return;
+        }
+
+    } else {
+        std::cerr << "[WebSocket] Error: Neither new architecture nor legacy WebSocket is enabled in configuration" << std::endl;
+        std::cerr << "[WebSocket] Please set usePionDataChannels=true or enableLegacyWebSocket=true in config.json" << std::endl;
+        g_input_poll_running.store(false);
+        return;
+    }
 }
 
 static void stopInputPollers() {
     bool expected = true;
     if (!g_input_poll_running.compare_exchange_strong(expected, false)) return;
 
-    // Notify condition variables to wake up threads immediately on shutdown
+    // Stop the new input integration layer if it was started
+    if (InputIntegrationLayer::isRunning()) {
+        InputIntegrationLayer::stop();
+        std::cout << "[WebSocket] Input integration layer stopped" << std::endl;
+    }
+
+    // Stop legacy polling threads if they were started
+    if (LegacyWebSocketCompat::isLegacyPollingRunning()) {
+        LegacyWebSocketCompat::stopLegacyPolling();
+        std::cout << "[WebSocket] Legacy WebSocket polling stopped" << std::endl;
+    }
+
+    // Legacy compatibility: For any remaining threads, notify and join
+    // (This handles edge cases where threads might still be running)
     {
         std::lock_guard<std::mutex> lock(g_poller_mutex);
         g_poller_cv.notify_all();
     }
 
-    // Wait for threads to complete with proper join semantics
+    // Wait for any remaining legacy threads to complete
     if (g_kb_poller.joinable()) {
-        std::cout << "[WebSocket] Waiting for keyboard poller to join..." << std::endl;
+        std::cout << "[WebSocket] Waiting for legacy keyboard poller to join..." << std::endl;
         g_kb_poller.join();
-        std::cout << "[WebSocket] Keyboard poller joined successfully" << std::endl;
+        std::cout << "[WebSocket] Legacy keyboard poller joined successfully" << std::endl;
     }
 
     if (g_mouse_poller.joinable()) {
-        std::cout << "[WebSocket] Waiting for mouse poller to join..." << std::endl;
+        std::cout << "[WebSocket] Waiting for legacy mouse poller to join..." << std::endl;
         g_mouse_poller.join();
-        std::cout << "[WebSocket] Mouse poller joined successfully" << std::endl;
+        std::cout << "[WebSocket] Legacy mouse poller joined successfully" << std::endl;
     }
 }
 

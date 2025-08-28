@@ -38,6 +38,35 @@
       "cursor": false,
       "borderRequired": false,
       "minUpdateInterval100ns": 0
+    },
+    "input": {
+      "blockWinKeys": true,
+      "blockSystemKeys": false,
+      "releaseAllOnDisconnect": true,
+      "injectionPolicy": "REQUIRE_FOREGROUND",
+      "allowFocusSteal": false,
+      "mousePolicy": "DPI_AWARE",
+      "clipCursorToTarget": false,
+      "coalesceMouseMoves": true,
+      "maxMouseMovesPerFrame": 10,
+      "repeatPolicy": "THROTTLED",
+      "maxKeyRepeatHz": 30,
+      "keyRepeatDelayMs": 250,
+      "maxInjectHz": 1000,
+      "inputQueueTimeoutMs": 100,
+      "stuckKeyTimeoutMs": 2000,
+      "enableStuckKeyRecovery": true,
+      "enableSequenceRecovery": true,
+      "maxRecoveryAttempts": 3,
+      "enablePerEventLogging": false,
+      "enableAggregatedLogging": true,
+      "logIntervalMs": 100,
+      "usePionDataChannels": true,
+      "enableLegacyWebSocket": false,
+      "maxPendingMessages": 100,
+      "strictErrorHandling": false,
+      "logInjectionErrors": true,
+      "maxConsecutiveErrors": 10
     }
   }
 }

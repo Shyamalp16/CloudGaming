@@ -125,8 +125,14 @@
     <ClInclude Include="Host\CaptureHelpers.h" />
     <ClInclude Include="Host\D3DHelpers.h" />
     <ClInclude Include="Host\Encoder.h" />
+    <ClInclude Include="Host\ErrorUtils.h" />
     <ClInclude Include="Host\GlobalTime.h" />
     <ClInclude Include="Host\IdGenerator.h" />
+    <ClInclude Include="Host\InputConfig.h" />
+    <ClInclude Include="Host\InputTransportLayer.h" />
+    <ClInclude Include="Host\InputStateManager.h" />
+    <ClInclude Include="Host\InputIntegrationLayer.h" />
+    <ClInclude Include="Host\LegacyWebSocketCompat.h" />
     <ClInclude Include="Host\KeyInputHandler.h" />
     <ClInclude Include="Host\Logging.h" />
     <ClInclude Include="Host\Metrics.h" />
@@ -157,6 +163,12 @@
     <ClCompile Include="Host\Logging.cpp" />
     <ClCompile Include="Host\OpusEncoder.cpp" />
     <ClCompile Include="Host\Encoder.cpp" />
+    <ClCompile Include="Host\ErrorUtils.cpp" />
+    <ClCompile Include="Host\InputConfig.cpp" />
+    <ClCompile Include="Host\InputTransportLayer.cpp" />
+    <ClCompile Include="Host\InputStateManager.cpp" />
+    <ClCompile Include="Host\InputIntegrationLayer.cpp" />
+    <ClCompile Include="Host\LegacyWebSocketCompat.cpp" />
     <ClCompile Include="Host\KeyInputHandler.cpp" />
     <ClCompile Include="Host\main.cpp" />
     <ClCompile Include="Host\MouseInputHandler.cpp" />

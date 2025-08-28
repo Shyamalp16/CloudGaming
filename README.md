@@ -890,7 +890,298 @@ MouseCoordinateTransform::updateGlobalConfig(transformConfig);
 // }
 ```
 
-### 13. Configuration Recommendations
+## Advanced Input Architecture
+
+This project features a comprehensive, enterprise-grade input handling system designed for high-performance, real-time remote desktop and streaming applications. The architecture provides robust input processing with configurable policies, automatic recovery mechanisms, and seamless migration paths.
+
+### 14. Input Architecture Overview
+
+The input system is built on a layered architecture that separates concerns and enables targeted testing and optimization:
+
+```
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐    ┌──────────────┐
+│   Transport     │ -> │     Queue       │ -> │   State Mgmt    │ -> │  Injection   │
+│   Layer         │    │   Management    │    │   & Recovery    │    │   Layer      │
+│                 │    │                 │    │                 │    │              │
+│ • Pion Data     │    │ • Thread-safe   │    │ • Stuck Key     │    │ • SendInput   │
+│   Channels      │    │   Message Queue │    │   Recovery      │    │   API         │
+│ • Legacy WS     │    │ • Rate Limiting │    │ • Sequence IDs   │    │ • Focus Mgmt  │
+│ • Error Handling│    │ • Overflow Prot │    │ • DPI Transform  │    │ • Key State   │
+└─────────────────┘    └──────────────────┘    └─────────────────┘    └──────────────┘
+```
+
+#### Architecture Benefits:
+- **Separation of Concerns**: Each layer has a single, well-defined responsibility
+- **Thread Safety**: All components use proper synchronization primitives
+- **Error Recovery**: Automatic recovery from network issues and stuck keys
+- **Configurable Behavior**: Extensive configuration options for different use cases
+- **Performance Monitoring**: Comprehensive statistics and metrics collection
+- **Migration-Friendly**: Gradual adoption path from legacy systems
+
+### 15. Input Configuration System
+
+The input system is configured through the `host.input` section in `config.json`:
+
+```json
+{
+  "host": {
+    "input": {
+      "blockWinKeys": true,
+      "blockSystemKeys": false,
+      "releaseAllOnDisconnect": true,
+      "injectionPolicy": "REQUIRE_FOREGROUND",
+      "allowFocusSteal": false,
+      "mousePolicy": "DPI_AWARE",
+      "clipCursorToTarget": false,
+      "coalesceMouseMoves": true,
+      "maxMouseMovesPerFrame": 10,
+      "repeatPolicy": "THROTTLED",
+      "maxKeyRepeatHz": 30,
+      "keyRepeatDelayMs": 250,
+      "maxInjectHz": 1000,
+      "inputQueueTimeoutMs": 100,
+      "stuckKeyTimeoutMs": 2000,
+      "enableStuckKeyRecovery": true,
+      "enableSequenceRecovery": true,
+      "maxRecoveryAttempts": 3,
+      "enablePerEventLogging": false,
+      "enableAggregatedLogging": true,
+      "logIntervalMs": 100,
+      "usePionDataChannels": true,
+      "enableLegacyWebSocket": false,
+      "maxPendingMessages": 100,
+      "strictErrorHandling": false,
+      "logInjectionErrors": true,
+      "maxConsecutiveErrors": 10
+    }
+  }
+}
+```
+
+#### Configuration Categories:
+
+##### Core Input Blocking:
+- `blockWinKeys`: Prevent Windows key (LWIN/RWIN) from being injected
+- `blockSystemKeys`: Block other system keys (Alt+Tab, Ctrl+Alt+Del, etc.)
+- `releaseAllOnDisconnect`: Release all pressed keys when client disconnects
+
+##### Focus and Window Policies:
+- `injectionPolicy`: When to inject input ("ALWAYS_INJECT", "REQUIRE_FOREGROUND", "SKIP_IF_BLOCKED", "FOCUS_AND_INJECT")
+- `allowFocusSteal`: Allow stealing focus from other applications
+
+##### Mouse Handling:
+- `mousePolicy`: Coordinate transformation ("VIRTUAL_DESKTOP", "CLIP_TO_TARGET", "RELATIVE_TO_TARGET", "DPI_AWARE")
+- `clipCursorToTarget`: Clip mouse cursor to target window bounds
+- `coalesceMouseMoves`: Combine rapid mouse movements to reduce injection overhead
+- `maxMouseMovesPerFrame`: Maximum mouse events to process per frame
+
+##### Keyboard Handling:
+- `repeatPolicy`: Key repeat behavior ("OS_DEFAULT", "DISABLED", "CONTROLLED", "THROTTLED")
+- `maxKeyRepeatHz`: Maximum key repeat rate
+- `keyRepeatDelayMs`: Delay before key repeats start
+
+##### Performance and Safety:
+- `maxInjectHz`: Maximum input injection rate (prevents flooding)
+- `inputQueueTimeoutMs`: Timeout for input message processing
+- `stuckKeyTimeoutMs`: Timeout before declaring a key as stuck
+- `enableStuckKeyRecovery`: Enable automatic stuck key recovery
+- `enableSequenceRecovery`: Enable sequence-based desynchronization recovery
+- `maxRecoveryAttempts`: Maximum recovery attempts before giving up
+
+##### Logging and Debugging:
+- `enablePerEventLogging`: Log every input event (performance impact)
+- `enableAggregatedLogging`: Log aggregated statistics
+- `logIntervalMs`: Statistics logging interval
+
+##### Transport Layer:
+- `usePionDataChannels`: Use new Pion WebRTC data channel architecture
+- `enableLegacyWebSocket`: Enable legacy WebSocket polling for compatibility
+- `maxPendingMessages`: Maximum pending messages in queue
+
+##### Error Handling:
+- `strictErrorHandling`: Treat injection errors as fatal
+- `logInjectionErrors`: Log SendInput API failures
+- `maxConsecutiveErrors`: Maximum consecutive errors before throttling
+
+### 16. Error Reporting System
+
+The input system uses a standardized error reporting framework that replaces inconsistent usage of `FormatMessageA` and `std::system_category().message`:
+
+```cpp
+// System errors (replaces FormatMessageA)
+LOG_SYSTEM_ERROR("Failed to initialize input system");
+
+// Input-specific errors (replaces std::system_category().message)
+LOG_INPUT_ERROR("Invalid key transition", eventData);
+
+// Network errors with context
+LOG_NETWORK_ERROR("Connection lost", errorCode);
+
+// Warnings with categories
+LOG_WARNING(ErrorUtils::ErrorCategory::INPUT, "High input latency detected");
+
+// Fatal errors
+LOG_FATAL(ErrorUtils::ErrorCategory::MEMORY, "Out of memory", "Failed to allocate input buffer");
+```
+
+#### Error Categories:
+- `SYSTEM`: Windows system errors and API failures
+- `NETWORK`: Network connectivity and WebRTC issues
+- `INPUT`: Input processing and injection errors
+- `VIDEO`: Video processing errors
+- `AUDIO`: Audio processing errors
+- `CONFIG`: Configuration loading and validation
+- `MEMORY`: Memory allocation and management
+- `THREAD`: Threading and synchronization issues
+- `IO`: File and disk I/O operations
+- `GENERIC`: General/other errors
+
+### 17. Memory Safety Features
+
+The input system implements enterprise-grade memory safety:
+
+#### RAII Wrapper for C Strings:
+```cpp
+// Safe approach - no manual memory management
+auto msgWrapper = WebRTCWrapper::getMouseChannelMessageSafe();
+if (msgWrapper) {
+    std::string msg = msgWrapper; // Automatic conversion
+    processMessage(msg);
+    // Memory automatically freed when msgWrapper goes out of scope
+}
+
+// Old unsafe approach (DO NOT USE):
+char* unsafeMsg = getMouseChannelMessage();
+if (unsafeMsg) {
+    processMessage(unsafeMsg);
+    freeCString(unsafeMsg); // Easy to forget!
+}
+```
+
+#### Exception Safety:
+- Memory freed even during stack unwinding
+- No memory leaks in exception paths
+- Automatic cleanup in destructors
+
+#### Thread Safety:
+- All shared state protected by mutexes
+- Atomic operations for thread flags
+- Condition variables for thread coordination
+
+### 18. Stuck Key Recovery System
+
+The input system automatically detects and recovers from stuck keys:
+
+#### Detection Criteria:
+- Key pressed but not released within timeout period
+- Timeout configurable per key type (modifiers vs regular keys)
+- Configurable recovery policies
+
+#### Recovery Process:
+1. **Detection**: Monitor key state and timestamps
+2. **Mark as Stuck**: Update internal state tracking
+3. **Synthetic Release**: Generate synthetic key-up event
+4. **State Reset**: Clear stuck key state
+5. **Logging**: Record recovery event for monitoring
+
+#### Configuration:
+```json
+{
+  "enableStuckKeyRecovery": true,
+  "stuckKeyTimeoutMs": 2000,
+  "maxRecoveryAttempts": 3
+}
+```
+
+### 19. Transport Layer Architecture
+
+#### Pion Data Channels (Recommended):
+- Direct WebRTC data channel communication
+- Lower latency than WebSocket polling
+- Built-in reliability and ordering
+- Native support for binary data
+
+#### Legacy WebSocket Compatibility:
+- Backward compatibility with existing deployments
+- Configurable via `enableLegacyWebSocket` flag
+- Can run alongside new architecture
+- Compile-time optional via `ENABLE_LEGACY_WEBSOCKET` define
+
+#### Message Processing Pipeline:
+```
+Client Input → Transport → Queue → State Manager → Injection → OS
+     ↓            ↓         ↓           ↓            ↓        ↓
+  JSON Data   Pion/WS   Threading   Recovery     SendInput  Windows
+```
+
+### 20. Performance Optimization Features
+
+#### Mouse Move Coalescing:
+- Combine rapid mouse movements into single events
+- Reduce SendInput API call overhead
+- Configurable coalescing window
+
+#### Rate Limiting:
+- Prevent input flooding of target application
+- Configurable maximum injection rate
+- Separate limits for keyboard and mouse
+
+#### Queue Management:
+- Bounded message queues prevent memory exhaustion
+- Overflow protection with configurable policies
+- Priority queuing for critical events
+
+### 21. Migration and Compatibility
+
+#### Gradual Adoption:
+1. **Phase 1**: Enable new architecture alongside legacy
+2. **Phase 2**: Test with legacy compatibility enabled
+3. **Phase 3**: Disable legacy WebSocket in production
+4. **Phase 4**: Remove legacy code (compile-time option)
+
+#### Configuration-Based Migration:
+```json
+{
+  "usePionDataChannels": true,     // Enable new architecture
+  "enableLegacyWebSocket": true,   // Keep legacy for compatibility
+  "strictErrorHandling": false     // Lenient error handling during migration
+}
+```
+
+#### Compile-Time Options:
+- `ENABLE_LEGACY_WEBSOCKET`: Include legacy WebSocket code
+- When undefined, legacy code is completely removed at compile time
+- Reduces binary size and attack surface
+
+### 22. Monitoring and Statistics
+
+#### Real-Time Metrics:
+- Message throughput (received, processed, dropped)
+- Queue depths and utilization
+- Error rates and recovery events
+- Latency measurements
+
+#### Statistics Reporting:
+```cpp
+// Automatic periodic reporting
+[INFO/INPUT] Input Statistics:
+=== Input Integration Layer Statistics ===
+Integration Status: RUNNING
+New Architecture: ENABLED
+Legacy Compatibility: DISABLED
+--- Transport Layer ---
+TransportStats{received:150, processed:148, dropped:2, pion:150, ws:0, queue:0, maxQueue:12, seqGaps:0}
+--- State Manager ---
+StateStats{keys:45, mouse:103, stuckDetected:0, stuckRecovered:0, seqGaps:0, invalidTrans:2, coordTransforms:103, coordErrors:0}
+```
+
+#### Health Monitoring:
+- Stuck key detection and recovery
+- Queue overflow monitoring
+- Error rate tracking
+- Performance degradation alerts
+
+### 23. Configuration Recommendations
 
 #### For Gaming:
 - **Logging**: Disable per-event logging, enable coalescing, 10Hz aggregated stats

@@ -17,6 +17,9 @@
 #include "ShutdownManager.h"
 #include "IdGenerator.h"
 #include "Runtime.h"
+#include "InputConfig.h"
+#include "ErrorUtils.h"
+#include "InputIntegrationLayer.h"
 
 // removed: custom callbacks and monitorConnection (moved into modules)
 
@@ -28,6 +31,32 @@ int main()
     // --- Load Configuration ---
     nlohmann::json config;
     if (!ConfigUtils::LoadConfig(config)) return -1;
+
+    // --- Load Input Configuration ---
+    if (config.contains("host") && config["host"].contains("input")) {
+        if (!InputConfig::loadFromJson(config["host"]["input"])) {
+            LOG_SYSTEM_ERROR("Failed to load input configuration");
+            return -1;
+        }
+        std::cout << "[main] Input configuration loaded successfully" << std::endl;
+        std::cout << "[main] " << InputConfig::getConfigurationSummary() << std::endl;
+    } else {
+        std::cout << "[main] No input configuration found in config.json, using defaults" << std::endl;
+        InputConfig::resetToDefaults();
+    }
+
+    // Initialize input integration layer
+    if (!InputIntegrationLayer::initialize()) {
+        std::cerr << "[main] Failed to initialize input integration layer" << std::endl;
+        return -1;
+    }
+
+    if (!InputIntegrationLayer::start()) {
+        std::cerr << "[main] Failed to start input integration layer" << std::endl;
+        return -1;
+    }
+
+    std::cout << "[main] Input integration layer started successfully" << std::endl;
 
     std::string targetProcessName = "";
     if (!ConfigUtils::GetTargetProcessName(config, targetProcessName)) {
