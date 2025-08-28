@@ -180,6 +180,174 @@ This entire process runs continuously, allowing the stream to adapt to changing 
 
 ---
 
+## Advanced Input Handling Systems
+
+The project features several sophisticated input handling systems designed for production-grade remote desktop and gaming applications:
+
+### 1. Input Statistics & Observability System
+
+A comprehensive telemetry system that tracks all input events, success rates, and system performance with 1 Hz periodic logging.
+
+#### Features:
+- **Complete Event Tracking**: Monitors all keyboard and mouse events from reception to injection
+- **Success Rate Metrics**: Calculates injection success rates and identifies problematic patterns
+- **Performance Monitoring**: Tracks processing times and system efficiency
+- **Periodic Reporting**: 1 Hz console output with formatted statistics
+
+#### Tracked Metrics:
+- **Keyboard**: Events received/injected/dropped/skipped, timeout recoveries, emergency releases
+- **Mouse**: Events received/injected/skipped, coordinate transformations, click processing
+- **System Health**: Processing times, uptime, success rates, and throughput
+
+#### Example Output:
+```
+[InputStats] Uptime: 120s | KB: 1250 in, 1180 inj, 45 drop, 25 skip, 5 mod_timeout,
+0 reg_timeout, 2 stale, 5 recovered, 1 emergency | Mouse: 3200 in, 3100 inj,
+100 skip, 45 coal, 380 click, 25 wheel | Rates: KB 94.4% inj, 3.6% drop,
+2.0% skip | Mouse 96.9% inj, 3.1% skip, 1.4% coal | Avg Process: 45us
+```
+
+### 2. FSM State Management & Recovery
+
+A Finite State Machine (FSM) system that manages keyboard state transitions and provides automatic recovery from stuck keys.
+
+#### Key Features:
+- **State Validation**: Prevents invalid transitions (e.g., down→down, up→up)
+- **Stuck Key Detection**: Monitors for keys held longer than configurable timeouts
+- **Automatic Recovery**: Injects key-up events to release stuck modifiers
+- **Modifier-Aware Timeouts**: Different timeouts for modifier keys vs regular keys
+
+#### FSM States:
+- **UP**: Key is released
+- **DOWN**: Key is pressed
+- **STUCK_RECOVERY**: Key is being recovered from stuck state
+
+#### Configuration:
+```cpp
+// Modifier keys (Ctrl, Shift, Alt, Win) - 5 seconds
+std::chrono::milliseconds modifierKeyTimeout = 5000ms;
+
+// Regular keys - disabled by default (30 seconds if enabled)
+std::chrono::milliseconds regularKeyTimeout = 30000ms;
+bool enableRegularKeyTimeout = false;
+```
+
+#### Benefits:
+- **Eliminates Stuck Keys**: Automatic detection and recovery prevents common gaming issues
+- **Gaming-Friendly**: Configurable timeouts respect legitimate long key holds
+- **State Consistency**: Ensures keyboard state remains synchronized between client and host
+
+### 3. DPI-Aware Mouse Coordinate Transformation
+
+An advanced coordinate transformation system that accurately maps client mouse coordinates to host window positions, accounting for DPI scaling and capture transformations.
+
+#### Key Capabilities:
+- **DPI Scaling Support**: Uses `GetDpiForMonitor` for accurate scaling on high-DPI displays
+- **Target Window Mapping**: Transforms client coordinates to specific target window client area
+- **Scaling Compensation**: Accounts for capture scaling differences between client view and host window
+- **Virtual Desktop Support**: Handles multi-monitor and virtual desktop spanning
+- **Optional Clipping**: Prevents input from affecting windows outside the streamed area
+
+#### Coordinate Transformation Flow:
+1. **Client Coordinates** → Client view (e.g., 1920x1080)
+2. **Scaling Adjustment** → Account for capture scaling factors
+3. **DPI Transformation** → Apply monitor DPI scaling
+4. **Window Mapping** → Transform to target window client coordinates
+5. **Virtual Desktop** → Convert to absolute mouse coordinates (0-65535)
+6. **Optional Clipping** → Constrain to target window bounds
+
+#### Configuration:
+```cpp
+MouseCoordinateTransform::TransformConfig config;
+config.enableClipping = true;      // Clip to target window bounds
+config.enableClipCursor = false;   // Use ClipCursor API during streaming
+config.accountForScaling = true;   // Account for capture scaling
+config.captureScaleX = 1.25;      // Horizontal scaling factor
+config.captureScaleY = 1.0;       // Vertical scaling factor
+```
+
+### 4. Input Injection Preconditions
+
+Safety and security checks performed before injecting any input events to prevent system instability and ensure proper focus management.
+
+#### Precondition Checks:
+- **Window Validity**: Ensures target window exists and is accessible
+- **Foreground Focus**: Verifies target window has foreground focus (configurable)
+- **Window State**: Checks if window is visible and enabled
+- **Input Timing**: Validates event timing and prevents rapid-fire injection
+- **Resource Limits**: Monitors system resources and prevents overload
+
+#### Configuration Options:
+```cpp
+InputInjection::InjectionPolicy policy;
+policy.requireForeground = true;    // Require target window foreground
+policy.requireVisible = true;      // Require target window visible
+policy.requireEnabled = true;      // Require target window enabled
+policy.autoFocusOnSkip = false;     // Attempt to focus window if skipped
+```
+
+#### Security Benefits:
+- **Input Containment**: Prevents input from affecting unintended applications
+- **Focus Protection**: Ensures input only reaches the intended target window
+- **System Stability**: Prevents injection into invalid or unresponsive windows
+- **Resource Protection**: Monitors injection rates to prevent system overload
+
+### 5. Windows Key Blocking
+
+Complete blocking of Windows key events to prevent accidental system menu activation during remote desktop sessions.
+
+#### Blocked Keys:
+- **Left Windows Key**: `MetaLeft`, `OSLeft`, `Super_L`
+- **Right Windows Key**: `MetaRight`, `OSRight`, `Super_R`
+- **Generic Windows**: `Meta`, `OS`, `Super`
+
+#### Implementation:
+- **Early Filtering**: Windows key events are blocked before any processing
+- **Complete Blocking**: Both keydown and keyup events are blocked
+- **Metrics Tracking**: Blocked events are tracked in statistics
+- **Clear Logging**: Blocked events are logged with clear identification
+
+#### Example Output:
+```
+[KeyInput] BLOCKED DOWN  code=MetaLeft (Windows key blocked)
+[KeyInput] BLOCKED UP    code=MetaLeft (Windows key blocked)
+```
+
+#### Statistics Integration:
+```
+[InputStats] KB: 1250 in, 1180 inj, 45 drop, 25 skip, 8 blocked, ...
+```
+
+#### Benefits:
+- **Gaming Safety**: Prevents accidental Windows menu activation during gameplay
+- **Session Continuity**: Avoids disrupting remote desktop sessions
+- **System Stability**: Prevents Windows key from interfering with captured applications
+- **Observability**: Tracks how many Windows key events are being blocked
+
+### Integration Benefits
+
+These systems work together to provide enterprise-grade input handling:
+
+#### Reliability Stack:
+1. **Statistics** provide observability into system health
+2. **FSM** ensures state consistency and prevents stuck keys
+3. **Coordinate Transform** delivers pixel-perfect mouse positioning
+4. **Preconditions** ensure safe and secure input injection
+
+#### Performance Characteristics:
+- **Low Latency**: All systems add minimal processing overhead
+- **Thread-Safe**: Designed for concurrent access patterns
+- **Configurable**: Tunable parameters for different use cases
+- **Observable**: Comprehensive metrics for monitoring and debugging
+
+#### Use Cases:
+- **Gaming**: Prevents stuck keys during intense gameplay
+- **Office Work**: Ensures accurate mouse positioning on high-DPI displays
+- **Remote Desktop**: Provides enterprise-grade input security and reliability
+- **Development**: Offers detailed telemetry for debugging input issues
+
+---
+
 ## Building and Running
 
 This is a complex project with multiple components.

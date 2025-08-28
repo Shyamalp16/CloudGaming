@@ -202,6 +202,11 @@ inline void keyboardRecoverySuccess() {
     globalInputStats.keyboard.recovery_success_count.fetch_add(1);
 }
 
+inline void keyboardEventBlocked() {
+    globalInputStats.keyboard.events_skipped_foreground.fetch_add(1);
+    InputMetrics::inc(InputMetrics::keysBlocked());
+}
+
 // Mouse event tracking
 inline void mouseEventReceived() {
     globalInputStats.mouse.events_received.fetch_add(1);

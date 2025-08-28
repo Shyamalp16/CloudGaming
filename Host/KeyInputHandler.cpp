@@ -45,6 +45,24 @@ namespace KeyInputHandler {
 	// Canonical identity map keyed by (scancode | 0x8000 if extended)
 	static std::unordered_map<uint16_t, std::string> scanIdDownToJs;
 
+	// Function to check if a key should be blocked (never injected)
+	static bool shouldBlockKey(const std::string& jsCode) {
+		// Block Windows keys to prevent accidental system menu activation
+		static std::unordered_set<std::string> blockedKeys = {
+			"MetaLeft", "MetaRight", "Meta",
+			"OSLeft", "OSRight", "OS",
+			"Super_L", "Super_R", "Super"
+		};
+
+		return blockedKeys.find(jsCode) != blockedKeys.end();
+	}
+
+	// Function to customize the list of blocked keys
+	void setBlockedKeys(const std::unordered_set<std::string>& keys) {
+		// This would need to be implemented if we want runtime configuration
+		// For now, blocked keys are fixed at compile time
+	}
+
 	// FSM instance for state management and recovery
 	static InputStateMachine::FSMConfig fsmConfig = []() {
 		InputStateMachine::FSMConfig config;
@@ -453,6 +471,15 @@ namespace KeyInputHandler {
 						std::string jsCode = j[InputSchema::kCode].get<std::string>();
 						std::string jsType = j[InputSchema::kType].get<std::string>();
 						bool isClientKeyDown = (jsType == "keydown");
+
+						// Check if this key should be blocked (never injected)
+						if (shouldBlockKey(jsCode)) {
+							InputStats::Track::keyboardEventBlocked();
+							std::cout << "[KeyInput] BLOCKED " << (isClientKeyDown ? "DOWN" : "UP  ")
+								<< " code=" << jsCode << " (Windows key blocked)" << std::endl;
+							continue; // Skip processing this key entirely
+						}
+
 						LOG_DEBUG("Parsed - Code: " + jsCode + ", Type: " + jsType);
 						// Emit concise input log for each key event
 						std::cout << "[KeyInput] " << (isClientKeyDown ? "DOWN" : "UP  ")

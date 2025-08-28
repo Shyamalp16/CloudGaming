@@ -37,6 +37,9 @@ inline std::atomic<uint64_t>& mouseCoordTransformErrors() { static std::atomic<u
 inline std::atomic<uint64_t>& mouseCoordClipped() { static std::atomic<uint64_t> v{0}; return v; }
 inline std::atomic<uint64_t>& mouseCoordOutOfBounds() { static std::atomic<uint64_t> v{0}; return v; }
 
+// Key blocking metrics
+inline std::atomic<uint64_t>& keysBlocked() { static std::atomic<uint64_t> v{0}; return v; }
+
 // Last error codes
 inline std::atomic<uint32_t>& lastSendInputError() { static std::atomic<uint32_t> v{0}; return v; }
 inline std::atomic<uint32_t>& lastError() { static std::atomic<uint32_t> v{0}; return v; }

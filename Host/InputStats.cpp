@@ -47,10 +47,12 @@ std::string StatsLogger::getStatsString() {
 
     // Keyboard stats
     auto& kb = globalInputStats.keyboard;
+    auto blockedKeys = InputMetrics::load(InputMetrics::keysBlocked());
     ss << "KB: " << kb.events_received.load() << " in, "
        << kb.events_injected.load() << " inj, "
        << kb.events_dropped_invalid.load() << " drop, "
        << kb.events_skipped_foreground.load() << " skip, "
+       << blockedKeys << " blocked, "
        << kb.modifier_timeout_released.load() << " mod_timeout, "
        << kb.regular_timeout_released.load() << " reg_timeout, "
        << kb.events_stale_ignored.load() << " stale, "
