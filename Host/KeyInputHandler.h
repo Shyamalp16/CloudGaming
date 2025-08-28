@@ -21,17 +21,30 @@ namespace KeyInputHandler {
     void initializeDataChannel();
     void simulateKeyPress(const std::string& key);
     void cleanup();
-    void emergencyReleaseAllKeys(); // For disconnect/reconnect scenarios
+    void wakeKeyboardThreadInternal();
+    void releaseAllKeysEmergency();
 
     // Internal functions
     void SimulateWindowsKeyEvent(const std::string& eventCode, bool isKeyDown);
+
+    // Key mapping functions for testing and external access
+    WORD MapJavaScriptCodeToVK(const std::string& jsCode);
+    WORD MapJavaScriptCodeToScanCode(const std::string& jsCode);
+    bool IsExtendedKey(WORD vkCode);
+    bool IsExtendedKeyCanonical(WORD virtualKeyCode, const std::string& jsCode);
+    UINT MapVKToScanCodeWithLayout(WORD vkCode, HKL hkl);
+
+
 
     // Counters for observability (reads are racy but acceptable for telemetry)
     struct Stats { unsigned dropped{0}; unsigned injected{0}; unsigned skipped{0}; unsigned resets{0}; };
     const Stats& getStats();
 }
 
+
+
 extern "C" void initKeyInputHandler();
+extern "C" void stopKeyInputHandler();
 extern "C" void emergencyReleaseAllKeys();
 
 // Input statistics API

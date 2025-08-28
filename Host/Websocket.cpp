@@ -38,6 +38,8 @@ static std::atomic<bool> g_metrics_export_enabled{ false };
 static std::atomic<bool> g_input_poll_running{ false };
 static std::thread g_kb_poller;
 static std::thread g_mouse_poller;
+static std::mutex g_poller_mutex;
+static std::condition_variable g_poller_cv;
 
 // Allowed key codes (must match client-side codes and KeyInputHandler mapping)
 static const std::unordered_set<std::string> kValidKeyCodes = {
@@ -121,23 +123,35 @@ void startMetricsExport(bool enable) {
 static void startInputPollers() {
     bool expected = false;
     if (!g_input_poll_running.compare_exchange_strong(expected, true)) return;
-    // Keyboard poller
+    // Keyboard poller with proper blocking and shutdown coordination
     g_kb_poller = std::thread([](){
+        std::cout << "[WebSocket] Starting keyboard poller thread" << std::endl;
         while (g_input_poll_running.load() && !ShutdownManager::IsShutdown()) {
             try {
                 std::string msg = WebRTCWrapper::getDataChannelMessageString();
                 if (!msg.empty()) {
                     enqueueKeyboardMessage(msg);
                 } else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    // Use condition variable for efficient blocking instead of busy-waiting
+                    std::unique_lock<std::mutex> lock(g_poller_mutex);
+                    g_poller_cv.wait_for(lock, std::chrono::milliseconds(100), [](){
+                        return !g_input_poll_running.load() || ShutdownManager::IsShutdown();
+                    });
                 }
             } catch (...) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                // On error, use slightly longer wait to avoid tight error loops
+                std::unique_lock<std::mutex> lock(g_poller_mutex);
+                g_poller_cv.wait_for(lock, std::chrono::milliseconds(200), [](){
+                    return !g_input_poll_running.load() || ShutdownManager::IsShutdown();
+                });
             }
         }
+        std::cout << "[WebSocket] Keyboard poller thread exited" << std::endl;
     });
-    // Mouse poller
+
+    // Mouse poller with proper blocking and shutdown coordination
     g_mouse_poller = std::thread([](){
+        std::cout << "[WebSocket] Starting mouse poller thread" << std::endl;
         while (g_input_poll_running.load() && !ShutdownManager::IsShutdown()) {
             try {
                 char* cMsg = getMouseChannelMessage();
@@ -146,20 +160,46 @@ static void startInputPollers() {
                     freeCString(cMsg);
                     enqueueMouseMessage(msg);
                 } else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    // Use condition variable for efficient blocking instead of busy-waiting
+                    std::unique_lock<std::mutex> lock(g_poller_mutex);
+                    g_poller_cv.wait_for(lock, std::chrono::milliseconds(100), [](){
+                        return !g_input_poll_running.load() || ShutdownManager::IsShutdown();
+                    });
                 }
             } catch (...) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                // On error, use slightly longer wait to avoid tight error loops
+                std::unique_lock<std::mutex> lock(g_poller_mutex);
+                g_poller_cv.wait_for(lock, std::chrono::milliseconds(200), [](){
+                    return !g_input_poll_running.load() || ShutdownManager::IsShutdown();
+                });
             }
         }
+        std::cout << "[WebSocket] Mouse poller thread exited" << std::endl;
     });
 }
 
 static void stopInputPollers() {
     bool expected = true;
     if (!g_input_poll_running.compare_exchange_strong(expected, false)) return;
-    if (g_kb_poller.joinable()) g_kb_poller.join();
-    if (g_mouse_poller.joinable()) g_mouse_poller.join();
+
+    // Notify condition variables to wake up threads immediately on shutdown
+    {
+        std::lock_guard<std::mutex> lock(g_poller_mutex);
+        g_poller_cv.notify_all();
+    }
+
+    // Wait for threads to complete with proper join semantics
+    if (g_kb_poller.joinable()) {
+        std::cout << "[WebSocket] Waiting for keyboard poller to join..." << std::endl;
+        g_kb_poller.join();
+        std::cout << "[WebSocket] Keyboard poller joined successfully" << std::endl;
+    }
+
+    if (g_mouse_poller.joinable()) {
+        std::cout << "[WebSocket] Waiting for mouse poller to join..." << std::endl;
+        g_mouse_poller.join();
+        std::cout << "[WebSocket] Mouse poller joined successfully" << std::endl;
+    }
 }
 
 void stopMetricsExport() {

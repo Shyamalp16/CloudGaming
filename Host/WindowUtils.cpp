@@ -3,16 +3,20 @@
 #include "WindowHelpers.h"
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <mutex>
 
 namespace WindowUtils {
 
 static HWND g_targetWindow = nullptr;
+static std::mutex g_targetWindowMutex;
 
 void SetTargetWindow(HWND hwnd) {
+    std::lock_guard<std::mutex> lock(g_targetWindowMutex);
     g_targetWindow = hwnd;
 }
 
 HWND GetTargetWindow() {
+    std::lock_guard<std::mutex> lock(g_targetWindowMutex);
     return g_targetWindow;
 }
 

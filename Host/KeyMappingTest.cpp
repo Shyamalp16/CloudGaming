@@ -65,8 +65,8 @@ bool testExtendedKeyMapping() {
         testCount++;
 
         // Map JavaScript code to VK
-        WORD vkCode = MapJavaScriptCodeToVK(testCase.jsCode);
-        bool isExtended = IsExtendedKey(vkCode);
+        WORD vkCode = KeyInputHandler::MapJavaScriptCodeToVK(testCase.jsCode);
+        bool isExtended = KeyInputHandler::IsExtendedKey(vkCode);
 
         bool vkMatches = (vkCode == testCase.expectedVK);
         bool extendedMatches = (isExtended == testCase.shouldBeExtended);
@@ -121,7 +121,7 @@ bool testKeyboardLayoutMapping() {
 
     // Test extended key detection for right control
     vk = VK_RCONTROL;
-    bool isExtended = IsExtendedKey(vk);
+    bool isExtended = KeyInputHandler::IsExtendedKey(vk);
     if (isExtended) {
         std::cout << "[PASS] VK_RCONTROL correctly identified as extended key" << std::endl;
     } else {
@@ -131,7 +131,7 @@ bool testKeyboardLayoutMapping() {
 
     // Test extended key detection for left control
     vk = VK_LCONTROL;
-    isExtended = IsExtendedKey(vk);
+    isExtended = KeyInputHandler::IsExtendedKey(vk);
     if (!isExtended) {
         std::cout << "[PASS] VK_LCONTROL correctly identified as non-extended key" << std::endl;
     } else {

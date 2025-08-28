@@ -19,6 +19,7 @@
 #include "InputStateMachine.h"
 #include "InputStats.h"
 #include "InputSequenceManager.h"
+#include "KeyMappingTest.h"
 
 
 using json = nlohmann::json;
@@ -82,7 +83,7 @@ namespace KeyInputHandler {
 	static bool shutdownRequested = false;
 
 	// Canonical extended-key classifier (single source of truth)
-	static inline bool IsExtendedKeyCanonical(WORD virtualKeyCode, const std::string& jsCode) {
+	bool IsExtendedKeyCanonical(WORD virtualKeyCode, const std::string& jsCode) {
 		// Extended keys per Win32: arrows, Insert/Delete, Home/End, PgUp/PgDn, right Ctrl/Alt, Win keys, Apps
 		static const WORD kExtendedVKs[] = {
 			VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT,
@@ -446,7 +447,7 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 			if (scanCode != 0) {
 				input.ki.wScan = scanCode;
 				input.ki.dwFlags = KEYEVENTF_SCANCODE;
-				if (isExtendedKey) {
+				if (IsExtendedKey(virtualKeyCode)) {
 					input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
 				}
 				if (!isKeyDown) {
@@ -460,7 +461,7 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 					<< (isKeyDown ? " (DOWN)" : " (UP)") << std::endl;
 			} else {
 				// Use target window's keyboard layout instead of foreground window
-				HWND targetHwnd = GetTargetWindow();
+				HWND targetHwnd = WindowUtils::GetTargetWindow();
 				HKL hkl = GetTargetWindowKeyboardLayout(targetHwnd);
 
 				// Convert VK to scancode using target window's layout
@@ -468,7 +469,7 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 				if (scanCode != 0) {
 					input.ki.wScan = scanCode;
 					input.ki.dwFlags = KEYEVENTF_SCANCODE;
-					if (isExtendedKey) {
+					if (IsExtendedKey(virtualKeyCode)) {
 						input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
 					}
 					if (!isKeyDown) {
@@ -786,11 +787,8 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 		}
 	}
 
-	void emergencyReleaseAllKeys() {
-		std::cout << "[KeyInputHandler] Emergency release of all keys requested" << std::endl;
+	void releaseAllKeysEmergency() {
 		keyStateFSM.releaseAllKeys();
-		InputStats::Track::keyboardEmergencyRelease();
-		InputMetrics::inc(InputMetrics::fsmEmergencyReleases());
 	}
 
 }
@@ -804,7 +802,11 @@ extern "C" void stopKeyInputHandler() {
 }
 
 extern "C" void emergencyReleaseAllKeys() {
-	KeyInputHandler::emergencyReleaseAllKeys();
+	std::cout << "[KeyInputHandler] Emergency release of all keys requested" << std::endl;
+	// Access keyStateFSM through a namespace function that can access it
+	KeyInputHandler::releaseAllKeysEmergency();
+	InputStats::Track::keyboardEmergencyRelease();
+	InputMetrics::inc(InputMetrics::fsmEmergencyReleases());
 }
 
 extern "C" const char* getInputStatsSummary() {
@@ -839,6 +841,8 @@ extern "C" const char* getSequenceStats() {
 
 	return statsString.c_str();
 }
+
+// namespace KeyInputHandler
 
 // Key mapping test API implementation
 extern "C" bool runKeyMappingTests() {

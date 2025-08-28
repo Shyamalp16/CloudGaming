@@ -675,7 +675,49 @@ extern "C" bool runKeyMappingTests();
 // - Fallback behavior
 ```
 
-### 9. Input Statistics Configuration
+### 9. Thread Safety and Shutdown Coordination
+
+Advanced thread safety mechanisms ensuring clean shutdown and preventing race conditions.
+
+#### Thread-Safe Target Window Access:
+```cpp
+#include "WindowUtils.h"
+
+// Target window is now protected by mutex for thread-safe access
+HWND GetTargetWindow();        // Thread-safe getter
+void SetTargetWindow(HWND);    // Thread-safe setter
+```
+
+#### Efficient Poller Threads:
+```cpp
+// Poller threads now use condition variables instead of busy-waiting
+// - Eliminates CPU churn from 1-2ms sleeps
+// - Immediate shutdown via condition variable notification
+// - Proper join semantics with timeout-free shutdown
+```
+
+#### Data Structure Safety:
+```cpp
+// InputStateMachine ensures no mutation during iteration
+std::lock_guard<std::mutex> lock(mutex_);
+for (const auto& [jsCode, stateInfo] : keyStates_) {
+    // Safe read-only iteration
+    if (shouldRecover(stateInfo)) {
+        recoverStuckKey(jsCode);  // Safe operation under lock
+    }
+}
+// State modifications happen safely after iteration
+```
+
+#### Shutdown Coordination:
+```cpp
+// Centralized shutdown with immediate thread termination
+ShutdownManager::SetShutdown(true);     // Atomic signal
+g_poller_cv.notify_all();               // Wake all waiting threads
+thread.join();                          // Clean join semantics
+```
+
+### 10. Input Statistics Configuration
 
 Controls how input statistics are collected and reported.
 
@@ -690,7 +732,7 @@ statsConfig.aggregatedLogIntervalMs = 100;         // How often to log stats (10
 // The StatsLogger automatically uses these settings
 ```
 
-### 10. Complete Configuration Example
+### 11. Complete Configuration Example
 
 Here's a complete example showing all input systems configured for optimal gaming performance:
 
