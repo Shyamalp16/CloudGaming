@@ -108,6 +108,15 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     DWORD sleepMs = 10; // polling interval (fallback when event mode is unavailable)
     bool eventMode = false; // declared early to avoid goto skipping initialization
 
+    // Opus frame timing constant (declared early to avoid goto skip issues)
+    const DWORD OPUS_FRAME_MS = 10; // 10ms Opus frame duration
+
+    // Performance monitoring counters
+    uint64_t captureCycles = 0;
+    uint64_t dataPacketsProcessed = 0;
+    uint64_t timeoutCount = 0;
+    uint64_t lastLogTime = GetTickCount64();
+
     hr = CoInitialize(NULL);
     if (FAILED(hr))
     {
@@ -352,19 +361,39 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
     std::wcout << L"[AudioCapturer] Starting audio capture and Opus encoding..." << std::endl;
 
-    // Set up event handle if event-driven mode was enabled
+    // Set up event handle for low-latency event-driven capture
     if (m_pAudioClient) {
-        // If the client was initialized with EVENTCALLBACK, SetEventHandle will succeed
+        // Create event handle if not already created
         if (!m_hCaptureEvent) {
             m_hCaptureEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            if (!m_hCaptureEvent) {
+                std::wcerr << L"[AudioCapturer] Failed to create capture event handle: " << GetLastError() << std::endl;
+            }
         }
+
         if (m_hCaptureEvent) {
             hr = m_pAudioClient->SetEventHandle(m_hCaptureEvent);
             if (SUCCEEDED(hr)) {
                 eventMode = true;
-                std::wcout << L"[AudioCapturer] Using event-driven capture." << std::endl;
+                std::wcout << L"[AudioCapturer] Using event-driven capture mode (optimal latency)." << std::endl;
+            } else {
+                std::wcerr << L"[AudioCapturer] Event-driven mode setup failed (HRESULT: 0x" << std::hex << hr
+                           << std::dec << L"), falling back to polling mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
+
+                // Clean up event handle since we can't use it
+                CloseHandle(m_hCaptureEvent);
+                m_hCaptureEvent = nullptr;
             }
+        } else {
+            std::wcerr << L"[AudioCapturer] Event handle creation failed, using polling mode." << std::endl;
         }
+    }
+
+    // Log capture mode and timing parameters
+    if (eventMode) {
+        std::wcout << L"[AudioCapturer] Event-driven mode: 5ms timeout for low-latency responsiveness." << std::endl;
+    } else {
+        std::wcout << L"[AudioCapturer] Polling mode: " << sleepMs << L"ms intervals, Opus frame-aligned." << std::endl;
     }
 
     hr = m_pAudioClient->Start();  // Start recording.
@@ -374,20 +403,61 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         goto Exit;
     }
 
-    // Derive a reasonable polling interval from buffer size (~quarter-buffer)
+    // Calculate optimal polling interval aligned with Opus frame timing
+    // Opus uses 10ms frames (480 samples at 48kHz) for low-latency encoding
     if (pwfx && pwfx->nSamplesPerSec) {
+        // Calculate buffer duration in milliseconds
         DWORD bufferMs = (bufferFrameCount * 1000u) / pwfx->nSamplesPerSec;
-        sleepMs = std::max<DWORD>(1, bufferMs / 4);
+
+        // Calculate how many complete Opus frames fit in the buffer
+        DWORD framesInBuffer = bufferMs / OPUS_FRAME_MS;
+
+        // Optimal polling strategy for low-latency capture:
+        // - Poll at most every OPUS_FRAME_MS (10ms) to align with frame boundaries
+        // - For small buffers, poll at quarter-buffer rate (but not more than 10ms)
+        // - For large buffers, use fixed 10ms polling aligned with frame timing
+
+        if (bufferMs <= 50) {
+            // Small buffer: poll frequently but align with frame boundaries
+            sleepMs = std::max<DWORD>(1, std::min<DWORD>(bufferMs / 4, OPUS_FRAME_MS));
+        } else {
+            // Large buffer: use frame-aligned polling interval
+            sleepMs = OPUS_FRAME_MS;
+        }
+
+        // Ensure we never exceed Opus frame duration for optimal alignment
+        sleepMs = std::min<DWORD>(sleepMs, OPUS_FRAME_MS);
+
+        std::wcout << L"[AudioCapturer] Buffer: " << bufferFrameCount << L" frames (" << bufferMs
+                   << L"ms ≈ " << framesInBuffer << L" Opus frames), polling every " << sleepMs
+                   << L"ms (aligned with " << OPUS_FRAME_MS << L"ms Opus frames)" << std::endl;
+    } else {
+        // Fallback: align with Opus frame timing even for unknown formats
+        sleepMs = OPUS_FRAME_MS;
+        std::wcout << L"[AudioCapturer] Using Opus-aligned polling interval: " << sleepMs << L"ms" << std::endl;
     }
 
     while (m_stopCapture == false)
     {
+        captureCycles++;
+
         if (eventMode && m_hCaptureEvent) {
-            DWORD wait = WaitForSingleObject(m_hCaptureEvent, 50); // short timeout to be responsive to stop
-            if (wait != WAIT_OBJECT_0) {
-                continue; // timeout or error; loop back
+            // Use short timeout for low-latency responsiveness
+            // 5ms timeout allows quick response to stop signals while maintaining low latency
+            DWORD wait = WaitForSingleObject(m_hCaptureEvent, 5);
+            if (wait == WAIT_TIMEOUT) {
+                // Timeout - continue polling for stop signal
+                timeoutCount++;
+                continue;
+            } else if (wait == WAIT_OBJECT_0) {
+                // Event signaled - data available, proceed with capture
+            } else {
+                // Wait failed - log error and continue
+                std::wcerr << L"[AudioCapturer] WaitForSingleObject failed: " << GetLastError() << std::endl;
+                continue;
             }
         } else {
+            // Polling mode: sleep for calculated interval
             Sleep(sleepMs);
         }
 
@@ -400,6 +470,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
         while (numFramesAvailable != 0)
         {
+            dataPacketsProcessed++;
+
             UINT64 devPos = 0, qpcPos = 0;
             hr = m_pCaptureClient->GetBuffer(
                 &pData,
@@ -478,6 +550,30 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 std::wcerr << L"Failed to get next packet size after release: " << _com_error(hr).ErrorMessage() << std::endl;
                 goto Exit;
             }
+        }
+
+        // Periodic performance logging (every 5 seconds)
+        uint64_t currentTime = GetTickCount64();
+        if (currentTime - lastLogTime >= 5000) {
+            double elapsedSeconds = (currentTime - lastLogTime) / 1000.0;
+            double cyclesPerSecond = captureCycles / elapsedSeconds;
+            double packetsPerSecond = dataPacketsProcessed / elapsedSeconds;
+
+            std::wcout << L"[AudioCapturer] Performance: " << cyclesPerSecond << L" cycles/sec, "
+                       << packetsPerSecond << L" packets/sec";
+
+            if (eventMode) {
+                double timeoutRate = (timeoutCount * 100.0) / captureCycles;
+                std::wcout << L", timeouts: " << timeoutRate << L"%";
+            }
+
+            std::wcout << std::endl;
+
+            // Reset counters
+            captureCycles = 0;
+            dataPacketsProcessed = 0;
+            timeoutCount = 0;
+            lastLogTime = currentTime;
         }
     }
 
