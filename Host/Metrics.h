@@ -40,6 +40,12 @@ inline std::atomic<uint64_t>& mouseCoordOutOfBounds() { static std::atomic<uint6
 // Key blocking metrics
 inline std::atomic<uint64_t>& keysBlocked() { static std::atomic<uint64_t> v{0}; return v; }
 
+// Sequence management metrics
+inline std::atomic<uint64_t>& sequenceGaps() { static std::atomic<uint64_t> v{0}; return v; }
+inline std::atomic<uint64_t>& sequenceRecoveries() { static std::atomic<uint64_t> v{0}; return v; }
+inline std::atomic<uint64_t>& snapshotsRequested() { static std::atomic<uint64_t> v{0}; return v; }
+inline std::atomic<uint64_t>& snapshotsReceived() { static std::atomic<uint64_t> v{0}; return v; }
+
 // Last error codes
 inline std::atomic<uint32_t>& lastSendInputError() { static std::atomic<uint32_t> v{0}; return v; }
 inline std::atomic<uint32_t>& lastError() { static std::atomic<uint32_t> v{0}; return v; }

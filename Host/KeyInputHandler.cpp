@@ -18,6 +18,7 @@
 #include "InputInjection.h"
 #include "InputStateMachine.h"
 #include "InputStats.h"
+#include "InputSequenceManager.h"
 
 
 using json = nlohmann::json;
@@ -465,6 +466,15 @@ namespace KeyInputHandler {
 
 					json j = json::parse(message);
 					if (j.is_object() && j.contains(InputSchema::kCode) && j.contains(InputSchema::kType)) {
+						// Extract sequence ID if present
+						uint64_t sequenceId = 0;
+						if (j.contains("sequenceId")) {
+							sequenceId = j["sequenceId"].get<uint64_t>();
+						}
+
+						// Process sequence ID through sequence manager
+						auto gapResult = InputSequenceManager::globalSequenceManager.processSequence(sequenceId, "keyboard");
+
 						// Track keyboard event received
 						InputStats::Track::keyboardEventReceived();
 
@@ -475,15 +485,20 @@ namespace KeyInputHandler {
 						// Check if this key should be blocked (never injected)
 						if (shouldBlockKey(jsCode)) {
 							InputStats::Track::keyboardEventBlocked();
-							std::cout << "[KeyInput] BLOCKED " << (isClientKeyDown ? "DOWN" : "UP  ")
-								<< " code=" << jsCode << " (Windows key blocked)" << std::endl;
+							// Conditional logging - only log if detailed logging is enabled
+							if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+								std::cout << "[KeyInput] BLOCKED " << (isClientKeyDown ? "DOWN" : "UP  ")
+									<< " code=" << jsCode << " (Windows key blocked)" << std::endl;
+							}
 							continue; // Skip processing this key entirely
 						}
 
 						LOG_DEBUG("Parsed - Code: " + jsCode + ", Type: " + jsType);
-						// Emit concise input log for each key event
-						std::cout << "[KeyInput] " << (isClientKeyDown ? "DOWN" : "UP  ")
-							<< " code=" << jsCode << std::endl;
+						// Conditional logging - only log if detailed logging is enabled
+						if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+							std::cout << "[KeyInput] " << (isClientKeyDown ? "DOWN" : "UP  ")
+								<< " code=" << jsCode << std::endl;
+						}
 
 						WORD vkCode = MapJavaScriptCodeToVK(jsCode);
 						if (vkCode == 0) {
@@ -645,6 +660,32 @@ namespace KeyInputHandler {
 			});
 			keyStateFSM.startWatchdog();
 
+			// Initialize sequence manager with recovery callbacks
+			InputSequenceManager::globalSequenceManager.setRecoveryCallback(
+				[](InputSequenceManager::RecoveryAction action) {
+					switch (action) {
+						case InputSequenceManager::RecoveryAction::RELEASE_MODIFIERS:
+							std::cout << "[InputSequenceManager] Executing recovery: RELEASE_MODIFIERS" << std::endl;
+							keyStateFSM.releaseAllKeys();
+							break;
+
+						case InputSequenceManager::RecoveryAction::REQUEST_SNAPSHOT:
+							std::cout << "[InputSequenceManager] Executing recovery: REQUEST_SNAPSHOT" << std::endl;
+							// TODO: Send snapshot request to client
+							break;
+
+						case InputSequenceManager::RecoveryAction::RESET_STATE:
+							std::cout << "[InputSequenceManager] Executing recovery: RESET_STATE" << std::endl;
+							InputSequenceManager::globalSequenceManager.reset();
+							keyStateFSM.releaseAllKeys();
+							break;
+
+						default:
+							break;
+					}
+				}
+			);
+
 			messageThread = std::thread(messagePollingLoop);
 			LOG_INFO("Blocking queue started for data channel messages");
 		}else {
@@ -701,4 +742,23 @@ extern "C" void resetInputStats() {
 
 extern "C" void wakeKeyboardThread() {
 	KeyInputHandler::wakeKeyboardThreadInternal();
+}
+
+// Sequence management API implementation
+extern "C" void resetSequenceState() {
+	InputSequenceManager::globalSequenceManager.reset();
+}
+
+extern "C" const char* getSequenceStats() {
+	static std::string statsString;
+	const auto& state = InputSequenceManager::globalSequenceManager.getState();
+
+	statsString = "Sequence Stats: last_seq=" + std::to_string(state.lastReceivedSeq.load()) +
+	              ", expected=" + std::to_string(state.expectedSeq.load()) +
+	              ", gaps=" + std::to_string(state.gapsDetected.load()) +
+	              ", recoveries=" + std::to_string(state.recoveriesTriggered.load()) +
+	              ", snapshots_req=" + std::to_string(state.snapshotsRequested.load()) +
+	              ", snapshots_recv=" + std::to_string(state.snapshotsReceived.load());
+
+	return statsString.c_str();
 }

@@ -115,6 +115,7 @@
     <ClInclude Include="Host\InputStateMachine.h" />
     <ClInclude Include="Host\InputStats.h" />
     <ClInclude Include="Host\MouseCoordinateTransform.h" />
+    <ClInclude Include="Host\InputSequenceManager.h" />
     <ClInclude Include="Host\ConfigUtils.h" />
     <ClInclude Include="Host\GraphicsAndCapture.h" />
     <ClInclude Include="Host\Runtime.h" />
@@ -143,6 +144,7 @@
     <ClCompile Include="Host\InputStateMachine.cpp" />
     <ClCompile Include="Host\InputStats.cpp" />
     <ClCompile Include="Host\MouseCoordinateTransform.cpp" />
+    <ClCompile Include="Host\InputSequenceManager.cpp" />
     <ClCompile Include="Host\ConfigUtils.cpp" />
     <ClCompile Include="Host\GraphicsAndCapture.cpp" />
     <ClCompile Include="Host\Runtime.cpp" />

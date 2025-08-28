@@ -38,4 +38,8 @@ extern "C" void emergencyReleaseAllKeys();
 extern "C" const char* getInputStatsSummary();
 extern "C" void resetInputStats();
 
+// Sequence management API
+extern "C" void resetSequenceState();
+extern "C" const char* getSequenceStats();
+
 #endif

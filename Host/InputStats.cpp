@@ -1,4 +1,5 @@
 #include "InputStats.h"
+#include "InputSequenceManager.h"
 #include <sstream>
 #include <iomanip>
 
@@ -77,6 +78,18 @@ std::string StatsLogger::getStatsString() {
         ss << "Coord: " << coordSuccess << " success, " << coordErrors << " err, " << coordClipped << " clip | ";
     }
 
+    // Sequence management stats
+    const auto& seqState = InputSequenceManager::globalSequenceManager.getState();
+    auto seqGaps = seqState.gapsDetected.load();
+    auto seqRecoveries = seqState.recoveriesTriggered.load();
+    auto snapshotsReq = seqState.snapshotsRequested.load();
+    auto snapshotsRecv = seqState.snapshotsReceived.load();
+
+    if (seqGaps + seqRecoveries > 0) {
+        ss << "Seq: " << seqGaps << " gaps, " << seqRecoveries << " recoveries, "
+           << snapshotsReq << " snap_req, " << snapshotsRecv << " snap_recv | ";
+    }
+
     // Rates
     ss << "Rates: KB "
        << (kb.injection_success_rate * 100.0) << "% inj, "
@@ -101,10 +114,17 @@ void StatsLogger::logStats() {
 
 void StatsLogger::loggerLoop() {
     while (running_.load()) {
-        std::this_thread::sleep_for(std::chrono::seconds(1)); // Log every 1 second
+        // Use configurable logging interval, defaulting to 100ms (10Hz)
+        uint32_t intervalMs = globalLoggingConfig.aggregatedLogIntervalMs;
+        if (intervalMs == 0) intervalMs = 100; // Safety fallback
 
-        updateUptime();
-        logStats();
+        std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+
+        // Only log if aggregated logging is enabled
+        if (globalLoggingConfig.enableAggregatedLogging) {
+            updateUptime();
+            logStats();
+        }
     }
 }
 
@@ -112,6 +132,30 @@ void StatsLogger::updateUptime() {
     auto now = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
     globalInputStats.uptime_seconds.store(duration.count());
+}
+
+// Global logging configuration instance
+LoggingConfig globalLoggingConfig;
+
+// Configuration API implementations
+void updateLoggingConfig(const LoggingConfig& config) {
+    globalLoggingConfig = config;
+}
+
+void enablePerEventLogging(bool enable) {
+    globalLoggingConfig.enablePerEventLogging = enable;
+}
+
+void enableAggregatedLogging(bool enable) {
+    globalLoggingConfig.enableAggregatedLogging = enable;
+}
+
+void enableMouseMoveCoalescing(bool enable) {
+    globalLoggingConfig.enableMouseMoveCoalescing = enable;
+}
+
+void setAggregatedLogInterval(uint32_t intervalMs) {
+    globalLoggingConfig.aggregatedLogIntervalMs = intervalMs;
 }
 
 // Global stats logger instance (defined in cpp, declared extern in header)

@@ -43,6 +43,25 @@ struct MouseStats {
     double coalesce_rate{0.0};
 };
 
+// Logging configuration for hot path optimization
+struct LoggingConfig {
+    bool enablePerEventLogging = false;      // Enable detailed per-event logging
+    bool enableAggregatedLogging = true;     // Enable 10Hz aggregated stats
+    bool enableMouseMoveCoalescing = true;   // Coalesce rapid mouse moves
+    uint32_t aggregatedLogIntervalMs = 100;  // 10Hz = 100ms interval
+    uint32_t maxMouseMovesPerFrame = 1;      // Max mouse moves to process per frame
+};
+
+// Global logging configuration
+extern LoggingConfig globalLoggingConfig;
+
+// Configuration API
+void updateLoggingConfig(const LoggingConfig& config);
+void enablePerEventLogging(bool enable);
+void enableAggregatedLogging(bool enable);
+void enableMouseMoveCoalescing(bool enable);
+void setAggregatedLogInterval(uint32_t intervalMs);
+
 struct InputHealthStats {
     KeyboardStats keyboard;
     MouseStats mouse;
@@ -211,6 +230,10 @@ inline void keyboardEventBlocked() {
 inline void mouseEventReceived() {
     globalInputStats.mouse.events_received.fetch_add(1);
     globalInputStats.total_events_processed.fetch_add(1);
+}
+
+inline void mouseEventCoalesced() {
+    globalInputStats.mouse.moves_coalesced.fetch_add(1);
 }
 
 inline void mouseEventSkippedForeground() {

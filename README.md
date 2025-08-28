@@ -324,15 +324,116 @@ Complete blocking of Windows key events to prevent accidental system menu activa
 - **System Stability**: Prevents Windows key from interfering with captured applications
 - **Observability**: Tracks how many Windows key events are being blocked
 
+### 6. Sequence IDs and Desynchronization Recovery
+
+Advanced sequence management system that detects and recovers from message ordering issues and desynchronization between client and host.
+
+#### Key Features:
+- **Monotonic Sequence IDs**: Each input message includes a monotonically increasing sequence number
+- **Gap Detection**: Automatically detects missing or out-of-order messages
+- **Smart Recovery**: Multiple recovery strategies based on gap severity
+- **State Synchronization**: Snapshot-based full state recovery for severe desync
+- **Recovery Throttling**: Prevents excessive recovery operations
+
+#### Sequence Processing Flow:
+1. **Message Reception** → Extract sequence ID from input message
+2. **Gap Analysis** → Compare with expected sequence number
+3. **Recovery Decision** → Choose appropriate recovery action based on gap size
+4. **Recovery Execution** → Apply recovery (modifier release, snapshot request, or reset)
+5. **State Synchronization** → Ensure client and host states are consistent
+
+#### Recovery Strategies:
+- **Small Gaps (< 10 messages)**: Release modifier keys to clear stuck state
+- **Large Gaps (≥ 10 messages)**: Request full state snapshot from client
+- **Severe Desync**: Complete state reset with full key release
+
+#### Configuration:
+```cpp
+InputSequenceManager::SequenceConfig config;
+config.maxGapBeforeRecovery = 10;     // Gap size triggering recovery
+config.recoveryThrottleMs = 1000;     // Min time between recoveries
+config.enableGapRecovery = true;      // Enable gap-based recovery
+config.enableSnapshotRecovery = true; // Enable snapshot recovery
+```
+
+#### Statistics Integration:
+```
+[InputStats] Seq: 5 gaps, 3 recoveries, 2 snap_req, 2 snap_recv
+```
+
+#### Benefits:
+- **Reliability**: Handles network packet loss and reordering gracefully
+- **Deterministic Recovery**: Users don't notice state recovery operations
+- **Performance**: Minimal overhead with intelligent gap detection
+- **Monitoring**: Complete visibility into sequence health and recovery operations
+
+### 7. Hot Path Logging Optimization
+
+Performance-optimized logging system designed to minimize overhead during high-frequency input events.
+
+#### Key Features:
+- **Conditional Per-Event Logging**: Only logs individual events when explicitly enabled for debugging
+- **Aggregated Statistics**: 10Hz aggregated stats by default instead of per-event logging
+- **Mouse Move Coalescing**: Combines rapid mouse movements to reduce processing overhead
+- **Configurable Intervals**: Adjustable logging frequency based on use case requirements
+
+#### Logging Configuration:
+```cpp
+InputStats::LoggingConfig config;
+config.enablePerEventLogging = false;      // Default: disabled for performance
+config.enableAggregatedLogging = true;     // Default: 10Hz aggregated stats
+config.enableMouseMoveCoalescing = true;   // Default: coalesce mouse moves
+config.aggregatedLogIntervalMs = 100;      // Default: 100ms (10Hz)
+```
+
+#### Mouse Move Coalescing:
+- **Smart Combination**: Rapid mouse movements are combined into single events
+- **Latest Position Priority**: Only the most recent mouse position is processed
+- **Performance Boost**: Reduces processing overhead during mouse dragging/high-frequency movement
+- **Metric Tracking**: Coalesced events are tracked separately for observability
+
+#### Performance Benefits:
+- **Reduced CPU Usage**: Eliminates console I/O overhead during high-frequency events
+- **Lower Latency**: Mouse move coalescing prevents input queue buildup
+- **Better Responsiveness**: Aggregated logging prevents logging thread from becoming bottleneck
+- **Configurable Trade-offs**: Can enable detailed logging for debugging when needed
+
+#### Statistics Integration:
+```
+[InputStats] Mouse: 1250 in, 1200 inj, 25 skip, 45 coal, ...
+```
+
+Where `coal` represents the number of mouse moves that were coalesced.
+
+#### Configuration API:
+```cpp
+// Enable/disable detailed per-event logging
+InputStats::enablePerEventLogging(true);  // For debugging only
+
+// Adjust aggregated logging frequency
+InputStats::setAggregatedLogInterval(50); // 20Hz for more frequent stats
+
+// Control mouse move coalescing
+InputStats::enableMouseMoveCoalescing(true);
+```
+
+#### Use Cases:
+- **Gaming**: Mouse move coalescing prevents performance degradation during rapid aiming
+- **Remote Desktop**: Reduces logging overhead during normal usage, enables detailed logging for troubleshooting
+- **Development**: Detailed logging can be enabled for debugging input issues without performance impact
+- **Production**: Aggregated logging provides monitoring without performance penalty
+
 ### Integration Benefits
 
 These systems work together to provide enterprise-grade input handling:
 
 #### Reliability Stack:
-1. **Statistics** provide observability into system health
-2. **FSM** ensures state consistency and prevents stuck keys
-3. **Coordinate Transform** delivers pixel-perfect mouse positioning
-4. **Preconditions** ensure safe and secure input injection
+1. **Sequence Management** provides desynchronization recovery
+2. **Statistics** provide observability into system health
+3. **FSM** ensures state consistency and prevents stuck keys
+4. **Coordinate Transform** delivers pixel-perfect mouse positioning
+5. **Preconditions** ensure safe and secure input injection
+6. **Windows Key Blocking** prevents system interference
 
 #### Performance Characteristics:
 - **Low Latency**: All systems add minimal processing overhead
@@ -341,10 +442,10 @@ These systems work together to provide enterprise-grade input handling:
 - **Observable**: Comprehensive metrics for monitoring and debugging
 
 #### Use Cases:
-- **Gaming**: Prevents stuck keys during intense gameplay
-- **Office Work**: Ensures accurate mouse positioning on high-DPI displays
-- **Remote Desktop**: Provides enterprise-grade input security and reliability
-- **Development**: Offers detailed telemetry for debugging input issues
+- **Gaming**: Handles network jitter and packet loss during intense gameplay
+- **Remote Desktop**: Ensures reliable input even on unstable connections
+- **Corporate Networks**: Maintains input integrity across enterprise networks
+- **Development**: Provides detailed diagnostics for input system debugging
 
 ---
 

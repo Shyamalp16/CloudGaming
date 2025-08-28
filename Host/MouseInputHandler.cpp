@@ -16,11 +16,36 @@
 #include "InputInjection.h"
 #include "InputStats.h"
 #include "MouseCoordinateTransform.h"
+#include "InputSequenceManager.h"
 
 
 using json = nlohmann::json;
 
 namespace MouseInputHandler {
+
+// Mouse move coalescing structure
+struct CoalescedMouseMove {
+    int x = -1;
+    int y = -1;
+    bool hasPendingMove = false;
+    std::chrono::steady_clock::time_point lastUpdateTime;
+
+    void update(int newX, int newY) {
+        x = newX;
+        y = newY;
+        hasPendingMove = true;
+        lastUpdateTime = std::chrono::steady_clock::now();
+    }
+
+    void clear() {
+        hasPendingMove = false;
+        x = -1;
+        y = -1;
+    }
+};
+
+// Global coalesced mouse move instance
+CoalescedMouseMove globalCoalescedMouseMove;
 
 	// Configuration for coordinate transformation
 	static int gClientViewWidth = 1920;  // Default client view width
@@ -395,6 +420,15 @@ namespace MouseInputHandler {
 					MouseLogDebug(std::string("[MouseInputHandler] Processing mouse message from queue: ") + message);
 					json j = json::parse(message);
 					if (j.is_object() && j.contains(InputSchema::kType)) {
+						// Extract sequence ID if present
+						uint64_t sequenceId = 0;
+						if (j.contains("sequenceId")) {
+							sequenceId = j["sequenceId"].get<uint64_t>();
+						}
+
+						// Process sequence ID through sequence manager
+						auto gapResult = InputSequenceManager::globalSequenceManager.processSequence(sequenceId, "mouse");
+
 						// Track mouse event received
 						InputStats::Track::mouseEventReceived();
 
@@ -405,7 +439,28 @@ namespace MouseInputHandler {
 							if (j.contains(InputSchema::kX) && j.contains(InputSchema::kY)) {
 								x = j[InputSchema::kX].get<int>();
 								y = j[InputSchema::kY].get<int>();
-								std::cout << "[MouseInput] MOVE x=" << x << " y=" << y << std::endl;
+
+								// Handle mouse move coalescing
+								if (InputStats::globalLoggingConfig.enableMouseMoveCoalescing) {
+									// Update coalesced move instead of processing immediately
+									globalCoalescedMouseMove.update(x, y);
+									InputStats::Track::mouseEventCoalesced();
+
+									// Only process the most recent move if we have one pending
+									if (globalCoalescedMouseMove.hasPendingMove) {
+										x = globalCoalescedMouseMove.x;
+										y = globalCoalescedMouseMove.y;
+										globalCoalescedMouseMove.clear();
+									} else {
+										// Skip processing this move (will be replaced by next one)
+										continue;
+									}
+								}
+
+								// Conditional logging - only log if detailed logging is enabled
+								if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+									std::cout << "[MouseInput] MOVE x=" << x << " y=" << y << std::endl;
+								}
 								// Update last known cursor position
 								{
 									std::lock_guard<std::mutex> lock(mouseStateMutex);
