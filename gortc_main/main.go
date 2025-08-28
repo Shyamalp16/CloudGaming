@@ -402,8 +402,11 @@ func audioSenderGoroutine() {
 				}
 			}
 
-			// Clean up packet resources after sending
-			// Note: The buffer pool cleanup happens in sendAudioPacket
+			// Return payload buffer to pool after WriteRTP completes
+			// This optimizes pool usage by keeping buffers available for longer
+			if len(pkt.Payload) > 0 {
+				putSampleBuf(pkt.Payload)
+			}
 
 		case <-audioSendStop:
 			log.Println("[Go/Pion] Audio sender goroutine stopped")
@@ -598,8 +601,7 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		//     log.Printf("[Go/Pion] Audio RTP queued: seq=%d, ts=%d", packetSequence, packetRTPTimestamp)
 		// }
 
-		// Return buffer to pool after queuing (sender goroutine handles the packet)
-		putSampleBuf(payload)
+		// Note: Buffer will be returned to pool by sender goroutine after WriteRTP
 		return 0
 
 	default:
@@ -611,7 +613,7 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 			audioSendQueue <- pkt
 			log.Printf("[Go/Pion] Audio backpressure: dropped oldest packet (seq=%d), queued new (seq=%d)",
 				oldestPkt.Header.SequenceNumber, packetSequence)
-			putSampleBuf(payload)
+			// Note: Buffer will be returned to pool by sender goroutine after WriteRTP
 			return 0
 		default:
 			// This should not happen with bounded channel, but handle gracefully

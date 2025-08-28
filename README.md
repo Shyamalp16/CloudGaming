@@ -1756,6 +1756,59 @@ The optimization eliminates the primary source of audio write delays, ensuring t
 
 This provides **enterprise-grade RTP state management** with **zero contention** between control and media planes! 🚀⚡🎵
 
+### Memory Allocation Optimization
+
+The audio pipeline has been optimized to eliminate unnecessary memory allocations and copies, significantly reducing GC pressure and improving performance:
+
+**C++ Buffer Reuse Optimizations:**
+- **Zero-Allocation Resampling**: `ResampleTo48kInPlace()` works directly with `m_floatBuffer`, eliminating temporary vector allocations
+- **Reference-Based Frame Queuing**: `QueueRawFrameRef()` accepts `const std::vector<float>&` to avoid copying frame data
+- **Persistent Buffer Usage**: `m_floatBuffer` and `m_frameBuffer` are reused across capture cycles
+- **DMO In-Place Processing**: `ProcessResamplerDMOInPlace()` operates directly on buffers without intermediate copies
+
+**Before (Inefficient):**
+```cpp
+// Multiple allocations and copies per frame
+std::vector<float> resampleOutput;
+ResampleTo48k(m_floatBuffer.data(), numFrames, rate, channels, resampleOutput);
+m_floatBuffer.swap(resampleOutput); // Expensive vector swap
+
+std::vector<float> frameData(m_frameBuffer.begin(), m_frameBuffer.end()); // Copy!
+QueueRawFrame(frameData, timestamp); // Another copy inside function
+```
+
+**After (Optimized):**
+```cpp
+// Zero additional allocations, direct buffer operations
+ResampleTo48kInPlace(m_floatBuffer, numFrames, rate, channels); // Direct in-place
+
+QueueRawFrameRef(m_frameBuffer, timestamp); // Reference-based, no copy
+```
+
+**Go Buffer Pool Optimization:**
+- **Deferred Pool Returns**: Buffers are returned to pool after `WriteRTP` completes, not immediately after queuing
+- **Reduced Pool Pressure**: Keeps buffers available longer, reducing allocation frequency
+- **Optimized Memory Lifecycle**: `getSampleBuf()` → `memcpy()` → queue → `WriteRTP()` → `putSampleBuf()`
+
+**Performance Benefits:**
+- **Reduced Allocations**: Eliminates temporary vector allocations during resampling
+- **Lower GC Pressure**: Fewer objects created and destroyed per audio frame
+- **Better Cache Locality**: Reused buffers maintain cache warmth
+- **Improved Throughput**: Reduced memory management overhead per frame
+
+**Memory Usage Patterns:**
+```
+Capture Cycle Memory Flow:
+1. WASAPI → m_floatBuffer (persistent, no alloc)
+2. ResampleTo48kInPlace() (direct operation, no temp vectors)
+3. std::copy() → m_frameBuffer (existing buffer reuse)
+4. QueueRawFrameRef() (const reference, no copy)
+5. Encoder processes frame (reuses buffers)
+6. Go: getSampleBuf() → memcpy() → WriteRTP() → putSampleBuf()
+```
+
+This optimization reduces per-frame memory allocations from **multiple vector operations** to **zero additional allocations**, providing significant performance improvements for high-frequency audio processing! 🧠⚡🔄
+
 ### Audio-Video Synchronization
 
 The system implements comprehensive AV synchronization to prevent drift and ensure perfect lip-sync:

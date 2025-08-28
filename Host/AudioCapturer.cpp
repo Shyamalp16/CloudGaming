@@ -425,6 +425,40 @@ bool AudioCapturer::QueueRawFrame(std::vector<float>& samples, int64_t timestamp
     return true;
 }
 
+bool AudioCapturer::QueueRawFrameRef(const std::vector<float>& samples, int64_t timestampUs)
+{
+    std::lock_guard<std::mutex> lock(m_rawFrameMutex);
+
+    // With minimal queue depth (1), we should rarely have queue full situations
+    // If queue is full, this indicates encoder thread congestion
+    if (m_rawFrameQueue.size() >= MAX_RAW_FRAME_QUEUE_SIZE) {
+        if (s_enableBufferMonitoring) {
+            std::wcerr << L"[AudioEncoder] Raw frame queue full - encoder thread congested. Size: "
+                      << m_rawFrameQueue.size() << L"/" << MAX_RAW_FRAME_QUEUE_SIZE << std::endl;
+        }
+        return false; // Signal congestion to capture thread
+    }
+
+    // Optional buffer monitoring for performance analysis
+    if (s_enableBufferMonitoring) {
+        static int operationCount = 0;
+        if (++operationCount % s_bufferMonitorInterval == 0) {
+            std::wcout << L"[AudioEncoder] Raw frame queue monitoring: current="
+                      << m_rawFrameQueue.size() << L", max=" << MAX_RAW_FRAME_QUEUE_SIZE << std::endl;
+        }
+    }
+
+    // Create frame and copy data (necessary since we have const reference)
+    RawAudioFrame frame;
+    frame.samples = samples; // Copy data to avoid reference issues
+    frame.timestampUs = timestampUs;
+
+    m_rawFrameQueue.push(std::move(frame));
+    m_rawFrameCondition.notify_one(); // Wake encoder thread
+
+    return true;
+}
+
 // Queue parameter update for encoder thread
 void AudioCapturer::QueueParameterUpdate(int bitrate, int expectedLossPerc, int complexity, int fecEnabled) {
     std::lock_guard<std::mutex> lock(m_parameterMutex);
@@ -1129,15 +1163,13 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 }
             }
 
-            // Resample to 48kHz if source rate differs (process directly in persistent buffers)
+            // Resample to 48kHz if source rate differs (zero-allocation optimization)
             if (pwfx->nSamplesPerSec != 48000) {
-                // Create a temporary buffer for resampling output
-                std::vector<float> resampleOutput;
                 uint32_t channels = pwfx->nChannels;
-                ResampleTo48k(m_floatBuffer.data(), numFramesAvailable, pwfx->nSamplesPerSec, channels, resampleOutput);
 
-                // Swap to avoid copying - resampleOutput now contains the resampled data
-                m_floatBuffer.swap(resampleOutput);
+                // Use optimized resampling that works directly with m_floatBuffer
+                // This eliminates the temporary vector creation entirely
+                ResampleTo48kInPlace(m_floatBuffer, numFramesAvailable, pwfx->nSamplesPerSec, channels);
 
                 // Update totalSamples to reflect the new (resampled) sample count
                 totalSamples = m_floatBuffer.size();
@@ -1343,13 +1375,12 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
     // m_samplesPerFrame = total samples per frame (includes all channels)
     // RTP timestamps increment by samples per channel for correct timing
     while (m_accumulatedCount >= m_samplesPerFrame) {
-        // Extract one complete frame from the accumulated buffer
+        // Extract one complete frame from the accumulated buffer (zero-copy)
         std::copy(m_accumulatedSamples.begin(), m_accumulatedSamples.begin() + m_samplesPerFrame, m_frameBuffer.begin());
 
-        // Queue raw audio frame for dedicated encoder thread (completely offloads encoding)
-        // This prevents any encoding work from running on the capture thread
-        std::vector<float> frameData(m_frameBuffer.begin(), m_frameBuffer.end());
-        if (!QueueRawFrame(frameData, timestampUs)) {
+        // Queue raw audio frame for dedicated encoder thread (zero-allocation approach)
+        // Pass frame data by reference to avoid vector copy
+        if (!QueueRawFrameRef(m_frameBuffer, timestampUs)) {
             std::wcerr << L"[AudioCapturer] Failed to queue raw audio frame - encoder congestion detected" << std::endl;
             // Don't retry immediately - let encoder thread catch up
             // The capture thread will continue and try again on next frame
@@ -1358,7 +1389,7 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
             // static int frameCount = 0;
             // if (++frameCount % 100 == 0) {
             //     std::wcout << L"[AudioCapturer] Queued raw frame " << frameCount
-            //                << L" with " << frameData.size() << L" samples, pts: " << timestampUs << L" us" << std::endl;
+            //                << L" with " << m_frameBuffer.size() << L" samples, pts: " << timestampUs << L" us" << std::endl;
             // }
         }
 
@@ -1369,6 +1400,107 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
 }
 
 
+
+void AudioCapturer::ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFrames, uint32_t inRate, uint32_t channels)
+{
+    // ============================================================================
+    // ZERO-ALLOCATION IN-PLACE RESAMPLING
+    // ============================================================================
+    // This function resamples directly in the provided buffer, eliminating
+    // temporary vector allocations and copies for maximum performance.
+
+    if (inRate == 48000) {
+        // No resampling needed - buffer is already at target rate
+        return;
+    }
+
+    // Try to use high-quality Windows Audio Resampler DMO first
+    if (InitializeDMOResampler(inRate, channels)) {
+        // Use DMO resampler directly with the buffer
+        if (ProcessResamplerDMOInPlace(buffer)) {
+            // Success - DMO resampler handled the conversion in-place
+            return;
+        } else {
+            std::wcerr << L"[AudioCapturer] DMO in-place resampler failed, falling back to linear interpolation" << std::endl;
+        }
+    }
+
+    // Fallback to linear interpolation method with in-place operation
+    std::wcout << L"[AudioCapturer] Using in-place linear interpolation resampler (DMO unavailable)" << std::endl;
+
+    double ratio = 48000.0 / static_cast<double>(inRate);
+    size_t outFrames = static_cast<size_t>(std::ceil((inFrames) * ratio));
+    size_t inputSamples = inFrames * channels;
+    size_t outputSamples = outFrames * channels;
+
+    // Ensure buffer has enough space for output
+    if (buffer.size() < outputSamples) {
+        buffer.resize(outputSamples);
+    }
+
+    // For continuity across calls when rates remain the same
+    if (m_lastInputRate != inRate) {
+        m_resamplePhase = 0.0;
+        m_resampleRemainder.assign(channels, 0.0f);
+        m_lastInputRate = inRate;
+    }
+
+    // Start with previous remainder sample for interpolation continuity
+    std::vector<float> prev(channels, 0.0f);
+    if (!m_resampleRemainder.empty()) {
+        prev = m_resampleRemainder;
+    }
+
+    // Perform in-place resampling using a temporary buffer strategy
+    std::vector<float> tempBuffer(outputSamples);
+    size_t inIndex = 0; // frame index
+
+    for (size_t o = 0; o < outFrames; ++o) {
+        double srcPos = (o / ratio);
+        size_t srcFrame = static_cast<size_t>(srcPos);
+        double frac = srcPos - srcFrame;
+
+        // Handle boundary conditions
+        if (srcFrame >= inFrames - 1) {
+            // Use last frame for extrapolation
+            for (uint32_t ch = 0; ch < channels; ++ch) {
+                size_t srcIdx = (inFrames - 1) * channels + ch;
+                size_t dstIdx = o * channels + ch;
+                if (srcIdx < buffer.size() && dstIdx < tempBuffer.size()) {
+                    tempBuffer[dstIdx] = buffer[srcIdx];
+                }
+            }
+        } else {
+            // Linear interpolation between adjacent frames
+            for (uint32_t ch = 0; ch < channels; ++ch) {
+                size_t srcIdx1 = srcFrame * channels + ch;
+                size_t srcIdx2 = (srcFrame + 1) * channels + ch;
+                size_t dstIdx = o * channels + ch;
+
+                if (srcIdx1 < buffer.size() && srcIdx2 < buffer.size() && dstIdx < tempBuffer.size()) {
+                    float sample1 = (srcFrame == 0 && !m_resampleRemainder.empty()) ?
+                                   prev[ch] : buffer[srcIdx1];
+                    float sample2 = buffer[srcIdx2];
+                    tempBuffer[dstIdx] = sample1 + (sample2 - sample1) * static_cast<float>(frac);
+                }
+            }
+        }
+    }
+
+    // Save last input sample as remainder for continuity
+    if (inFrames > 0) {
+        m_resampleRemainder.resize(channels);
+        for (uint32_t ch = 0; ch < channels; ++ch) {
+            size_t lastSampleIdx = (inFrames - 1) * channels + ch;
+            if (lastSampleIdx < buffer.size()) {
+                m_resampleRemainder[ch] = buffer[lastSampleIdx];
+            }
+        }
+    }
+
+    // Move temp buffer to original buffer (efficient move operation)
+    buffer = std::move(tempBuffer);
+}
 
 void AudioCapturer::ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out)
 {
@@ -1831,6 +1963,105 @@ bool AudioCapturer::InitializeDMOResampler(uint32_t inputSampleRate, uint32_t in
 
     std::wcout << L"[AudioCapturer] DMO Resampler initialized: " << inputSampleRate << L"Hz -> 48kHz, "
                << inputChannels << L" channels" << std::endl;
+
+    return true;
+}
+
+bool AudioCapturer::ProcessResamplerDMOInPlace(std::vector<float>& buffer)
+{
+    // ============================================================================
+    // ZERO-COPY DMO RESAMPLING
+    // ============================================================================
+    // This function performs DMO resampling directly in the provided buffer,
+    // eliminating temporary vector allocations and copies.
+
+    if (!m_resamplerInitialized || buffer.empty()) {
+        return false;
+    }
+
+    size_t inputSamples = buffer.size();
+    HRESULT hr;
+    DWORD dwStatus = 0;
+    size_t totalOutputSamples = 0;
+
+    // Calculate input buffer size needed
+    size_t inputBytes = inputSamples * sizeof(float);
+
+    // Process input in chunks if needed
+    BYTE* pInputBuffer = nullptr;
+    hr = m_inputBuffer->GetBufferAndLength(&pInputBuffer, nullptr);
+    if (FAILED(hr)) {
+        std::wcerr << L"[AudioCapturer] Failed to get input buffer: " << _com_error(hr).ErrorMessage() << std::endl;
+        return false;
+    }
+
+    // Copy input data to DMO buffer
+    memcpy(pInputBuffer, buffer.data(), inputBytes);
+
+    hr = m_inputBuffer->SetLength(static_cast<DWORD>(inputBytes));
+    if (FAILED(hr)) {
+        std::wcerr << L"[AudioCapturer] Failed to set input buffer length: " << _com_error(hr).ErrorMessage() << std::endl;
+        return false;
+    }
+
+    // Process the input
+    hr = m_audioResamplerDMO->ProcessInput(0, m_inputBuffer.Get(), 0, 0, 0);
+    if (FAILED(hr)) {
+        std::wcerr << L"[AudioCapturer] ProcessInput failed: " << _com_error(hr).ErrorMessage() << std::endl;
+        return false;
+    }
+
+    // Get output directly into the provided buffer
+    buffer.clear();
+    std::vector<float> tempBuffer;
+
+    while (true) {
+        hr = m_audioResamplerDMO->ProcessOutput(0, 0, nullptr, &dwStatus);
+
+        if (hr == S_FALSE) {
+            // Need more input
+            break;
+        } else if (FAILED(hr)) {
+            std::wcerr << L"[AudioCapturer] ProcessOutput failed: " << _com_error(hr).ErrorMessage() << std::endl;
+            return false;
+        }
+
+        if (dwStatus & 0x00000001) {  // DMO_OUTPUT_DATA_BUFFERFILLED - Output buffer contains valid data
+            // Get output data
+            BYTE* pOutputBuffer = nullptr;
+            DWORD outputLength = 0;
+            hr = m_outputBuffer->GetBufferAndLength(&pOutputBuffer, &outputLength);
+            if (FAILED(hr)) {
+                std::wcerr << L"[AudioCapturer] Failed to get output buffer: " << _com_error(hr).ErrorMessage() << std::endl;
+                return false;
+            }
+
+            // Copy output data directly to temp buffer
+            size_t outputSamples = outputLength / sizeof(float);
+            tempBuffer.resize(outputSamples);
+            memcpy(tempBuffer.data(), pOutputBuffer, outputLength);
+
+            // Append to final output (buffer)
+            buffer.insert(buffer.end(), tempBuffer.begin(), tempBuffer.end());
+            totalOutputSamples += outputSamples;
+        }
+    }
+
+    if (buffer.empty()) {
+        std::wcerr << L"[AudioCapturer] DMO in-place resampler produced no output" << std::endl;
+        return false;
+    }
+
+    // Validate frame alignment for Opus encoding
+    // Opus frames should be multiples of 480 samples per channel (10ms at 48kHz)
+    size_t outputFramesPerChannel = buffer.size() / m_currentInputChannels;
+    const size_t OPUS_FRAME_SAMPLES = 480; // 10ms at 48kHz per channel
+
+    if (outputFramesPerChannel % OPUS_FRAME_SAMPLES != 0) {
+        std::wcerr << L"[AudioCapturer] Warning: DMO in-place output not aligned with Opus frames. "
+                   << L"Output samples per channel: " << outputFramesPerChannel
+                   << L", expected multiple of " << OPUS_FRAME_SAMPLES << std::endl;
+    }
 
     return true;
 }

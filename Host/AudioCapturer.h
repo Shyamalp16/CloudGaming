@@ -76,6 +76,7 @@ private:
     void StopEncoderThread();
     void EncoderThread();
     bool QueueRawFrame(std::vector<float>& samples, int64_t timestampUs);
+    bool QueueRawFrameRef(const std::vector<float>& samples, int64_t timestampUs);
     void ProcessRawFrames();
     void EncodeAndQueueFrame(RawAudioFrame frame);
     void QueueParameterUpdate(int bitrate, int expectedLossPerc, int complexity, int fecEnabled = -1);
@@ -83,10 +84,12 @@ private:
 
     // Audio resampling methods
     void ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out);
+    void ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFrames, uint32_t inRate, uint32_t channels);
 
     // DMO Resampler methods for high-quality audio resampling
     bool InitializeDMOResampler(uint32_t inputSampleRate, uint32_t inputChannels);
     bool ProcessResamplerDMO(const float* inputData, size_t inputSamples, std::vector<float>& outputData);
+    bool ProcessResamplerDMOInPlace(std::vector<float>& buffer);
     void CleanupDMOResampler();
 
     // Test and validation methods
