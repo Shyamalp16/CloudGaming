@@ -127,6 +127,10 @@ var (
 	// send rate logging
 	sendLastLog time.Time
 	sendCount   int
+
+	// Granular audio send path: bounded queue and dedicated sender goroutine
+	audioSendQueue chan *rtp.Packet // Bounded channel for RTP packets (size ≤ 1)
+	audioSendStop  chan struct{}    // Stop signal for sender goroutine
 )
 
 // Optimized tiered buffer pool system for media samples
@@ -298,6 +302,44 @@ func logBufferPoolStats() {
 		totalRequests, totalAllocs, overallHitRate)
 }
 
+// initAudioSendQueue initializes the bounded audio send queue and starts the sender goroutine
+func initAudioSendQueue() {
+	// Create bounded channel with capacity 1 (as requested: size ≤ 1)
+	audioSendQueue = make(chan *rtp.Packet, 1)
+	audioSendStop = make(chan struct{})
+
+	// Start the dedicated audio sender goroutine
+	go audioSenderGoroutine()
+
+	log.Println("[Go/Pion] Audio send queue initialized with bounded channel (capacity: 1)")
+}
+
+// audioSenderGoroutine runs in a separate goroutine to send RTP packets without holding locks
+// This prevents head-of-line blocking and keeps the send path lock-granular
+func audioSenderGoroutine() {
+	log.Println("[Go/Pion] Audio sender goroutine started")
+
+	for {
+		select {
+		case pkt := <-audioSendQueue:
+			// Send RTP packet without holding any locks
+			// This is the potentially blocking operation, but it doesn't block other operations
+			if audioTrack != nil {
+				if err := audioTrack.WriteRTP(pkt); err != nil {
+					log.Printf("[Go/Pion] Error in audio sender goroutine: %v", err)
+				}
+			}
+
+			// Clean up packet resources after sending
+			// Note: The buffer pool cleanup happens in sendAudioPacket
+
+		case <-audioSendStop:
+			log.Println("[Go/Pion] Audio sender goroutine stopped")
+			return
+		}
+	}
+}
+
 // testBufferPool performs a simple test of buffer pool functionality
 // This can be called during development to verify the pool is working correctly
 func testBufferPool() {
@@ -335,6 +377,7 @@ func testBufferPool() {
 func init() {
 	rand.Seed(time.Now().UnixNano())
 	initBufferPool()
+	initAudioSendQueue()
 }
 
 // validateAudioTimestampStability checks RTP timestamp progression for debugging
@@ -386,7 +429,7 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	}
 
 	// Get a copy of the track pointer and other shared state while holding the lock
-	track := audioTrack
+	// track := audioTrack
 	payloadType := audioPayloadType
 	ssrc := audioSSRC
 	pcMutex.Unlock() // Release global lock immediately
@@ -462,34 +505,45 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		Payload: payload,
 	}
 
-	// Write RTP packet without holding any locks - this is the potentially blocking operation
-	// This eliminates contention with other control paths while RTP write completes
-	if err := track.WriteRTP(pkt); err != nil {
-		log.Printf("[Go/Pion] Error writing audio RTP packet: %v", err)
+	// Queue RTP packet for the dedicated sender goroutine (bounded queue, size ≤ 1)
+	// This implements backpressure by dropping oldest packets rather than accumulating
+	// The sender goroutine will handle WriteRTP without holding any locks
+
+	select {
+	case audioSendQueue <- pkt:
+		// Packet successfully queued for sending
+		// RTP timestamp is maintained as: currentAudioTS = last_queued_packet_timestamp
+		// Next packet will use: currentAudioTS + audioFrameDuration
+		// This ensures stable inter-packet intervals and smooth sender timing
+
+		// Optional performance logging (disabled during normal operation to avoid spam)
+		// To enable performance monitoring, uncomment the following block:
+		// if packetSequence%1000 == 0 {
+		//     log.Printf("[Go/Pion] Audio RTP queued: seq=%d, ts=%d", packetSequence, packetRTPTimestamp)
+		// }
+
+		// Return buffer to pool after queuing (sender goroutine handles the packet)
 		putSampleBuf(payload)
-		return -1
+		return 0
+
+	default:
+		// Queue is full - implement backpressure by dropping the oldest packet
+		// This prevents head-of-line blocking and keeps latency bounded
+		select {
+		case oldestPkt := <-audioSendQueue:
+			// Successfully removed oldest packet, now queue the new one
+			audioSendQueue <- pkt
+			log.Printf("[Go/Pion] Audio backpressure: dropped oldest packet (seq=%d), queued new (seq=%d)",
+				oldestPkt.Header.SequenceNumber, packetSequence)
+			putSampleBuf(payload)
+			return 0
+		default:
+			// This should not happen with bounded channel, but handle gracefully
+			log.Printf("[Go/Pion] Audio queue unexpectedly full, dropping packet (seq=%d)", packetSequence)
+			putSampleBuf(payload)
+			return -1
+		}
 	}
-
-	// RTP timestamp is now maintained as: currentAudioTS = last_sent_packet_timestamp
-	// Next packet will use: currentAudioTS + audioFrameDuration
-	// This ensures stable inter-packet intervals and smooth sender timing
-
-	// Optional performance logging (disabled during normal operation to avoid spam)
-	// To enable performance monitoring, uncomment the following block:
-	// writeStart := time.Now()
-	// if err := track.WriteRTP(pkt); err != nil {
-	//     log.Printf("[Go/Pion] Error writing audio RTP packet: %v", err)
-	//     putSampleBuf(payload)
-	//     return -1
-	// }
-	// writeDuration := time.Since(writeStart)
-	// if packetSequence%1000 == 0 {
-	//     log.Printf("[Go/Pion] Audio RTP write performance: seq=%d, write_time=%v", packetSequence, writeDuration)
-	// }
-
-	// Return buffer to pool after successful write
-	putSampleBuf(payload)
-	return 0
 }
 
 //export sendVideoSample
@@ -1630,6 +1684,22 @@ func initGo() C.int {
 //export closeGo
 func closeGo() {
 	log.Println("[Go/Pion] closeGo: Closing Go WebRTC module.")
+
+	// Stop the audio sender goroutine
+	if audioSendStop != nil {
+		close(audioSendStop)
+		audioSendStop = nil
+		log.Println("[Go/Pion] Audio sender goroutine stop signal sent")
+	}
+
+	// Drain any remaining packets from the queue
+	if audioSendQueue != nil {
+		for len(audioSendQueue) > 0 {
+			<-audioSendQueue
+		}
+		audioSendQueue = nil
+	}
+
 	closePeerConnection()
 }
 

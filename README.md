@@ -1543,6 +1543,7 @@ The audio system uses minimal application-level buffering to let WebRTC's built-
 **Buffering Strategy:**
 - **Raw Frame Queue**: 1 frame maximum (synchronized capture-to-encode)
 - **Encoded Packet Queue**: 1 packet maximum (minimal transmission buffering)
+- **Go Send Queue**: Bounded channel (capacity ≤ 1) for granular locking
 - **No Application-Level Jitter Buffer**: Relies on WebRTC's native jitter buffer
 
 **Benefits:**
@@ -1550,17 +1551,33 @@ The audio system uses minimal application-level buffering to let WebRTC's built-
 - **WebRTC Congestion Control**: BWE (Bandwidth Estimation) adapts to network conditions
 - **Native Jitter Handling**: WebRTC's jitter buffer compensates for network variation
 - **Clean Audio Path**: Direct encoding-to-transmission with minimal intermediates
+- **Lock-Granular Send Path**: Prevents head-of-line blocking with dedicated sender goroutine
 
 **Congestion Handling:**
-- Queue full conditions are logged but not forced (let WebRTC handle congestion)
-- Encoder thread continues processing new frames during congestion
-- WebRTC's pacing and retransmission mechanisms work optimally
+- **Backpressure Implementation**: Drops oldest packets rather than accumulating
+- **Dedicated Sender Goroutine**: Handles WriteRTP without holding locks
+- **Queue Bounded at Size ≤ 1**: Prevents unbounded latency growth
+- **Graceful Degradation**: Continues processing during network congestion
 
 **Configuration Impact:**
 The minimal buffering approach works best with:
 - WebRTC's default congestion control enabled
 - Appropriate bitrate adaptation settings
 - Clean network conditions (where WebRTC excels)
+
+**Architecture:**
+```
+C++ Capture ──1 Raw Frame──┐
+                           │
+                           ▼
+C++ Encoder ──1 Encoded Packet──┐
+                                 │
+                                 ▼
+Go Queue ──Bounded Channel (≤1)──┐
+                                   │
+                                   ▼
+Go Sender Goroutine ──WebRTC WriteRTP──► Network
+```
 
 **Buffer Monitoring (Optional):**
 For performance analysis and debugging, you can enable buffer depth monitoring:
