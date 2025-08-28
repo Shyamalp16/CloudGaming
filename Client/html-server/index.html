@@ -804,7 +804,7 @@
         type: "mousemove",
         x: Math.round((event.clientX - rect.left) * scaleX),
         y: Math.round((event.clientY - rect.top) * scaleY),
-        client_send_time: performance.now(),
+        client_send_time: Date.now(),
       };
 
       sendMouseEvent(mouseData);
@@ -1215,7 +1215,7 @@
       
       event.preventDefault();
       keyState.add(event.code);
-      const keyData = { key: event.key, code: event.code, type: 'keydown', client_send_time: performance.now() };
+      const keyData = { key: event.key, code: event.code, type: 'keydown', client_send_time: Date.now() };
       sendKeyPress(keyData);
     }
 
@@ -1224,7 +1224,7 @@
       if (!keyState.has(event.code)) return;
       event.preventDefault();
       keyState.delete(event.code);
-      const keyData = { key: event.key, code: event.code, type: 'keyup', client_send_time: performance.now() };
+      const keyData = { key: event.key, code: event.code, type: 'keyup', client_send_time: Date.now() };
       sendKeyPress(keyData);
     }
 
@@ -1245,7 +1245,7 @@
         x: Math.round((event.clientX - rect.left) * scaleX),
         y: Math.round((event.clientY - rect.top) * scaleY),
         button: event.button,
-        timestamp: Date.now(),
+        client_send_time: Date.now(),
       };
       sendMouseEvent(mouseData);
     }
@@ -1263,7 +1263,7 @@
         x: Math.round((event.clientX - rect.left) * scaleX),
         y: Math.round((event.clientY - rect.top) * scaleY),
         button: event.button,
-        timestamp: Date.now(),
+        client_send_time: Date.now(),
       };
       sendMouseEvent(mouseData);
     }

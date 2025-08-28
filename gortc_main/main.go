@@ -512,15 +512,9 @@ func createPeerConnectionGo() C.int {
 				// Throttle noisy logs: only log size and acks
 				var messageData map[string]interface{}
 				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
-					if clientSendTime, ok := messageData["client_send_time"].(float64); ok {
-						// Normalize to milliseconds: if value looks like seconds, convert
-						clientMs := clientSendTime
-						if clientMs < 1e11 { // seconds-range epoch
-							clientMs = clientMs * 1000.0
-						}
+					if clientMs, ok := normalizeToMs(messageData["client_send_time"]); ok {
 						hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
 						oneWayLatency := hostReceiveTime - clientMs
-						// No per-message log; only significant latency spikes
 						if oneWayLatency > 100 {
 							log.Printf("[Go/Pion] Keyboard latency high: %.1f ms", oneWayLatency)
 						}
@@ -608,12 +602,7 @@ func createPeerConnectionGo() C.int {
 				// Throttle noisy logs: only log size and acks
 				var messageData map[string]interface{}
 				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
-					if clientSendTime, ok := messageData["client_send_time"].(float64); ok {
-						// Normalize to milliseconds: if value looks like seconds, convert
-						clientMs := clientSendTime
-						if clientMs < 1e11 { // seconds-range epoch
-							clientMs = clientMs * 1000.0
-						}
+					if clientMs, ok := normalizeToMs(messageData["client_send_time"]); ok {
 						hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
 						oneWayLatency := hostReceiveTime - clientMs
 						if oneWayLatency > 100 {
