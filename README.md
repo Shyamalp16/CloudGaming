@@ -1533,7 +1533,9 @@ The audio system includes sophisticated bitrate adaptation that responds to real
     "increaseStep": 8000,
     "highLossThreshold": 0.05,
     "lowLossThreshold": 0.01,
-    "cleanSamplesRequired": 30
+    "cleanSamplesRequired": 30,
+    "fecEnableThreshold": 0.03,
+    "fecDisableThreshold": 0.005
   }
 }
 ```
@@ -1550,6 +1552,8 @@ The audio system includes sophisticated bitrate adaptation that responds to real
 | `highLossThreshold` | `0.05` | Packet loss % that triggers decrease (5%) |
 | `lowLossThreshold` | `0.01` | Packet loss % that allows increase (1%) |
 | `cleanSamplesRequired` | `30` | Good RTCP samples needed before increasing |
+| `fecEnableThreshold` | `0.03` | Packet loss % that enables FEC (3%) |
+| `fecDisableThreshold` | `0.005` | Packet loss % that disables FEC (0.5%) |
 
 **Adaptation Behavior:**
 - **Decrease**: When packet loss ≥ 5%, immediately reduce bitrate by 50-70%
@@ -1557,35 +1561,43 @@ The audio system includes sophisticated bitrate adaptation that responds to real
 - **Increase**: When packet loss < 1% for 30 consecutive samples, increase by 8kbps
 - **Limits**: Stay within configured min/max bitrate bounds
 - **Hysteresis**: Requires sustained good/bad conditions before changing
+- **FEC Control**: Automatically enables FEC when loss ≥ 3%, disables when loss ≤ 0.5%
 - **Complexity**: Automatically reduces encoder complexity under high loss (prioritizes speed)
 - **Quality Recovery**: Increases complexity when loss drops to very low levels
+- **FEC Overhead**: Balances quality vs. bitrate by using FEC only when beneficial
 
 **Tuning Recommendations:**
 
 **For Low-Latency Gaming:**
 ```json
 {
-  "decreaseCooldownMs": 1000,    // Faster response
-  "highLossThreshold": 0.03,     // More sensitive (3%)
-  "increaseStep": 4000          // Smaller steps
+  "decreaseCooldownMs": 1000,      // Faster response
+  "highLossThreshold": 0.03,       // More sensitive (3%)
+  "fecEnableThreshold": 0.02,      // Enable FEC earlier (2%)
+  "fecDisableThreshold": 0.001,    // Disable FEC later (0.1%)
+  "increaseStep": 4000            // Smaller steps
 }
 ```
 
 **For Stable Networks:**
 ```json
 {
-  "decreaseCooldownMs": 3000,    // More conservative
-  "highLossThreshold": 0.08,     // Less sensitive (8%)
-  "increaseStep": 16000         // Larger steps
+  "decreaseCooldownMs": 3000,      // More conservative
+  "highLossThreshold": 0.08,       // Less sensitive (8%)
+  "fecEnableThreshold": 0.05,      // Enable FEC later (5%)
+  "fecDisableThreshold": 0.01,     // Disable FEC earlier (1%)
+  "increaseStep": 16000           // Larger steps
 }
 ```
 
 **For High-Variability Networks:**
 ```json
 {
-  "decreaseCooldownMs": 5000,    // Very conservative
-  "highLossThreshold": 0.10,     // Less sensitive (10%)
-  "cleanSamplesRequired": 60    // Require more samples
+  "decreaseCooldownMs": 5000,      // Very conservative
+  "highLossThreshold": 0.10,       // Less sensitive (10%)
+  "fecEnableThreshold": 0.01,      // Enable FEC very early (1%)
+  "fecDisableThreshold": 0.001,    // Keep FEC enabled longer (0.1%)
+  "cleanSamplesRequired": 60      // Require more samples
 }
 ```
 
@@ -1594,6 +1606,8 @@ The system logs adaptation events:
 ```
 [AudioAdapt] High loss detected (7.5%), decreased bitrate to 48000 bps
 [AudioAdapt] Low loss detected (0.2%), increased bitrate to 56000 bps
+[AudioAdapt] Enabling Opus FEC (loss: 4.2%)
+[AudioAdapt] Disabling Opus FEC (loss: 0.3%)
 ```
 
 ### Video Metrics (when `video.exportMetrics` is true)

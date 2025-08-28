@@ -33,6 +33,7 @@ struct OpusParameterUpdate {
     int bitrate = 0;           // New bitrate in bps (0 = no change)
     int expectedLossPerc = -1; // New expected loss percentage (-1 = no change)
     int complexity = -1;       // New complexity (-1 = no change)
+    int fecEnabled = -1;       // FEC enable/disable (-1 = no change, 0 = disable, 1 = enable)
 };
 
 class AudioCapturer
@@ -51,7 +52,7 @@ public:
     static void OnRtcpFeedback(double packetLoss, double rtt, double jitter);
 
     // Dynamic Opus parameter updates
-    static void UpdateOpusParameters(int bitrate, int expectedLossPerc, int complexity);
+    static void UpdateOpusParameters(int bitrate, int expectedLossPerc, int complexity, int fecEnabled = -1);
 
 private:
     void CaptureThread(DWORD processId);
@@ -72,7 +73,7 @@ private:
     bool QueueRawFrame(std::vector<float>& samples, int64_t timestampUs);
     void ProcessRawFrames();
     void EncodeAndQueueFrame(RawAudioFrame frame);
-    void QueueParameterUpdate(int bitrate, int expectedLossPerc, int complexity);
+    void QueueParameterUpdate(int bitrate, int expectedLossPerc, int complexity, int fecEnabled = -1);
     bool CheckForParameterUpdates();
 
     // Audio resampling methods
@@ -215,6 +216,11 @@ private:
     static inline int s_cleanSamples = 0;
     static inline double s_highLossThreshold = 0.05; // 5% packet loss triggers decrease
     static inline double s_lowLossThreshold = 0.01;  // <1% packet loss allows increase
+
+    // FEC control thresholds
+    static inline double s_fecEnableThreshold = 0.03;  // 3% packet loss enables FEC
+    static inline double s_fecDisableThreshold = 0.005; // 0.5% packet loss disables FEC
+    static inline bool s_fecCurrentlyEnabled = false;   // Current FEC state
 
     // Timing for 20ms frames
     std::chrono::high_resolution_clock::time_point m_startTime;

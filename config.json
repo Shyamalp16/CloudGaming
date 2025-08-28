@@ -59,7 +59,9 @@
         "increaseStep": 8000,
         "highLossThreshold": 0.05,
         "lowLossThreshold": 0.01,
-        "cleanSamplesRequired": 30
+        "cleanSamplesRequired": 30,
+        "fecEnableThreshold": 0.03,
+        "fecDisableThreshold": 0.005
       }
     },
     "input": {

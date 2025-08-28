@@ -129,28 +129,212 @@ var (
 	sendCount   int
 )
 
-// Reusable buffer pool for media samples to reduce per-frame allocations
-var sampleBufPool sync.Pool
+// Optimized tiered buffer pool system for media samples
+// This system reduces memory fragmentation and allocation churn by:
+// 1. Preallocating buffers for common sizes (128, 256, 512, 1500 bytes)
+// 2. Using separate pools for each size tier to minimize fragmentation
+// 3. Only pooling buffers that match tier sizes exactly
+// 4. Tracking hit rates and allocation patterns for optimization
+//
+// Size tiers are chosen based on typical media payload sizes:
+// - 128 bytes: Small audio frames (Opus low bitrate)
+// - 256 bytes: Medium audio frames (Opus medium bitrate)
+// - 512 bytes: Large audio frames (Opus high bitrate)
+// - 1500 bytes: Video frames and max network MTU
+//
+// Benefits:
+// - Reduces GC pressure by reusing buffers
+// - Eliminates memory fragmentation from variable-sized allocations
+// - Provides predictable memory usage patterns
+// - Maintains high cache hit rates for common sizes
+type tieredBufferPool struct {
+	pools       [4]sync.Pool // Pools for different size tiers
+	sizes       [4]int       // Size classes: 128, 256, 512, 1500
+	sizeCount   int
+	hits        [4]int64     // Cache hits per tier
+	misses      [4]int64     // Cache misses per tier
+	allocations [4]int64     // New allocations per tier
+	mutex       sync.RWMutex // Protects statistics
+}
 
+var sampleBufPool = &tieredBufferPool{
+	sizes:     [4]int{128, 256, 512, 1500},
+	sizeCount: 4,
+}
+
+// Initialize preallocated buffers for common sizes
+func initBufferPool() {
+	// Preallocate initial buffers for each size tier (5 buffers per tier)
+	for i, size := range sampleBufPool.sizes {
+		for j := 0; j < 5; j++ {
+			buf := make([]byte, size)
+			sampleBufPool.pools[i].Put(buf)
+		}
+	}
+	log.Println("[Go/Pion] Buffer pool initialized with preallocated buffers")
+
+	// Start periodic buffer pool statistics logging
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute) // Log every 5 minutes
+		defer ticker.Stop()
+
+		for range ticker.C {
+			logBufferPoolStats()
+		}
+	}()
+}
+
+// getBufferTier returns the appropriate tier index for a given size
+func (tbp *tieredBufferPool) getBufferTier(size int) int {
+	for i, tierSize := range tbp.sizes {
+		if size <= tierSize {
+			return i
+		}
+	}
+	// If size is larger than all tiers, use the largest tier
+	return tbp.sizeCount - 1
+}
+
+// getSampleBuf returns a buffer of at least the requested size
 func getSampleBuf(n int) []byte {
-	v := sampleBufPool.Get()
+	if n <= 0 {
+		return make([]byte, 0)
+	}
+
+	// Find the appropriate size tier
+	tier := sampleBufPool.getBufferTier(n)
+	// targetSize := sampleBufPool.sizes[tier]
+
+	// Try to get a buffer from the appropriate tier
+	v := sampleBufPool.pools[tier].Get()
 	if v == nil {
+		// No buffer available in pool, allocate new one
+		sampleBufPool.mutex.Lock()
+		sampleBufPool.misses[tier]++
+		sampleBufPool.allocations[tier]++
+		sampleBufPool.mutex.Unlock()
 		return make([]byte, n)
 	}
+
 	b := v.([]byte)
 	if cap(b) < n {
-		b = make([]byte, n)
+		// Buffer too small, allocate new one
+		sampleBufPool.mutex.Lock()
+		sampleBufPool.misses[tier]++
+		sampleBufPool.allocations[tier]++
+		sampleBufPool.mutex.Unlock()
+		return make([]byte, n)
 	}
+
+	// Cache hit - buffer available and suitable
+	sampleBufPool.mutex.Lock()
+	sampleBufPool.hits[tier]++
+	sampleBufPool.mutex.Unlock()
+
+	// Return slice of requested size
 	return b[:n]
 }
 
+// putSampleBuf returns a buffer to the appropriate pool
 func putSampleBuf(b []byte) {
-	// Return full capacity slice to pool for reuse
-	sampleBufPool.Put(b[:cap(b)])
+	if b == nil || cap(b) == 0 {
+		return
+	}
+
+	capacity := cap(b)
+
+	// Find the appropriate tier for this buffer capacity
+	tier := sampleBufPool.getBufferTier(capacity)
+	targetSize := sampleBufPool.sizes[tier]
+
+	// Only pool buffers that match our tier sizes exactly
+	// This ensures consistent reuse and reduces fragmentation
+	if capacity == targetSize {
+		// Reset the buffer content and return to pool
+		// Clear the slice to prevent data leaks between uses
+		for i := range b {
+			b[i] = 0
+		}
+		sampleBufPool.pools[tier].Put(b[:capacity])
+	}
+	// If buffer doesn't match a tier size, let it be garbage collected
+}
+
+// logBufferPoolStats logs buffer pool usage statistics for monitoring
+func logBufferPoolStats() {
+	sampleBufPool.mutex.RLock()
+	defer sampleBufPool.mutex.RUnlock()
+
+	log.Printf("[Go/Pion] Buffer Pool Statistics:")
+	totalHits := int64(0)
+	totalMisses := int64(0)
+	totalAllocs := int64(0)
+
+	for i, size := range sampleBufPool.sizes {
+		hits := sampleBufPool.hits[i]
+		misses := sampleBufPool.misses[i]
+		allocs := sampleBufPool.allocations[i]
+		totalHits += hits
+		totalMisses += misses
+		totalAllocs += allocs
+
+		total := hits + misses
+		hitRate := float64(0)
+		if total > 0 {
+			hitRate = float64(hits) / float64(total) * 100
+		}
+
+		log.Printf("[Go/Pion]   Tier %d (%d bytes): %d hits, %d misses, %d allocs (%.1f%% hit rate)",
+			i, size, hits, misses, allocs, hitRate)
+	}
+
+	totalRequests := totalHits + totalMisses
+	overallHitRate := float64(0)
+	if totalRequests > 0 {
+		overallHitRate = float64(totalHits) / float64(totalRequests) * 100
+	}
+
+	log.Printf("[Go/Pion]   Overall: %d requests, %d allocations, %.1f%% hit rate",
+		totalRequests, totalAllocs, overallHitRate)
+}
+
+// testBufferPool performs a simple test of buffer pool functionality
+// This can be called during development to verify the pool is working correctly
+func testBufferPool() {
+	log.Println("[Go/Pion] Testing buffer pool functionality...")
+
+	// Test different buffer sizes
+	testSizes := []int{50, 100, 150, 200, 300, 600, 1000, 1400}
+
+	for _, size := range testSizes {
+		// Get a buffer
+		buf := getSampleBuf(size)
+
+		// Verify buffer size
+		if len(buf) < size {
+			log.Printf("[Go/Pion] ERROR: Requested size %d, got %d", size, len(buf))
+			continue
+		}
+
+		// Fill buffer with test data
+		for i := range buf {
+			buf[i] = byte(i % 256)
+		}
+
+		// Return buffer to pool
+		putSampleBuf(buf)
+
+		log.Printf("[Go/Pion] Tested buffer size %d bytes successfully", size)
+	}
+
+	// Log final statistics
+	logBufferPoolStats()
+	log.Println("[Go/Pion] Buffer pool test completed")
 }
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
+	initBufferPool()
 }
 
 // validateAudioTimestampStability checks RTP timestamp progression for debugging

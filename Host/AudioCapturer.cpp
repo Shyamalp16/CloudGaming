@@ -8,6 +8,7 @@
 #include <mmreg.h>
 #include <ks.h>
 #include <ksmedia.h>
+#include <opus/opus.h>
 
 #define REFTIMES_PER_SEC  10000000
 #define REFTIMES_PER_MILLISEC  10000
@@ -392,13 +393,14 @@ bool AudioCapturer::QueueRawFrame(std::vector<float>& samples, int64_t timestamp
 }
 
 // Queue parameter update for encoder thread
-void AudioCapturer::QueueParameterUpdate(int bitrate, int expectedLossPerc, int complexity) {
+void AudioCapturer::QueueParameterUpdate(int bitrate, int expectedLossPerc, int complexity, int fecEnabled) {
     std::lock_guard<std::mutex> lock(m_parameterMutex);
 
     OpusParameterUpdate update;
     update.bitrate = bitrate;
     update.expectedLossPerc = expectedLossPerc;
     update.complexity = complexity;
+    update.fecEnabled = fecEnabled;
 
     // Replace any existing update (only keep the latest)
     if (!m_parameterUpdateQueue.empty()) {
@@ -436,20 +438,56 @@ bool AudioCapturer::CheckForParameterUpdates() {
         }
     }
 
+    // Apply FEC enable/disable update
+    if (update.fecEnabled >= 0) {
+        if (m_opusEncoder) {
+            // Enable/disable Opus in-band FEC
+            int fecValue = update.fecEnabled ? 1 : 0;
+            int result = opus_encoder_ctl(reinterpret_cast<OpusEncoder*>(m_opusEncoder->GetEncoder()),
+                                        OPUS_SET_INBAND_FEC(fecValue));
+            if (result == OPUS_OK) {
+                std::wcout << L"[AudioEncoder] " << (fecValue ? L"Enabled" : L"Disabled")
+                          << L" Opus in-band FEC" << std::endl;
+                updated = true;
+            } else {
+                std::wcerr << L"[AudioEncoder] Failed to update FEC setting, error: " << result << std::endl;
+            }
+        }
+    }
+
     // Apply expected loss percentage update
     if (update.expectedLossPerc >= 0) {
-        // This would typically update Opus FEC settings
-        // For now, we'll just log the update
-        std::wcout << L"[AudioEncoder] Updated expected loss to " << update.expectedLossPerc << L"%" << std::endl;
-        updated = true;
+        if (m_opusEncoder) {
+            // Update expected packet loss percentage for FEC tuning
+            int clampedLoss = (std::min)(100, (std::max)(0, update.expectedLossPerc));
+            int result = opus_encoder_ctl(reinterpret_cast<OpusEncoder*>(m_opusEncoder->GetEncoder()),
+                                        OPUS_SET_PACKET_LOSS_PERC(clampedLoss));
+            if (result == OPUS_OK) {
+                std::wcout << L"[AudioEncoder] Updated expected loss to " << clampedLoss << L"%" << std::endl;
+                updated = true;
+            } else {
+                std::wcerr << L"[AudioEncoder] Failed to update expected loss, error: " << result << std::endl;
+            }
+        } else {
+            std::wcout << L"[AudioEncoder] Updated expected loss to " << update.expectedLossPerc << L"% (encoder not ready)" << std::endl;
+        }
     }
 
     // Apply complexity update
     if (update.complexity >= 0 && update.complexity <= 10) {
-        // This would update Opus encoder complexity
-        // Note: Complexity changes during encoding may cause audio artifacts
-        std::wcout << L"[AudioEncoder] Updated complexity to " << update.complexity << std::endl;
-        updated = true;
+        if (m_opusEncoder) {
+            // Update Opus encoder complexity
+            int result = opus_encoder_ctl(reinterpret_cast<OpusEncoder*>(m_opusEncoder->GetEncoder()),
+                                        OPUS_SET_COMPLEXITY(update.complexity));
+            if (result == OPUS_OK) {
+                std::wcout << L"[AudioEncoder] Updated complexity to " << update.complexity << std::endl;
+                updated = true;
+            } else {
+                std::wcerr << L"[AudioEncoder] Failed to update complexity, error: " << result << std::endl;
+            }
+        } else {
+            std::wcout << L"[AudioEncoder] Updated complexity to " << update.complexity << L" (encoder not ready)" << std::endl;
+        }
     }
 
     if (updated) {
@@ -1340,6 +1378,22 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
     auto now = std::chrono::steady_clock::now();
     auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastAudioChange).count();
 
+    // Determine if FEC should be enabled/disabled based on packet loss
+    bool shouldEnableFec = (packetLoss >= s_fecEnableThreshold);
+    bool shouldDisableFec = (packetLoss <= s_fecDisableThreshold);
+    bool fecStateChanged = false;
+
+    // FEC Control: Enable when loss is high, disable when loss is very low
+    if (shouldEnableFec && !s_fecCurrentlyEnabled) {
+        s_fecCurrentlyEnabled = true;
+        fecStateChanged = true;
+        std::wcout << L"[AudioAdapt] Enabling Opus FEC (loss: " << (packetLoss * 100.0) << L"%)" << std::endl;
+    } else if (shouldDisableFec && s_fecCurrentlyEnabled) {
+        s_fecCurrentlyEnabled = false;
+        fecStateChanged = true;
+        std::wcout << L"[AudioAdapt] Disabling Opus FEC (loss: " << (packetLoss * 100.0) << L"%)" << std::endl;
+    }
+
     // High packet loss: Decrease bitrate aggressively
     if (packetLoss >= s_highLossThreshold) {
         if (since >= s_decreaseCooldownMs) {
@@ -1351,11 +1405,10 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
             s_currentAudioBitrate.store(newBitrate);
             s_lastAudioChange = now;
 
-            // Update FEC based on loss (higher loss = more FEC)
+            // Update FEC based on loss (higher loss = more FEC) and ensure FEC is enabled
             int newLossPerc = (std::min)(20, static_cast<int>(packetLoss * 100.0));
-            // Reduce complexity under high loss to prioritize speed over quality
             int newComplexity = (packetLoss >= 0.10) ? 3 : 5; // Lower complexity for very high loss
-            UpdateOpusParameters(newBitrate, newLossPerc, newComplexity);
+            UpdateOpusParameters(newBitrate, newLossPerc, newComplexity, 1); // Force FEC on
 
             std::wcout << L"[AudioAdapt] High loss detected (" << (packetLoss * 100.0)
                       << L"%), decreased bitrate to " << newBitrate << L" bps" << std::endl;
@@ -1380,20 +1433,28 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
 
             // Reduce FEC as loss decreases
             int newLossPerc = (std::max)(1, static_cast<int>(packetLoss * 100.0));
-            // Increase complexity as loss decreases (better quality)
             int newComplexity = (packetLoss <= 0.02) ? 6 : 5; // Higher complexity for very low loss
-            UpdateOpusParameters(newBitrate, newLossPerc, newComplexity);
+
+            // Apply FEC change if state changed, otherwise keep current
+            int fecUpdate = fecStateChanged ? (s_fecCurrentlyEnabled ? 1 : 0) : -1;
+            UpdateOpusParameters(newBitrate, newLossPerc, newComplexity, fecUpdate);
 
             std::wcout << L"[AudioAdapt] Low loss detected (" << (packetLoss * 100.0)
                       << L"%), increased bitrate to " << newBitrate << L" bps" << std::endl;
         }
 
         s_cleanSamples = 0;
+    } else if (fecStateChanged) {
+        // FEC state changed but no bitrate change - still update FEC
+        int currentBitrate = s_currentAudioBitrate.load();
+        int currentLossPerc = (std::max)(1, static_cast<int>(packetLoss * 100.0));
+        int fecUpdate = s_fecCurrentlyEnabled ? 1 : 0;
+        UpdateOpusParameters(currentBitrate, currentLossPerc, -1, fecUpdate); // -1 means no complexity change
     }
 }
 
 // Static method to update Opus encoder parameters dynamically
-void AudioCapturer::UpdateOpusParameters(int bitrate, int expectedLossPerc, int complexity) {
+void AudioCapturer::UpdateOpusParameters(int bitrate, int expectedLossPerc, int complexity, int fecEnabled) {
     // Get the active AudioCapturer instance
     AudioCapturer* activeInstance = s_activeInstance;
 
@@ -1403,7 +1464,7 @@ void AudioCapturer::UpdateOpusParameters(int bitrate, int expectedLossPerc, int 
     }
 
     // Queue parameter update to the encoder thread
-    activeInstance->QueueParameterUpdate(bitrate, expectedLossPerc, complexity < 0 ? -1 : complexity);
+    activeInstance->QueueParameterUpdate(bitrate, expectedLossPerc, complexity < 0 ? -1 : complexity, fecEnabled);
 
     std::wcout << L"[AudioAdapt] Queued Opus parameter update: bitrate=" << bitrate
               << L" bps, loss=" << expectedLossPerc << L"%, complexity="
@@ -1494,9 +1555,14 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
                 s_lowLossThreshold = adaptConfig.value("lowLossThreshold", 0.01);
                 s_cleanSamplesRequired = adaptConfig.value("cleanSamplesRequired", 30);
 
+                // Read FEC control thresholds
+                s_fecEnableThreshold = adaptConfig.value("fecEnableThreshold", 0.03);
+                s_fecDisableThreshold = adaptConfig.value("fecDisableThreshold", 0.005);
+
                 std::wcout << L"[AudioAdapt] Configured: min=" << s_minAudioBitrate
                           << L" max=" << s_maxAudioBitrate << L" bps, decrease_cooldown="
-                          << s_decreaseCooldownMs << L"ms, high_loss=" << (s_highLossThreshold * 100.0) << L"%"
+                          << s_decreaseCooldownMs << L"ms, high_loss=" << (s_highLossThreshold * 100.0) << L"%, "
+                          << L"FEC_enable=" << (s_fecEnableThreshold * 100.0) << L"%, FEC_disable=" << (s_fecDisableThreshold * 100.0) << L"%"
                           << std::endl;
             } else {
                 std::wcout << L"[AudioAdapt] Bitrate adaptation disabled in config" << std::endl;

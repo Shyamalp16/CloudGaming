@@ -43,6 +43,9 @@ public:
     int frameSize() const { return m_frameSize; }
     int sampleRate() const { return m_sampleRate; }
 
+    // Get internal encoder pointer for runtime control (use with caution)
+    void* GetEncoder() const { return m_encoder; }
+
 private:
     void* m_encoder = nullptr; // OpusEncoder*
     int m_sampleRate = 48000;
