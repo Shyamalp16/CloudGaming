@@ -180,16 +180,16 @@ private:
     static constexpr size_t ENCODED_BUFFER_SIZE = 1500; // Opus max packet size
     std::vector<uint8_t> m_encodedBuffer;
 
-    // Shallow bounded queue for audio packets (1-2 frames to handle bursts)
-    static constexpr size_t MAX_QUEUE_SIZE = 2;
+    // Minimal queue for audio packets (effectively zero/one to let WebRTC handle congestion)
+    static constexpr size_t MAX_QUEUE_SIZE = 1;
     std::queue<AudioPacket> m_audioQueue;
     std::mutex m_queueMutex;
     std::condition_variable m_queueCondition;
     std::thread m_queueProcessorThread;
     std::atomic<bool> m_stopQueueProcessor;
 
-    // Dedicated encoder thread and raw frame queue
-    static constexpr size_t MAX_RAW_FRAME_QUEUE_SIZE = 4; // Allow some buffering for encoder
+    // Dedicated encoder thread and raw frame queue (minimal buffering to let WebRTC handle congestion)
+    static constexpr size_t MAX_RAW_FRAME_QUEUE_SIZE = 1; // Minimal buffering for encoder thread synchronization
     std::queue<RawAudioFrame> m_rawFrameQueue;
     std::mutex m_rawFrameMutex;
     std::condition_variable m_rawFrameCondition;
@@ -221,6 +221,10 @@ private:
     static inline double s_fecEnableThreshold = 0.03;  // 3% packet loss enables FEC
     static inline double s_fecDisableThreshold = 0.005; // 0.5% packet loss disables FEC
     static inline bool s_fecCurrentlyEnabled = false;   // Current FEC state
+
+    // Minimal buffering performance monitoring (optional)
+    static inline bool s_enableBufferMonitoring = false;  // Enable queue depth logging
+    static inline int s_bufferMonitorInterval = 1000;     // Log every N operations
 
     // Timing for 20ms frames
     std::chrono::high_resolution_clock::time_point m_startTime;

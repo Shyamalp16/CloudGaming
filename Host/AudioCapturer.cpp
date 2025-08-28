@@ -218,15 +218,16 @@ void AudioCapturer::QueueProcessorThread()
             break;
         }
 
-        // Process all queued packets
+        // Process queued packets (minimal queue depth for low latency)
         while (!m_audioQueue.empty() && !m_stopQueueProcessor) {
             AudioPacket packet = std::move(m_audioQueue.front());
             m_audioQueue.pop();
 
-            // Unlock while processing to allow new packets to be queued
+            // Unlock while processing to allow new packets to be queued immediately
             lock.unlock();
 
             // Send to WebRTC (this is the potentially blocking FFI call)
+            // With minimal buffering, this should rarely block due to WebRTC congestion control
             int result = sendAudioPacket(packet.data.data(),
                                        static_cast<int>(packet.data.size()),
                                        packet.timestampUs);
@@ -235,6 +236,12 @@ void AudioCapturer::QueueProcessorThread()
             }
 
             lock.lock();
+
+            // With minimal queue depth (1), check if we should yield to allow encoder thread
+            // This prevents the queue processor from monopolizing CPU when queue is empty
+            if (m_audioQueue.empty()) {
+                std::this_thread::yield();
+            }
         }
     }
 
@@ -362,7 +369,9 @@ void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
         std::vector<uint8_t> packetData(m_encodedBuffer.begin(),
                                        m_encodedBuffer.begin() + encodedSize);
         if (!this->QueueAudioPacket(packetData, frame.timestampUs, rtpTimestamp)) {
-            std::wcerr << L"[AudioEncoder] Failed to queue encoded packet" << std::endl;
+            std::wcerr << L"[AudioEncoder] Failed to queue encoded packet - WebRTC congestion detected" << std::endl;
+            // Don't retry immediately - let WebRTC congestion control work
+            // The encoder thread will continue processing new frames
         }
     } else {
         std::wcerr << L"[AudioEncoder] Failed to encode audio frame" << std::endl;
@@ -373,11 +382,22 @@ bool AudioCapturer::QueueRawFrame(std::vector<float>& samples, int64_t timestamp
 {
     std::lock_guard<std::mutex> lock(m_rawFrameMutex);
 
-    // If queue is full, drop the oldest frame (shallow queue policy)
+    // With minimal queue depth (1), we should rarely have queue full situations
+    // If queue is full, this indicates encoder thread congestion
     if (m_rawFrameQueue.size() >= MAX_RAW_FRAME_QUEUE_SIZE) {
-        if (!m_rawFrameQueue.empty()) {
-            m_rawFrameQueue.pop(); // Drop oldest
-            std::wcerr << L"[AudioEncoder] Dropped oldest raw frame due to full queue" << std::endl;
+        if (s_enableBufferMonitoring) {
+            std::wcerr << L"[AudioEncoder] Raw frame queue full - encoder thread congested. Size: "
+                      << m_rawFrameQueue.size() << L"/" << MAX_RAW_FRAME_QUEUE_SIZE << std::endl;
+        }
+        return false; // Signal congestion to capture thread
+    }
+
+    // Optional buffer monitoring for performance analysis
+    if (s_enableBufferMonitoring) {
+        static int operationCount = 0;
+        if (++operationCount % s_bufferMonitorInterval == 0) {
+            std::wcout << L"[AudioEncoder] Raw frame queue monitoring: current="
+                      << m_rawFrameQueue.size() << L", max=" << MAX_RAW_FRAME_QUEUE_SIZE << std::endl;
         }
     }
 
@@ -501,11 +521,24 @@ bool AudioCapturer::QueueAudioPacket(std::vector<uint8_t>& data, int64_t timesta
 {
     std::lock_guard<std::mutex> lock(m_queueMutex);
 
-    // If queue is full, drop the oldest packet (shallow queue policy)
+    // With minimal queue size (1), we should rarely have queue full situations
+    // If queue is full, this indicates WebRTC congestion - let WebRTC handle it
     if (m_audioQueue.size() >= MAX_QUEUE_SIZE) {
-        if (!m_audioQueue.empty()) {
-            m_audioQueue.pop(); // Drop oldest
-            std::wcerr << L"[AudioQueue] Dropped oldest packet due to full queue" << std::endl;
+        // Instead of dropping, signal congestion to encoder thread
+        // This allows WebRTC's congestion control to work optimally
+        if (s_enableBufferMonitoring) {
+            std::wcerr << L"[AudioQueue] Queue full - WebRTC congestion detected. Size: "
+                      << m_audioQueue.size() << L"/" << MAX_QUEUE_SIZE << std::endl;
+        }
+        return false; // Signal congestion to encoder thread
+    }
+
+    // Optional buffer monitoring for performance analysis
+    if (s_enableBufferMonitoring) {
+        static int operationCount = 0;
+        if (++operationCount % s_bufferMonitorInterval == 0) {
+            std::wcout << L"[AudioQueue] Queue depth monitoring: current="
+                      << m_audioQueue.size() << L", max=" << MAX_QUEUE_SIZE << std::endl;
         }
     }
 
@@ -1268,7 +1301,9 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
         // This prevents any encoding work from running on the capture thread
         std::vector<float> frameData(m_frameBuffer.begin(), m_frameBuffer.end());
         if (!QueueRawFrame(frameData, timestampUs)) {
-            std::wcerr << L"[AudioCapturer] Failed to queue raw audio frame" << std::endl;
+            std::wcerr << L"[AudioCapturer] Failed to queue raw audio frame - encoder congestion detected" << std::endl;
+            // Don't retry immediately - let encoder thread catch up
+            // The capture thread will continue and try again on next frame
         } else {
             // Log every 100 frames (disabled during streaming)
             // static int frameCount = 0;

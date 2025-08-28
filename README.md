@@ -1509,6 +1509,44 @@ For heavy encoder loads, you can pin the encoder thread to specific CPU cores:
 
 This prevents thread migration and ensures consistent encoder performance under load.
 
+### Minimal Audio Buffering
+
+The audio system uses minimal application-level buffering to let WebRTC's built-in congestion control and jitter buffering handle network conditions optimally:
+
+**Buffering Strategy:**
+- **Raw Frame Queue**: 1 frame maximum (synchronized capture-to-encode)
+- **Encoded Packet Queue**: 1 packet maximum (minimal transmission buffering)
+- **No Application-Level Jitter Buffer**: Relies on WebRTC's native jitter buffer
+
+**Benefits:**
+- **Reduced Fixed Latency**: Minimal buffering eliminates fixed audio delay
+- **WebRTC Congestion Control**: BWE (Bandwidth Estimation) adapts to network conditions
+- **Native Jitter Handling**: WebRTC's jitter buffer compensates for network variation
+- **Clean Audio Path**: Direct encoding-to-transmission with minimal intermediates
+
+**Congestion Handling:**
+- Queue full conditions are logged but not forced (let WebRTC handle congestion)
+- Encoder thread continues processing new frames during congestion
+- WebRTC's pacing and retransmission mechanisms work optimally
+
+**Configuration Impact:**
+The minimal buffering approach works best with:
+- WebRTC's default congestion control enabled
+- Appropriate bitrate adaptation settings
+- Clean network conditions (where WebRTC excels)
+
+**Buffer Monitoring (Optional):**
+For performance analysis and debugging, you can enable buffer depth monitoring:
+
+```json
+{
+  "enableBufferMonitoring": true,
+  "bufferMonitorInterval": 1000
+}
+```
+
+This will log queue depths and congestion events every 1000 operations, helping you verify that the minimal buffering approach is working correctly.
+
 ### Audio Bitrate Adaptation
 
 The audio system includes sophisticated bitrate adaptation that responds to real-time network conditions using RTCP feedback. This ensures optimal audio quality while maintaining stability under varying network conditions.
