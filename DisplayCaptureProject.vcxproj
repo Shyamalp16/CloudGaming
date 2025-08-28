@@ -111,6 +111,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="Host\AppInit.h" />
+    <ClInclude Include="Host\ConfigUtils.h" />
+    <ClInclude Include="Host\GraphicsAndCapture.h" />
+    <ClInclude Include="Host\Runtime.h" />
+    <ClInclude Include="Host\WindowUtils.h" />
     <ClInclude Include="Host\AudioCapturer.h" />
     <ClInclude Include="Host\CaptureHelpers.h" />
     <ClInclude Include="Host\D3DHelpers.h" />
@@ -131,6 +136,11 @@
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Host\AppInit.cpp" />
+    <ClCompile Include="Host\ConfigUtils.cpp" />
+    <ClCompile Include="Host\GraphicsAndCapture.cpp" />
+    <ClCompile Include="Host\Runtime.cpp" />
+    <ClCompile Include="Host\WindowUtils.cpp" />
     <ClCompile Include="Host\AudioCapturer.cpp" />
     <ClCompile Include="Host\CaptureHelpers.cpp" />
     <ClCompile Include="Host\D3DHelpers.cpp" />
