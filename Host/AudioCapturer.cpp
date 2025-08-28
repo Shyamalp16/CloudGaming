@@ -24,10 +24,15 @@ AudioCapturer::AudioCapturer() :
     m_pCaptureClient(nullptr),
     m_nextFrameTime(0),
     m_rtpTimestamp(0),
-    m_samplesPerFrame(960) // 20ms at 48kHz
+    m_samplesPerFrame(960), // 20ms at 48kHz (will be updated based on Opus settings)
+    m_accumulatedCount(0)   // Initialize accumulation counter
 {
     // Initialize Opus encoder with optimized settings for low-latency gaming
     m_opusEncoder = std::make_unique<OpusEncoderWrapper>();
+
+    // Pre-allocate accumulation buffer to reduce reallocations during runtime
+    // Reserve space for multiple frames to handle bursty audio data
+    m_accumulatedSamples.reserve(m_samplesPerFrame * 4); // Reserve space for 4 frames
 }
 
 AudioCapturer::~AudioCapturer()
@@ -79,6 +84,16 @@ void AudioCapturer::StopCapture()
 {
     m_stopCapture = true;
     if (m_captureThread.joinable()) { m_captureThread.join(); }
+
+    // Clear accumulation buffers to ensure clean state for next capture session
+    // This prevents any leftover data from affecting subsequent captures
+    m_accumulatedSamples.clear();
+    m_accumulatedCount = 0;
+
+    // Reset timing state
+    m_initialAudioClockTime = 0;
+    m_nextFrameTime = 0;
+    m_rtpTimestamp = 0;
 }
 
 void AudioCapturer::CaptureThread(DWORD targetProcessId)
@@ -558,23 +573,21 @@ bool AudioCapturer::ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, voi
 void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs)
 {
     if (!samples || sampleCount == 0) return;
-    
-    // Accumulate samples into frame buffer
-    static std::vector<float> accumulatedSamples;
-    static size_t accumulatedCount = 0;
-    
-    // Append new samples
-    const size_t currentSize = accumulatedSamples.size();
-    accumulatedSamples.resize(currentSize + sampleCount);
-    std::copy(samples, samples + sampleCount, accumulatedSamples.begin() + currentSize);
-    accumulatedCount += sampleCount;
-    
-    // Process complete 20ms frames (960 samples for mono at 48kHz)
-    while (accumulatedCount >= m_samplesPerFrame) {
-        // Extract one frame
-        std::copy(accumulatedSamples.begin(), accumulatedSamples.begin() + m_samplesPerFrame, m_frameBuffer.begin());
-        
-        // Encode with Opus
+
+    // Accumulate samples into per-instance buffer (thread-safe, no cross-instance contamination)
+    // Append new samples to the instance's accumulation buffer
+    const size_t currentSize = m_accumulatedSamples.size();
+    m_accumulatedSamples.resize(currentSize + sampleCount);
+    std::copy(samples, samples + sampleCount, m_accumulatedSamples.begin() + currentSize);
+    m_accumulatedCount += sampleCount;
+
+    // Process complete frames based on Opus frame size (ensures consistent latency)
+    // m_samplesPerFrame is derived from Opus settings (e.g., 480 for 10ms at 48kHz, 960 for 20ms)
+    while (m_accumulatedCount >= m_samplesPerFrame) {
+        // Extract one complete frame from the accumulated buffer
+        std::copy(m_accumulatedSamples.begin(), m_accumulatedSamples.begin() + m_samplesPerFrame, m_frameBuffer.begin());
+
+        // Encode with Opus using the extracted frame
         std::vector<uint8_t> encodedData;
         if (m_opusEncoder->encodeFrame(m_frameBuffer.data(), encodedData)) {
             // Calculate RTP timestamp using the provided timestamp (48kHz clock)
@@ -586,7 +599,7 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
                 rtpTimestamp = static_cast<uint32_t>((relativeTimeUs * 48LL) / 1000LL);
             } else {
                 // Fallback: increment RTP timestamp
-                m_rtpTimestamp += 960;
+                m_rtpTimestamp += static_cast<uint32_t>(m_samplesPerFrame);
                 rtpTimestamp = m_rtpTimestamp;
             }
 
@@ -606,10 +619,10 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
         } else {
             std::wcerr << L"[AudioCapturer] Failed to encode audio frame with Opus" << std::endl;
         }
-        
-        // Remove processed samples from accumulator
-        accumulatedSamples.erase(accumulatedSamples.begin(), accumulatedSamples.begin() + m_samplesPerFrame);
-        accumulatedCount -= m_samplesPerFrame;
+
+        // Remove processed samples from the instance's accumulator
+        m_accumulatedSamples.erase(m_accumulatedSamples.begin(), m_accumulatedSamples.begin() + m_samplesPerFrame);
+        m_accumulatedCount -= m_samplesPerFrame;
     }
 }
 
