@@ -76,18 +76,27 @@
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>_DEBUG;WEBRTC_WIN;WEBRTC_ARCH_64_BITS;WIN32_LEAN_AND_MEAN;NOMINMAX;WEBRTC_WIN;RTC_ENABLE_WIN_WGC;_ITERATOR_DEBUG_LEVEL=2;_HAS_STD_RESULT_OF=1;%(PreprocessorDefinitions);</PreprocessorDefinitions>
       <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\ffmpeg\include\;C:\ffmpeg\include\boost\x64-windows-static\include\boost;D:\vcpkg\installed\x64-windows\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">C:\ffmpeg\include\;C:\ffmpeg\include\boost\x86-windows-static\include\boost;D:\vcpkg\installed\x86-windows\include</AdditionalIncludeDirectories>
       <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">stdcpp20</LanguageStandard>
+      <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">stdcpp20</LanguageStandard>
       <RuntimeLibrary Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">MultiThreadedDebugDLL</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">MultiThreadedDebugDLL</RuntimeLibrary>
       <MultiProcessorCompilation Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</MultiProcessorCompilation>
+      <MultiProcessorCompilation Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateWindowsMetadata>false</GenerateWindowsMetadata>
       <AdditionalLibraryDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\ffmpeg\lib;C:\ffmpeg\include\boost\x64-windows\debug\lib;C:\Windows\System32;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64;D:\Codes\CloudGaming\VSS\Capture\DisplayCaptureProject\gortc_main;D:\vcpkg\installed\x64-windows\lib</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">C:\ffmpeg\lib;C:\ffmpeg\include\boost\x86-windows\debug\lib;C:\Windows\System32;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x86;D:\Codes\CloudGaming\VSS\Capture\DisplayCaptureProject\gortc_main;D:\vcpkg\installed\x86-windows\lib</AdditionalLibraryDirectories>
       <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
 ;avformat.lib
 ;avutil.lib
-;swscale.lib;boost_regex-vc143-mt-gd-x64-1_86.lib;boost_date_time-vc143-mt-gd-x64-1_86.lib;boost_system-vc143-mt-gd-x64-1_86.lib;webrtc.lib;opus.lib</AdditionalDependencies>
+;swscale.lib;boost_regex-vc143-mt-gd-x64-1_86.lib;boost_date_time-vc143-mt-gd-x64-1_86.lib;boost_system-vc143-mt-gd-x64-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
+;avformat.lib
+;avutil.lib
+;swscale.lib;boost_regex-vc143-mt-gd-x86-1_86.lib;boost_date_time-vc143-mt-gd-x86-1_86.lib;boost_system-vc143-mt-gd-x86-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
@@ -102,12 +111,26 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions);_ITERATOR_DEBUG_LEVEL=2</PreprocessorDefinitions>
       <DebugInformationFormat Condition="'$(Configuration)|$(Platform)'=='Release|x64'">EditAndContinue</DebugInformationFormat>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\ffmpeg\include\;C:\ffmpeg\include\boost\x64-windows-static\include\boost;D:\vcpkg\installed\x64-windows\include</AdditionalIncludeDirectories>
+      <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Release|x64'">stdcpp20</LanguageStandard>
+      <RuntimeLibrary Condition="'$(Configuration)|$(Platform)'=='Release|x64'">MultiThreadedDLL</RuntimeLibrary>
+      <MultiProcessorCompilation Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateWindowsMetadata>false</GenerateWindowsMetadata>
+      <AdditionalLibraryDirectories Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\ffmpeg\lib;C:\ffmpeg\include\boost\x64-windows\debug\lib;C:\Windows\System32;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64;D:\Codes\CloudGaming\VSS\Capture\DisplayCaptureProject\gortc_main;D:\vcpkg\installed\x64-windows\lib</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">C:\ffmpeg\lib;C:\ffmpeg\include\boost\x86-windows\debug\lib;C:\Windows\System32;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x86;D:\Codes\CloudGaming\VSS\Capture\DisplayCaptureProject\gortc_main;D:\vcpkg\installed\x86-windows\lib</AdditionalLibraryDirectories>
+      <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
+;avformat.lib
+;avutil.lib
+;swscale.lib;boost_regex-vc143-mt-x64-1_86.lib;boost_date_time-vc143-mt-x64-1_86.lib;boost_system-vc143-mt-x64-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
+;avformat.lib
+;avutil.lib
+;swscale.lib;boost_regex-vc143-mt-x86-1_86.lib;boost_date_time-vc143-mt-x86-1_86.lib;boost_system-vc143-mt-x86-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

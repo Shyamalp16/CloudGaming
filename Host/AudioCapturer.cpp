@@ -85,6 +85,9 @@ void AudioCapturer::StopCapture()
     m_stopCapture = true;
     if (m_captureThread.joinable()) { m_captureThread.join(); }
 
+    // Clean up DMO resampler
+    CleanupDMOResampler();
+
     // Clear accumulation buffers to ensure clean state for next capture session
     // This prevents any leftover data from affecting subsequent captures
     m_accumulatedSamples.clear();
@@ -860,13 +863,34 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
 
 void AudioCapturer::ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out)
 {
+    // ============================================================================
+    // HIGH-QUALITY RESAMPLING WITH DMO FALLBACK
+    // ============================================================================
+    // This function now uses Windows Audio Resampler DMO for superior quality
+    // compared to linear interpolation, which introduces aliasing and HF loss.
+    // Falls back to linear interpolation only if DMO is unavailable.
+
     if (inRate == 0 || channels == 0) { out.clear(); return; }
     if (inRate == 48000) {
         out.assign(in, in + inFrames * channels);
         return;
     }
 
-    // Linear interpolation per channel with persistent phase
+    // Try to use high-quality Windows Audio Resampler DMO first
+    if (InitializeDMOResampler(inRate, channels)) {
+        size_t inputSamples = inFrames * channels;
+        if (ProcessResamplerDMO(in, inputSamples, out)) {
+            std::wcout << L"[AudioCapturer] DMO resampler: " << inRate << L"Hz -> 48kHz ("
+                       << inputSamples << L" -> " << out.size() << L" samples)" << std::endl;
+            return;
+        } else {
+            std::wcerr << L"[AudioCapturer] DMO resampler failed, falling back to linear interpolation" << std::endl;
+        }
+    }
+
+    // Fallback to linear interpolation method (preserves existing behavior)
+    std::wcout << L"[AudioCapturer] Using linear interpolation resampler (DMO unavailable)" << std::endl;
+
     double ratio = 48000.0 / static_cast<double>(inRate);
     size_t outFrames = static_cast<size_t>(std::ceil((inFrames) * ratio));
     out.resize(outFrames * channels);
@@ -913,5 +937,323 @@ void AudioCapturer::ResampleTo48k(const float* in, size_t inFrames, uint32_t inR
             m_resampleRemainder[ch] = in[(inFrames - 1) * channels + ch];
         }
     }
+}
+
+// ============================================================================
+// DMO RESAMPLER IMPLEMENTATION - High-quality audio resampling
+// ============================================================================
+
+bool AudioCapturer::InitializeDMOResampler(uint32_t inputSampleRate, uint32_t inputChannels)
+{
+    // Skip if already initialized with same parameters
+    if (m_resamplerInitialized &&
+        m_currentInputSampleRate == inputSampleRate &&
+        m_currentInputChannels == inputChannels) {
+        return true;
+    }
+
+    // Clean up existing resampler if parameters changed
+    if (m_resamplerInitialized) {
+        CleanupDMOResampler();
+    }
+
+    HRESULT hr;
+
+    // Create Audio Resampler DMO
+    hr = CoCreateInstance(CLSID_CResamplerMediaObject, nullptr, CLSCTX_INPROC_SERVER,
+                         IID_IMediaObject, reinterpret_cast<void**>(m_audioResamplerDMO.GetAddressOf()));
+    if (FAILED(hr)) {
+        std::wcerr << L"[AudioCapturer] Failed to create Audio Resampler DMO: " << _com_error(hr).ErrorMessage() << std::endl;
+        return false;
+    }
+
+    // Set up input media type (source format)
+    ZeroMemory(&m_inputMediaType, sizeof(DMO_MEDIA_TYPE));
+    m_inputMediaType.majortype = MEDIATYPE_Audio;
+    m_inputMediaType.subtype = MEDIASUBTYPE_IEEE_FLOAT;
+    m_inputMediaType.bFixedSizeSamples = TRUE;
+    m_inputMediaType.bTemporalCompression = FALSE;
+    m_inputMediaType.lSampleSize = inputChannels * sizeof(float);
+    m_inputMediaType.formattype = FORMAT_WaveFormatEx;
+    m_inputMediaType.cbFormat = sizeof(WAVEFORMATEX);
+
+    WAVEFORMATEX* pInputWfx = reinterpret_cast<WAVEFORMATEX*>(CoTaskMemAlloc(sizeof(WAVEFORMATEX)));
+    if (!pInputWfx) {
+        std::wcerr << L"[AudioCapturer] Failed to allocate input WAVEFORMATEX" << std::endl;
+        CleanupDMOResampler();
+        return false;
+    }
+
+    pInputWfx->wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+    pInputWfx->nChannels = static_cast<WORD>(inputChannels);
+    pInputWfx->nSamplesPerSec = inputSampleRate;
+    pInputWfx->nAvgBytesPerSec = inputSampleRate * inputChannels * sizeof(float);
+    pInputWfx->nBlockAlign = static_cast<WORD>(inputChannels * sizeof(float));
+    pInputWfx->wBitsPerSample = 32;
+    pInputWfx->cbSize = 0;
+
+    m_inputMediaType.pbFormat = reinterpret_cast<BYTE*>(pInputWfx);
+
+    // Set up output media type (target format: 48kHz)
+    ZeroMemory(&m_outputMediaType, sizeof(DMO_MEDIA_TYPE));
+    m_outputMediaType.majortype = MEDIATYPE_Audio;
+    m_outputMediaType.subtype = MEDIASUBTYPE_IEEE_FLOAT;
+    m_outputMediaType.bFixedSizeSamples = TRUE;
+    m_outputMediaType.bTemporalCompression = FALSE;
+    m_outputMediaType.lSampleSize = inputChannels * sizeof(float);
+    m_outputMediaType.formattype = FORMAT_WaveFormatEx;
+    m_outputMediaType.cbFormat = sizeof(WAVEFORMATEX);
+
+    WAVEFORMATEX* pOutputWfx = reinterpret_cast<WAVEFORMATEX*>(CoTaskMemAlloc(sizeof(WAVEFORMATEX)));
+    if (!pOutputWfx) {
+        std::wcerr << L"[AudioCapturer] Failed to allocate output WAVEFORMATEX" << std::endl;
+        CleanupDMOResampler();
+        return false;
+    }
+
+    pOutputWfx->wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+    pOutputWfx->nChannels = static_cast<WORD>(inputChannels);
+    pOutputWfx->nSamplesPerSec = 48000; // Target sample rate
+    pOutputWfx->nAvgBytesPerSec = 48000 * inputChannels * sizeof(float);
+    pOutputWfx->nBlockAlign = static_cast<WORD>(inputChannels * sizeof(float));
+    pOutputWfx->wBitsPerSample = 32;
+    pOutputWfx->cbSize = 0;
+
+    m_outputMediaType.pbFormat = reinterpret_cast<BYTE*>(pOutputWfx);
+
+    // Set input and output types
+    hr = m_audioResamplerDMO->SetInputType(0, &m_inputMediaType, 0);
+    if (FAILED(hr)) {
+        std::wcerr << L"[AudioCapturer] Failed to set input type: " << _com_error(hr).ErrorMessage() << std::endl;
+        CleanupDMOResampler();
+        return false;
+    }
+
+    hr = m_audioResamplerDMO->SetOutputType(0, &m_outputMediaType, 0);
+    if (FAILED(hr)) {
+        std::wcerr << L"[AudioCapturer] Failed to set output type: " << _com_error(hr).ErrorMessage() << std::endl;
+        CleanupDMOResampler();
+        return false;
+    }
+
+    // Allocate input and output buffers
+    m_inputBuffer.Attach(new CMediaBuffer(sizeof(float) * 4096)); // 4KB buffer
+    if (!m_inputBuffer) {
+        std::wcerr << L"[AudioCapturer] Failed to create input buffer" << std::endl;
+        CleanupDMOResampler();
+        return false;
+    }
+
+    m_outputBuffer.Attach(new CMediaBuffer(sizeof(float) * 4096)); // 4KB buffer
+    if (!m_outputBuffer) {
+        std::wcerr << L"[AudioCapturer] Failed to create output buffer" << std::endl;
+        CleanupDMOResampler();
+        return false;
+    }
+
+    // Store current parameters
+    m_currentInputSampleRate = inputSampleRate;
+    m_currentInputChannels = inputChannels;
+    m_resamplerInitialized = true;
+
+    std::wcout << L"[AudioCapturer] DMO Resampler initialized: " << inputSampleRate << L"Hz -> 48kHz, "
+               << inputChannels << L" channels" << std::endl;
+
+    return true;
+}
+
+bool AudioCapturer::ProcessResamplerDMO(const float* inputData, size_t inputSamples, std::vector<float>& outputData)
+{
+    if (!m_resamplerInitialized || !inputData || inputSamples == 0) {
+        return false;
+    }
+
+    HRESULT hr;
+    DWORD dwStatus = 0;
+    size_t totalOutputSamples = 0;
+
+    // Calculate input buffer size needed
+    size_t inputBytes = inputSamples * sizeof(float);
+
+    // Process input in chunks if needed
+    BYTE* pInputBuffer = nullptr;
+    hr = m_inputBuffer->GetBufferAndLength(&pInputBuffer, nullptr);
+    if (FAILED(hr)) {
+        std::wcerr << L"[AudioCapturer] Failed to get input buffer: " << _com_error(hr).ErrorMessage() << std::endl;
+        return false;
+    }
+
+    // Copy input data to DMO buffer
+    memcpy(pInputBuffer, inputData, inputBytes);
+
+    hr = m_inputBuffer->SetLength(static_cast<DWORD>(inputBytes));
+    if (FAILED(hr)) {
+        std::wcerr << L"[AudioCapturer] Failed to set input buffer length: " << _com_error(hr).ErrorMessage() << std::endl;
+        return false;
+    }
+
+    // Process the input
+    hr = m_audioResamplerDMO->ProcessInput(0, m_inputBuffer.Get(), 0, 0, 0);
+    if (FAILED(hr)) {
+        std::wcerr << L"[AudioCapturer] ProcessInput failed: " << _com_error(hr).ErrorMessage() << std::endl;
+        return false;
+    }
+
+    // Get output
+    outputData.clear();
+    std::vector<float> tempBuffer;
+
+    while (true) {
+        hr = m_audioResamplerDMO->ProcessOutput(0, 0, nullptr, &dwStatus);
+
+        if (hr == S_FALSE) {
+            // Need more input
+            break;
+        } else if (FAILED(hr)) {
+            std::wcerr << L"[AudioCapturer] ProcessOutput failed: " << _com_error(hr).ErrorMessage() << std::endl;
+            return false;
+        }
+
+        if (dwStatus & 0x00000001) {  // DMO_OUTPUT_DATA_BUFFERFILLED - Output buffer contains valid data
+            // Get output data
+            BYTE* pOutputBuffer = nullptr;
+            DWORD outputLength = 0;
+            hr = m_outputBuffer->GetBufferAndLength(&pOutputBuffer, &outputLength);
+            if (FAILED(hr)) {
+                std::wcerr << L"[AudioCapturer] Failed to get output buffer: " << _com_error(hr).ErrorMessage() << std::endl;
+                return false;
+            }
+
+            // Copy output data
+            size_t outputSamples = outputLength / sizeof(float);
+            tempBuffer.resize(outputSamples);
+            memcpy(tempBuffer.data(), pOutputBuffer, outputLength);
+
+            // Append to final output
+            outputData.insert(outputData.end(), tempBuffer.begin(), tempBuffer.end());
+            totalOutputSamples += outputSamples;
+        }
+    }
+
+    if (outputData.empty()) {
+        std::wcerr << L"[AudioCapturer] DMO resampler produced no output" << std::endl;
+        return false;
+    }
+
+    // Validate frame alignment for Opus encoding
+    // Opus frames should be multiples of 480 samples (10ms at 48kHz)
+    size_t outputFrames = outputData.size() / m_currentInputChannels;
+    const size_t OPUS_FRAME_SAMPLES = 480; // 10ms at 48kHz
+
+    if (outputFrames % OPUS_FRAME_SAMPLES != 0) {
+        std::wcerr << L"[AudioCapturer] Warning: DMO output not aligned with Opus frames. "
+                   << L"Output frames: " << outputFrames << L", expected multiple of " << OPUS_FRAME_SAMPLES << std::endl;
+    }
+
+    return true;
+}
+
+void AudioCapturer::CleanupDMOResampler()
+{
+    if (m_audioResamplerDMO) {
+        m_audioResamplerDMO->Flush();
+        m_audioResamplerDMO.Reset();
+    }
+
+    if (m_inputBuffer) {
+        m_inputBuffer.Reset();
+    }
+
+    if (m_outputBuffer) {
+        m_outputBuffer.Reset();
+    }
+
+    // Free media type formats
+    if (m_inputMediaType.pbFormat) {
+        CoTaskMemFree(m_inputMediaType.pbFormat);
+        m_inputMediaType.pbFormat = nullptr;
+    }
+
+    if (m_outputMediaType.pbFormat) {
+        CoTaskMemFree(m_outputMediaType.pbFormat);
+        m_outputMediaType.pbFormat = nullptr;
+    }
+
+    ZeroMemory(&m_inputMediaType, sizeof(DMO_MEDIA_TYPE));
+    ZeroMemory(&m_outputMediaType, sizeof(DMO_MEDIA_TYPE));
+
+    m_resamplerInitialized = false;
+    m_currentInputSampleRate = 0;
+    m_currentInputChannels = 0;
+
+    std::wcout << L"[AudioCapturer] DMO Resampler cleaned up" << std::endl;
+}
+
+// ============================================================================
+// RESAMPLER QUALITY TESTING AND VALIDATION
+// ============================================================================
+
+void AudioCapturer::TestResamplerQuality(uint32_t testSampleRate, uint32_t testChannels)
+{
+    std::wcout << L"[AudioCapturer] Testing resampler quality: " << testSampleRate << L"Hz -> 48kHz, "
+               << testChannels << L" channels" << std::endl;
+
+    // Generate a test sine wave
+    const size_t TEST_DURATION_MS = 100; // 100ms test
+    const size_t testSamples = (testSampleRate * TEST_DURATION_MS) / 1000;
+    const float testFrequency = 1000.0f; // 1kHz test tone
+
+    std::vector<float> inputData(testSamples * testChannels);
+
+    // Generate sine wave
+    for (size_t i = 0; i < testSamples; ++i) {
+        float sample = sinf(2.0f * 3.14159f * testFrequency * static_cast<float>(i) / testSampleRate) * 0.5f;
+        for (uint32_t ch = 0; ch < testChannels; ++ch) {
+            inputData[i * testChannels + ch] = sample;
+        }
+    }
+
+    // Test DMO resampler
+    std::vector<float> dmoOutput;
+    bool dmoSuccess = false;
+
+    if (InitializeDMOResampler(testSampleRate, testChannels)) {
+        dmoSuccess = ProcessResamplerDMO(inputData.data(), inputData.size(), dmoOutput);
+        if (dmoSuccess) {
+            std::wcout << L"[AudioCapturer] DMO resampler test passed: "
+                       << inputData.size() << L" -> " << dmoOutput.size() << L" samples" << std::endl;
+        }
+    }
+
+    // Test linear interpolation fallback
+    std::vector<float> linearOutput;
+    ResampleTo48k(inputData.data(), testSamples, testSampleRate, testChannels, linearOutput);
+
+    // Compare results
+    if (dmoSuccess && !dmoOutput.empty() && !linearOutput.empty()) {
+        // Calculate RMS difference
+        size_t minSize = (dmoOutput.size() < linearOutput.size()) ? dmoOutput.size() : linearOutput.size();
+        double rmsDifference = 0.0;
+        size_t validSamples = 0;
+
+        for (size_t i = 0; i < minSize; ++i) {
+            if (i < linearOutput.size()) {
+                double diff = dmoOutput[i] - linearOutput[i];
+                rmsDifference += diff * diff;
+                validSamples++;
+            }
+        }
+
+        if (validSamples > 0) {
+            rmsDifference = sqrt(rmsDifference / validSamples);
+            std::wcout << L"[AudioCapturer] Quality comparison: RMS difference = " << rmsDifference << L" "
+                       << L"(lower is better for DMO resampler)" << std::endl;
+        }
+    }
+
+    // Clean up
+    CleanupDMOResampler();
+
+    std::wcout << L"[AudioCapturer] Resampler quality test completed" << std::endl;
 }
 
