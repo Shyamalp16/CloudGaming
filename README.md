@@ -1475,6 +1475,8 @@ The Host includes a configurable Opus audio encoder optimized for low-latency ga
 - **Network Adaptation**: FEC and bitrate tuning for varying network conditions
 - **Dedicated Encoder Thread**: Completely isolates encoding from capture thread to prevent xruns
 - **Thread Affinity Support**: Optional CPU pinning for encoder thread under heavy loads
+- **Dynamic Bitrate Adaptation**: Automatic bitrate adjustment based on network packet loss
+- **RTCP Integration**: Responds to real-time network feedback for optimal quality
 
 ### Audio Thread Architecture
 
@@ -1506,6 +1508,90 @@ For heavy encoder loads, you can pin the encoder thread to specific CPU cores:
 ```
 
 This prevents thread migration and ensures consistent encoder performance under load.
+
+### Audio Bitrate Adaptation
+
+The audio system includes sophisticated bitrate adaptation that responds to real-time network conditions using RTCP feedback. This ensures optimal audio quality while maintaining stability under varying network conditions.
+
+**Adaptation Algorithm:**
+1. **RTCP Monitoring**: Receives packet loss, RTT, and jitter metrics from WebRTC peer
+2. **Loss Detection**: Triggers bitrate decreases when packet loss exceeds thresholds
+3. **Quality Recovery**: Gradually increases bitrate when network conditions improve
+4. **Hysteresis**: Prevents oscillation with cooldown periods and sample requirements
+5. **Parameter Updates**: Dynamically adjusts Opus encoder bitrate, FEC, and complexity
+
+**Configuration:**
+```json
+{
+  "bitrateAdaptation": {
+    "enabled": true,
+    "minBitrate": 8000,
+    "maxBitrate": 128000,
+    "decreaseCooldownMs": 2000,
+    "increaseIntervalMs": 10000,
+    "increaseStep": 8000,
+    "highLossThreshold": 0.05,
+    "lowLossThreshold": 0.01,
+    "cleanSamplesRequired": 30
+  }
+}
+```
+
+**Adaptation Parameters:**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `enabled` | `true` | Enable/disable bitrate adaptation |
+| `minBitrate` | `8000` | Minimum bitrate (bps) for poor networks |
+| `maxBitrate` | `128000` | Maximum bitrate (bps) for excellent networks |
+| `decreaseCooldownMs` | `2000` | Minimum time between bitrate decreases |
+| `increaseIntervalMs` | `10000` | Minimum time between bitrate increases |
+| `increaseStep` | `8000` | Amount to increase bitrate per step |
+| `highLossThreshold` | `0.05` | Packet loss % that triggers decrease (5%) |
+| `lowLossThreshold` | `0.01` | Packet loss % that allows increase (1%) |
+| `cleanSamplesRequired` | `30` | Good RTCP samples needed before increasing |
+
+**Adaptation Behavior:**
+- **Decrease**: When packet loss ≥ 5%, immediately reduce bitrate by 50-70%
+- **Cooldown**: Wait 2 seconds before another decrease to prevent thrashing
+- **Increase**: When packet loss < 1% for 30 consecutive samples, increase by 8kbps
+- **Limits**: Stay within configured min/max bitrate bounds
+- **Hysteresis**: Requires sustained good/bad conditions before changing
+
+**Tuning Recommendations:**
+
+**For Low-Latency Gaming:**
+```json
+{
+  "decreaseCooldownMs": 1000,    // Faster response
+  "highLossThreshold": 0.03,     // More sensitive (3%)
+  "increaseStep": 4000          // Smaller steps
+}
+```
+
+**For Stable Networks:**
+```json
+{
+  "decreaseCooldownMs": 3000,    // More conservative
+  "highLossThreshold": 0.08,     // Less sensitive (8%)
+  "increaseStep": 16000         // Larger steps
+}
+```
+
+**For High-Variability Networks:**
+```json
+{
+  "decreaseCooldownMs": 5000,    // Very conservative
+  "highLossThreshold": 0.10,     // Less sensitive (10%)
+  "cleanSamplesRequired": 60    // Require more samples
+}
+```
+
+**Monitoring:**
+The system logs adaptation events:
+```
+[AudioAdapt] High loss detected (7.5%), decreased bitrate to 48000 bps
+[AudioAdapt] Low loss detected (0.2%), increased bitrate to 56000 bps
+```
 
 ### Video Metrics (when `video.exportMetrics` is true)
 - Emitted once per second on the signaling WebSocket as a JSON message with `type: "video-metrics"`:

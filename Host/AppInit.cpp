@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "AppInit.h"
 #include "Encoder.h"
+#include "AudioCapturer.h"
 #include "pion_webrtc.h"
 
 // PLI callback implemented in Encoder.cpp
@@ -8,7 +9,11 @@ extern "C" void OnPLI();
 
 namespace {
     void onRTCP(double packetLoss, double rtt, double jitter) {
+        // Video bitrate adaptation (existing)
         Encoder::OnRtcpFeedback(packetLoss, rtt, jitter);
+
+        // Audio bitrate adaptation (new)
+        AudioCapturer::OnRtcpFeedback(packetLoss, rtt, jitter);
     }
 }
 

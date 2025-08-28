@@ -49,7 +49,18 @@
       "frameSizeMs": 10,
       "channels": 2,
       "useThreadAffinity": false,
-      "encoderThreadAffinityMask": 0
+      "encoderThreadAffinityMask": 0,
+      "bitrateAdaptation": {
+        "enabled": true,
+        "minBitrate": 8000,
+        "maxBitrate": 128000,
+        "decreaseCooldownMs": 2000,
+        "increaseIntervalMs": 10000,
+        "increaseStep": 8000,
+        "highLossThreshold": 0.05,
+        "lowLossThreshold": 0.01,
+        "cleanSamplesRequired": 30
+      }
     },
     "input": {
       "blockWinKeys": true,

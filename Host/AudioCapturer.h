@@ -28,6 +28,13 @@ struct RawAudioFrame {
     int64_t timestampUs;
 };
 
+// Opus parameter update structure for dynamic reconfiguration
+struct OpusParameterUpdate {
+    int bitrate = 0;           // New bitrate in bps (0 = no change)
+    int expectedLossPerc = -1; // New expected loss percentage (-1 = no change)
+    int complexity = -1;       // New complexity (-1 = no change)
+};
+
 class AudioCapturer
 {
 public:
@@ -39,6 +46,12 @@ public:
 
     // Static method to configure audio settings from config.json
     static void SetAudioConfig(const nlohmann::json& config);
+
+    // RTCP feedback for audio bitrate adaptation
+    static void OnRtcpFeedback(double packetLoss, double rtt, double jitter);
+
+    // Dynamic Opus parameter updates
+    static void UpdateOpusParameters(int bitrate, int expectedLossPerc);
 
 private:
     void CaptureThread(DWORD processId);
@@ -59,6 +72,8 @@ private:
     bool QueueRawFrame(std::vector<float>& samples, int64_t timestampUs);
     void ProcessRawFrames();
     void EncodeAndQueueFrame(RawAudioFrame frame);
+    void QueueParameterUpdate(int bitrate, int expectedLossPerc, int complexity);
+    bool CheckForParameterUpdates();
 
     // Audio resampling methods
     void ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out);
@@ -177,9 +192,26 @@ private:
     std::thread m_encoderThread;
     std::atomic<bool> m_stopEncoder;
 
+    // Opus parameter update queue for dynamic reconfiguration
+    std::queue<OpusParameterUpdate> m_parameterUpdateQueue;
+    std::mutex m_parameterMutex;
+
     // Thread affinity control (optional for heavy loads)
     bool m_useThreadAffinity = false;
     DWORD m_encoderThreadAffinityMask = 0; // 0 = no affinity
+
+    // Audio bitrate adaptation state (static for all instances)
+    static inline std::atomic<int> s_currentAudioBitrate = 64000; // Start at default bitrate
+    static inline int s_minAudioBitrate = 8000;   // Minimum: 8 kbps (very low quality)
+    static inline int s_maxAudioBitrate = 128000; // Maximum: 128 kbps (high quality)
+    static inline std::chrono::steady_clock::time_point s_lastAudioChange;
+    static inline int s_decreaseCooldownMs = 2000;   // 2 seconds between decreases
+    static inline int s_increaseIntervalMs = 10000;  // 10 seconds between increases
+    static inline int s_increaseStep = 8000;         // 8 kbps increase steps
+    static inline int s_cleanSamplesRequired = 30;   // 30 good samples before increase
+    static inline int s_cleanSamples = 0;
+    static inline double s_highLossThreshold = 0.05; // 5% packet loss triggers decrease
+    static inline double s_lowLossThreshold = 0.01;  // <1% packet loss allows increase
 
     // Timing for 20ms frames
     std::chrono::high_resolution_clock::time_point m_startTime;
