@@ -675,7 +675,101 @@ extern "C" bool runKeyMappingTests();
 // - Fallback behavior
 ```
 
-### 9. Thread Safety and Shutdown Coordination
+### 9. Safe Memory Management for WebRTC Messages
+
+Advanced RAII wrapper system for preventing memory leaks in WebRTC message handling.
+
+#### RAII Wrapper for C Strings:
+```cpp
+#include "WebRTCWrapper.h"
+
+// Safe approach - no manual memory management needed
+auto mouseMsg = WebRTCWrapper::getMouseChannelMessageSafe();
+if (mouseMsg) {
+    std::string msg = mouseMsg; // Implicit conversion to string
+    processMouseInput(msg);
+    // Memory automatically freed when mouseMsg goes out of scope
+}
+
+// Old unsafe approach (DO NOT USE):
+char* unsafeMsg = getMouseChannelMessage();
+if (unsafeMsg) {
+    std::string msg(unsafeMsg);
+    processMouseInput(msg);
+    freeCString(unsafeMsg); // Must remember to call this!
+    // Memory leak if exception thrown before freeCString!
+}
+```
+
+#### Memory Safety Features:
+- **Automatic Cleanup**: RAII wrapper automatically calls `freeCString()` in destructor
+- **Exception Safety**: Memory freed even if exceptions are thrown
+- **Move Semantics**: Efficient transfer of ownership without copying
+- **Null Safety**: Handles null pointers gracefully
+- **Thread Safety**: Safe to use across thread boundaries
+
+#### Wrapper API:
+```cpp
+class WebRTCWrapper::CStringWrapper {
+public:
+    // Construction
+    explicit CStringWrapper(char* ptr = nullptr);
+
+    // Destruction - automatically frees memory
+    ~CStringWrapper();
+
+    // Move operations (no copy)
+    CStringWrapper(CStringWrapper&& other);
+    CStringWrapper& operator=(CStringWrapper&& other);
+
+    // Accessors
+    char* get() const;                    // Raw pointer access
+    bool valid() const;                   // Check if pointer is valid
+    std::string toString() const;         // Convert to std::string
+
+    // Conversions
+    operator std::string() const;         // Implicit string conversion
+    explicit operator bool() const;       // Bool conversion for null check
+};
+```
+
+#### Usage in Polling Threads:
+```cpp
+// Before: Manual memory management (error-prone)
+char* cMsg = getMouseChannelMessage();
+if (cMsg) {
+    std::string msg(cMsg);
+    freeCString(cMsg); // Must not forget this!
+    enqueueMouseMessage(msg);
+}
+
+// After: Automatic memory management (safe)
+auto msgWrapper = WebRTCWrapper::getMouseChannelMessageSafe();
+if (msgWrapper) {
+    std::string msg = msgWrapper; // Automatic conversion
+    enqueueMouseMessage(msg);
+    // Memory automatically freed
+}
+```
+
+#### Benefits:
+- **Zero Memory Leaks**: RAII ensures cleanup in all code paths
+- **Exception Safety**: No memory leaks even when exceptions occur
+- **Simplified Code**: No manual `freeCString()` calls needed
+- **Performance**: Minimal overhead compared to manual management
+- **Maintainability**: Less error-prone than manual memory management
+
+#### Migration Path:
+```cpp
+// Phase 1: Use safe wrapper for new code
+auto safeMsg = WebRTCWrapper::getMouseChannelMessageSafe();
+
+// Phase 2: Gradually migrate existing manual code
+// Replace: char* msg = getMouseChannelMessage(); freeCString(msg);
+// With:    auto msg = WebRTCWrapper::getMouseChannelMessageSafe();
+```
+
+### 11. Thread Safety and Shutdown Coordination
 
 Advanced thread safety mechanisms ensuring clean shutdown and preventing race conditions.
 
@@ -732,7 +826,7 @@ statsConfig.aggregatedLogIntervalMs = 100;         // How often to log stats (10
 // The StatsLogger automatically uses these settings
 ```
 
-### 11. Complete Configuration Example
+### 12. Complete Configuration Example
 
 Here's a complete example showing all input systems configured for optimal gaming performance:
 
@@ -796,7 +890,7 @@ MouseCoordinateTransform::updateGlobalConfig(transformConfig);
 // }
 ```
 
-### Configuration Recommendations
+### 13. Configuration Recommendations
 
 #### For Gaming:
 - **Logging**: Disable per-event logging, enable coalescing, 10Hz aggregated stats

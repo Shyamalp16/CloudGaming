@@ -31,6 +31,13 @@
  *    - INTERNAL USE ONLY: Called automatically by wrappers
  *    - EXTERNAL CALLS: Should never be made by application code
  *
+ * 4. getMouseChannelMessageSafe():
+ *    - RETURNS: RAII wrapper that automatically frees the string
+ *    - CALLER RESPONSIBILITY: None - wrapper handles all memory cleanup
+ *    - THREAD SAFETY: Safe to call from any thread
+ *    - EXCEPTIONS: None - returns empty wrapper on error
+ *    - ADVANTAGE: Prevents memory leaks in exception/error paths
+ *
  * USAGE EXAMPLE:
  * ```cpp
  * try {
@@ -44,6 +51,13 @@
  *     WebRTCWrapper::enqueueDataChannelMessage("acknowledged");
  * } catch (const std::exception& e) {
  *     LOG_ERROR("WebRTC operation failed: {}", e.what());
+ * }
+ *
+ * // Safe mouse message handling example:
+ * auto mouseMsg = WebRTCWrapper::getMouseChannelMessageSafe();
+ * if (mouseMsg) {
+ *     processMouseInput(static_cast<std::string>(mouseMsg));
+ *     // Memory automatically freed when mouseMsg goes out of scope
  * }
  * ```
  */
@@ -101,8 +115,47 @@ extern "C" {
     char* getDataChannelMessage();
     char* getMouseChannelMessage();
     void freeCString(char* p);
-}
+
+    // RAII wrapper for C strings to prevent memory leaks
+    class CStringWrapper {
+    private:
+        char* ptr_;
+
+    public:
+        explicit CStringWrapper(char* ptr = nullptr) : ptr_(ptr) {}
+        ~CStringWrapper() { if (ptr_) freeCString(ptr_); }
+
+        // Disable copy operations
+        CStringWrapper(const CStringWrapper&) = delete;
+        CStringWrapper& operator=(const CStringWrapper&) = delete;
+
+        // Enable move operations
+        CStringWrapper(CStringWrapper&& other) noexcept : ptr_(other.ptr_) {
+            other.ptr_ = nullptr;
+        }
+        CStringWrapper& operator=(CStringWrapper&& other) noexcept {
+            if (this != &other) {
+                if (ptr_) freeCString(ptr_);
+                ptr_ = other.ptr_;
+                other.ptr_ = nullptr;
+            }
+            return *this;
+        }
+
+        // Accessors
+        char* get() const { return ptr_; }
+        bool valid() const { return ptr_ != nullptr; }
+        std::string toString() const { return ptr_ ? std::string(ptr_) : std::string(); }
+
+        // Implicit conversion to string for convenience
+        operator std::string() const { return toString(); }
+        explicit operator bool() const { return valid(); }
+    };
+
+    // Safe mouse message retrieval with RAII
+    static CStringWrapper getMouseChannelMessageSafe();
 
 } // namespace WebRTCWrapper
+}
 
 #endif // WEBRTC_WRAPPER_H

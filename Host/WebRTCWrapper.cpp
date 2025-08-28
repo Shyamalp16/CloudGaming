@@ -3,6 +3,7 @@
 #include <cstring>
 #include <string>
 #include <iostream>
+#include <cassert>
 
 // Temporary simple logging to fix compilation
 #define LOG_ERROR(msg) std::cout << "[ERROR] " << msg << std::endl
@@ -89,6 +90,27 @@ std::string getMouseChannelMessageString() {
 
     LOG_TRACE("Retrieved mouse channel message: " + std::to_string(result.size()) + " characters");
     return result;
+}
+
+WebRTCWrapper::CStringWrapper WebRTCWrapper::getMouseChannelMessageSafe() {
+    return WebRTCWrapper::CStringWrapper(getMouseChannelMessage());
+}
+
+// Test function to verify RAII wrapper behavior
+void testCStringWrapper() {
+    std::cout << "[WebRTCWrapper] Testing CStringWrapper RAII behavior..." << std::endl;
+
+    // Test 1: Empty wrapper
+    {
+        WebRTCWrapper::CStringWrapper emptyWrapper;
+        assert(!emptyWrapper.valid());
+        assert(emptyWrapper.toString().empty());
+        std::cout << "[PASS] Empty wrapper test" << std::endl;
+    }
+
+    // Test 2: Wrapper with content (would require actual message)
+    // This test would be more comprehensive with a test harness
+    std::cout << "[WebRTCWrapper] CStringWrapper tests completed" << std::endl;
 }
 
 // Go-exported C functions (fallback stubs provided if not linked)

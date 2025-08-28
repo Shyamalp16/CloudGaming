@@ -154,10 +154,11 @@ static void startInputPollers() {
         std::cout << "[WebSocket] Starting mouse poller thread" << std::endl;
         while (g_input_poll_running.load() && !ShutdownManager::IsShutdown()) {
             try {
-                char* cMsg = getMouseChannelMessage();
-                if (cMsg) {
-                    std::string msg(cMsg);
-                    freeCString(cMsg);
+                // Use RAII wrapper for safe memory management
+                auto msgWrapper = WebRTCWrapper::getMouseChannelMessageSafe();
+                if (msgWrapper) {
+                    // RAII wrapper automatically frees memory when it goes out of scope
+                    std::string msg = msgWrapper; // Implicit conversion to string
                     enqueueMouseMessage(msg);
                 } else {
                     // Use condition variable for efficient blocking instead of busy-waiting
