@@ -61,4 +61,22 @@ bool OpusEncoderWrapper::encodeFrame(const float* pcmInterleaved, std::vector<ui
     return true;
 }
 
+int OpusEncoderWrapper::encodeFrameToBuffer(const float* pcmInterleaved, uint8_t* buffer, size_t bufferSize)
+{
+    if (!m_encoder || !pcmInterleaved || !buffer || bufferSize == 0) {
+        return -1;
+    }
+
+    int numSamplesPerChannel = m_frameSize;
+    int ret = opus_encode_float(reinterpret_cast<OpusEncoder*>(m_encoder),
+                                pcmInterleaved,
+                                numSamplesPerChannel,
+                                buffer,
+                                static_cast<opus_int32>(bufferSize));
+    if (ret < 0) {
+        return -1; // Error
+    }
+    return ret; // Return actual encoded size
+}
+
 

@@ -15,6 +15,9 @@
 #include <memory>
 #include <chrono>
 #include <cmath>  // For math functions like sqrt, sinf
+#include <queue>  // For std::queue
+#include <mutex>  // For std::mutex, std::lock_guard, std::unique_lock
+#include <condition_variable>  // For std::condition_variable
 #include <wrl/client.h>
 #include <nlohmann/json.hpp>  // For JSON configuration
 #include "OpusEncoder.h"
@@ -35,6 +38,15 @@ private:
     void CaptureThread(DWORD processId);
     bool ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, void* format, std::vector<float>& floatData);
     void ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs);
+
+    // Queue management methods
+    void StartQueueProcessor();
+    void StopQueueProcessor();
+    void QueueProcessorThread();
+    bool QueueAudioPacket(std::vector<uint8_t>& data, int64_t timestampUs, uint32_t rtpTimestamp);
+    void ProcessQueuedPackets();
+
+    // Audio resampling methods
     void ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out);
 
     // DMO Resampler methods for high-quality audio resampling
@@ -121,7 +133,26 @@ private:
     // Per-instance audio frame accumulation (replaces static variables)
     std::vector<float> m_accumulatedSamples;
     size_t m_accumulatedCount = 0;
-    
+
+    // Audio packet structure for queue
+    struct AudioPacket {
+        std::vector<uint8_t> data;
+        int64_t timestampUs;
+        uint32_t rtpTimestamp;
+    };
+
+    // Reusable buffer for encoded audio (avoid per-frame allocations)
+    static constexpr size_t ENCODED_BUFFER_SIZE = 1500; // Opus max packet size
+    std::vector<uint8_t> m_encodedBuffer;
+
+    // Shallow bounded queue for audio packets (1-2 frames to handle bursts)
+    static constexpr size_t MAX_QUEUE_SIZE = 2;
+    std::queue<AudioPacket> m_audioQueue;
+    std::mutex m_queueMutex;
+    std::condition_variable m_queueCondition;
+    std::thread m_queueProcessorThread;
+    std::atomic<bool> m_stopQueueProcessor;
+
     // Timing for 20ms frames
     std::chrono::high_resolution_clock::time_point m_startTime;
     int64_t m_nextFrameTime;

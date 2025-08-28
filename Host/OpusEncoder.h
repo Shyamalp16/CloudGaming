@@ -33,6 +33,12 @@ public:
     // Returns true and fills encodedData on success.
     bool encodeFrame(const float* pcmInterleaved, std::vector<uint8_t>& encodedData);
 
+    // Encode a single frame using a pre-allocated buffer (optimization for buffer reuse).
+    // pcmInterleaved size must be frameSize * channels.
+    // buffer must be large enough for the maximum encoded size.
+    // Returns the actual encoded size on success, -1 on failure.
+    int encodeFrameToBuffer(const float* pcmInterleaved, uint8_t* buffer, size_t bufferSize);
+
     int channels() const { return m_channels; }
     int frameSize() const { return m_frameSize; }
     int sampleRate() const { return m_sampleRate; }

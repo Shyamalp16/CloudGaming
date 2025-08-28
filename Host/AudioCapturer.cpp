@@ -26,7 +26,8 @@ AudioCapturer::AudioCapturer() :
     m_rtpTimestamp(0),
     m_frameSizeSamples(480), // 10ms at 48kHz (will be updated based on config)
     m_samplesPerFrame(960), // 10ms at 48kHz stereo (will be updated based on config)
-    m_accumulatedCount(0)   // Initialize accumulation counter
+    m_accumulatedCount(0),   // Initialize accumulation counter
+    m_stopQueueProcessor(false)
 {
     // Initialize Opus encoder with optimized settings for low-latency gaming
     m_opusEncoder = std::make_unique<OpusEncoderWrapper>();
@@ -42,6 +43,10 @@ AudioCapturer::AudioCapturer() :
 
     // Frame buffer for encoder input (exact size needed)
     m_frameBuffer.resize(m_samplesPerFrame); // Exact size for encoder
+
+    // Initialize reusable encoded buffer (avoid per-frame allocations)
+    m_encodedBuffer.reserve(ENCODED_BUFFER_SIZE);
+    m_encodedBuffer.resize(ENCODED_BUFFER_SIZE);
     std::fill(m_frameBuffer.begin(), m_frameBuffer.end(), 0.0f); // Initialize to silence
 }
 
@@ -99,6 +104,9 @@ bool AudioCapturer::StartCapture(DWORD processId)
                << (settings.frameSize / settings.channels) << L" per channel), "
                << settings.bitrate << L" bps" << std::endl;
     
+    // Start the queue processor thread for async audio packet processing
+    StartQueueProcessor();
+
     m_captureThread = std::thread(&AudioCapturer::CaptureThread, this, processId);
     return true;
 }
@@ -108,6 +116,9 @@ void AudioCapturer::StopCapture()
     m_stopCapture = true;
     if (m_captureThread.joinable()) { m_captureThread.join(); }
 
+    // Stop queue processor thread
+    StopQueueProcessor();
+
     // Clean up DMO resampler
     CleanupDMOResampler();
 
@@ -116,10 +127,126 @@ void AudioCapturer::StopCapture()
     m_accumulatedSamples.clear();
     m_accumulatedCount = 0;
 
+    // Clear encoded buffer
+    m_encodedBuffer.clear();
+
     // Reset timing state
     m_initialAudioClockTime = 0;
     m_nextFrameTime = 0;
     m_rtpTimestamp = 0;
+}
+
+// ============================================================================
+// QUEUE PROCESSOR IMPLEMENTATION - Async audio packet processing
+// ============================================================================
+
+void AudioCapturer::StartQueueProcessor()
+{
+    m_stopQueueProcessor = false;
+    m_queueProcessorThread = std::thread(&AudioCapturer::QueueProcessorThread, this);
+}
+
+void AudioCapturer::StopQueueProcessor()
+{
+    // Check if already stopped or never started
+    if (m_stopQueueProcessor || !m_queueProcessorThread.joinable()) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_stopQueueProcessor = true;
+        m_queueCondition.notify_all();
+    }
+
+    // Wait for the thread to finish with a timeout to prevent hanging
+    if (m_queueProcessorThread.joinable()) {
+        try {
+            m_queueProcessorThread.join();
+        } catch (const std::system_error& e) {
+            std::wcerr << L"[AudioCapturer] Error joining queue processor thread: " << e.what() << std::endl;
+        }
+    }
+}
+
+void AudioCapturer::QueueProcessorThread()
+{
+    std::wcout << L"[AudioCapturer] Queue processor thread started" << std::endl;
+
+    while (!m_stopQueueProcessor) {
+        std::unique_lock<std::mutex> lock(m_queueMutex);
+
+        // Wait for packets or shutdown signal
+        m_queueCondition.wait(lock, [this]() {
+            return !m_audioQueue.empty() || m_stopQueueProcessor;
+        });
+
+        if (m_stopQueueProcessor) {
+            // Process any remaining packets before shutdown
+            while (!m_audioQueue.empty()) {
+                AudioPacket packet = std::move(m_audioQueue.front());
+                m_audioQueue.pop();
+
+                lock.unlock();
+
+                // Send remaining packets during shutdown (don't block shutdown)
+                int result = sendAudioPacket(packet.data.data(),
+                                           static_cast<int>(packet.data.size()),
+                                           packet.timestampUs);
+                if (result != 0) {
+                    std::wcerr << L"[AudioQueue] Failed to send final audio packet during shutdown. Error: " << result << std::endl;
+                }
+
+                lock.lock();
+            }
+            break;
+        }
+
+        // Process all queued packets
+        while (!m_audioQueue.empty() && !m_stopQueueProcessor) {
+            AudioPacket packet = std::move(m_audioQueue.front());
+            m_audioQueue.pop();
+
+            // Unlock while processing to allow new packets to be queued
+            lock.unlock();
+
+            // Send to WebRTC (this is the potentially blocking FFI call)
+            int result = sendAudioPacket(packet.data.data(),
+                                       static_cast<int>(packet.data.size()),
+                                       packet.timestampUs);
+            if (result != 0) {
+                std::wcerr << L"[AudioQueue] Failed to send audio packet to WebRTC. Error: " << result << std::endl;
+            }
+
+            lock.lock();
+        }
+    }
+
+    std::wcout << L"[AudioCapturer] Queue processor thread stopped" << std::endl;
+}
+
+bool AudioCapturer::QueueAudioPacket(std::vector<uint8_t>& data, int64_t timestampUs, uint32_t rtpTimestamp)
+{
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+
+    // If queue is full, drop the oldest packet (shallow queue policy)
+    if (m_audioQueue.size() >= MAX_QUEUE_SIZE) {
+        if (!m_audioQueue.empty()) {
+            m_audioQueue.pop(); // Drop oldest
+            std::wcerr << L"[AudioQueue] Dropped oldest packet due to full queue" << std::endl;
+        }
+    }
+
+    // Create packet and add to queue
+    AudioPacket packet;
+    packet.data = std::move(data); // Move data to avoid copy
+    packet.timestampUs = timestampUs;
+    packet.rtpTimestamp = rtpTimestamp;
+
+    m_audioQueue.push(std::move(packet));
+    m_queueCondition.notify_one(); // Wake queue processor
+
+    return true;
 }
 
 void AudioCapturer::CaptureThread(DWORD targetProcessId)
@@ -865,9 +992,12 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
         // Extract one complete frame from the accumulated buffer
         std::copy(m_accumulatedSamples.begin(), m_accumulatedSamples.begin() + m_samplesPerFrame, m_frameBuffer.begin());
 
-        // Encode with Opus using the extracted frame
-        std::vector<uint8_t> encodedData;
-        if (m_opusEncoder->encodeFrame(m_frameBuffer.data(), encodedData)) {
+        // Encode with Opus using the reusable buffer (no per-frame allocations)
+        int encodedSize = m_opusEncoder->encodeFrameToBuffer(m_frameBuffer.data(),
+                                                             m_encodedBuffer.data(),
+                                                             m_encodedBuffer.size());
+
+        if (encodedSize > 0) {
             // Calculate RTP timestamp using the provided timestamp (48kHz clock)
             // Convert microseconds to RTP timestamp units (48kHz = 48000 ticks per second)
             uint32_t rtpTimestamp = 0;
@@ -881,16 +1011,16 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
                 rtpTimestamp = m_rtpTimestamp;
             }
 
-            // Send to WebRTC with the original timestamp (pts) for backward compatibility
-            // In the future, we could send RTP timestamp directly, but for now we maintain the existing interface
-            int result = sendAudioPacket(encodedData.data(), static_cast<int>(encodedData.size()), timestampUs);
-            if (result != 0) {
-                std::wcerr << L"[AudioCapturer] Failed to send audio packet to WebRTC. Error: " << result << std::endl;
+            // Queue packet for async processing (prevents capture thread blocking)
+            // The queue processor thread will handle the FFI call to sendAudioPacket
+            std::vector<uint8_t> packetData(m_encodedBuffer.begin(), m_encodedBuffer.begin() + encodedSize);
+            if (!QueueAudioPacket(packetData, timestampUs, rtpTimestamp)) {
+                std::wcerr << L"[AudioCapturer] Failed to queue audio packet" << std::endl;
             } else {
                 // Log every 100 frames (disabled during streaming)
                 // static int frameCount = 0;
                 // if (++frameCount % 100 == 0) {
-                //     std::wcout << L"[AudioCapturer] Sent Opus frame " << frameCount << L", size: " << encodedData.size()
+                //     std::wcout << L"[AudioCapturer] Queued Opus frame " << frameCount << L", size: " << encodedSize
                 //                << L" bytes, RTP timestamp: " << rtpTimestamp << L", pts: " << timestampUs << L" us" << std::endl;
                 // }
             }
