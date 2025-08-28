@@ -27,7 +27,8 @@ AudioCapturer::AudioCapturer() :
     m_frameSizeSamples(480), // 10ms at 48kHz (will be updated based on config)
     m_samplesPerFrame(960), // 10ms at 48kHz stereo (will be updated based on config)
     m_accumulatedCount(0),   // Initialize accumulation counter
-    m_stopQueueProcessor(false)
+    m_stopQueueProcessor(false),
+    m_stopEncoder(false)
 {
     // Initialize Opus encoder with optimized settings for low-latency gaming
     m_opusEncoder = std::make_unique<OpusEncoderWrapper>();
@@ -104,6 +105,9 @@ bool AudioCapturer::StartCapture(DWORD processId)
                << (settings.frameSize / settings.channels) << L" per channel), "
                << settings.bitrate << L" bps" << std::endl;
     
+    // Start the dedicated encoder thread for offloading Opus encoding from capture thread
+    StartEncoderThread();
+
     // Start the queue processor thread for async audio packet processing
     StartQueueProcessor();
 
@@ -115,6 +119,9 @@ void AudioCapturer::StopCapture()
 {
     m_stopCapture = true;
     if (m_captureThread.joinable()) { m_captureThread.join(); }
+
+    // Stop encoder thread first (process remaining frames)
+    StopEncoderThread();
 
     // Stop queue processor thread
     StopQueueProcessor();
@@ -223,6 +230,153 @@ void AudioCapturer::QueueProcessorThread()
     }
 
     std::wcout << L"[AudioCapturer] Queue processor thread stopped" << std::endl;
+}
+
+// ============================================================================
+// DEDICATED ENCODER THREAD - Moves Opus encoding off capture thread
+// ============================================================================
+
+void AudioCapturer::StartEncoderThread()
+{
+    m_stopEncoder = false;
+
+    // Read thread affinity settings from config
+    m_useThreadAffinity = s_audioConfig.useThreadAffinity;
+    m_encoderThreadAffinityMask = s_audioConfig.encoderThreadAffinityMask;
+
+    // Set thread affinity if requested (for heavy encoder loads)
+    if (m_useThreadAffinity && m_encoderThreadAffinityMask != 0) {
+        m_encoderThread = std::thread([this]() {
+            // Set thread affinity before starting work
+            if (!SetThreadAffinityMask(GetCurrentThread(), m_encoderThreadAffinityMask)) {
+                std::wcerr << L"[AudioEncoder] Failed to set thread affinity mask: "
+                          << GetLastError() << std::endl;
+            }
+            EncoderThread();
+        });
+        std::wcout << L"[AudioEncoder] Started with thread affinity mask: 0x" << std::hex
+                  << m_encoderThreadAffinityMask << std::dec << std::endl;
+    } else {
+        m_encoderThread = std::thread(&AudioCapturer::EncoderThread, this);
+        std::wcout << L"[AudioEncoder] Started without thread affinity" << std::endl;
+    }
+}
+
+void AudioCapturer::StopEncoderThread()
+{
+    if (m_stopEncoder) return;
+
+    {
+        std::lock_guard<std::mutex> lock(m_rawFrameMutex);
+        m_stopEncoder = true;
+        m_rawFrameCondition.notify_all();
+    }
+
+    if (m_encoderThread.joinable()) {
+        try {
+            m_encoderThread.join();
+        } catch (const std::system_error& e) {
+            std::wcerr << L"[AudioEncoder] Error joining encoder thread: " << e.what() << std::endl;
+        }
+    }
+}
+
+void AudioCapturer::EncoderThread()
+{
+    std::wcout << L"[AudioEncoder] Dedicated encoder thread started" << std::endl;
+
+    // Ensure encoder is initialized
+    if (!m_opusEncoder) {
+        std::wcerr << L"[AudioEncoder] Opus encoder not initialized!" << std::endl;
+        return;
+    }
+
+    while (!m_stopEncoder) {
+        std::unique_lock<std::mutex> lock(m_rawFrameMutex);
+
+        // Wait for raw frames or shutdown signal
+        m_rawFrameCondition.wait(lock, [this]() {
+            return !m_rawFrameQueue.empty() || m_stopEncoder;
+        });
+
+        if (m_stopEncoder) {
+            // Process any remaining frames before shutdown
+            while (!m_rawFrameQueue.empty()) {
+                RawAudioFrame frame = std::move(m_rawFrameQueue.front());
+                m_rawFrameQueue.pop();
+
+                lock.unlock();
+                EncodeAndQueueFrame(frame);
+                lock.lock();
+            }
+            break;
+        }
+
+        // Process all queued raw frames
+        while (!m_rawFrameQueue.empty() && !m_stopEncoder) {
+            RawAudioFrame frame = std::move(m_rawFrameQueue.front());
+            m_rawFrameQueue.pop();
+
+            // Unlock while processing to allow new frames to be queued
+            lock.unlock();
+            EncodeAndQueueFrame(std::move(frame));
+            lock.lock();
+        }
+    }
+
+    std::wcout << L"[AudioEncoder] Dedicated encoder thread stopped" << std::endl;
+}
+
+void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
+{
+    // Use reusable buffer for encoding (zero allocations)
+    int encodedSize = this->m_opusEncoder->encodeFrameToBuffer(frame.samples.data(),
+                                                              this->m_encodedBuffer.data(),
+                                                              this->m_encodedBuffer.size());
+
+    if (encodedSize > 0) {
+        // Calculate RTP timestamp
+        uint32_t rtpTimestamp = 0;
+        if (frame.timestampUs > 0 && this->m_initialAudioClockTime > 0) {
+            int64_t relativeTimeUs = frame.timestampUs - this->m_initialAudioClockTime;
+            rtpTimestamp = static_cast<uint32_t>((relativeTimeUs * 48LL) / 1000LL);
+        } else {
+            this->m_rtpTimestamp += static_cast<uint32_t>(this->m_frameSizeSamples);
+            rtpTimestamp = this->m_rtpTimestamp;
+        }
+
+        // Queue encoded packet for WebRTC transmission
+        std::vector<uint8_t> packetData(m_encodedBuffer.begin(),
+                                       m_encodedBuffer.begin() + encodedSize);
+        if (!this->QueueAudioPacket(packetData, frame.timestampUs, rtpTimestamp)) {
+            std::wcerr << L"[AudioEncoder] Failed to queue encoded packet" << std::endl;
+        }
+    } else {
+        std::wcerr << L"[AudioEncoder] Failed to encode audio frame" << std::endl;
+    }
+}
+
+bool AudioCapturer::QueueRawFrame(std::vector<float>& samples, int64_t timestampUs)
+{
+    std::lock_guard<std::mutex> lock(m_rawFrameMutex);
+
+    // If queue is full, drop the oldest frame (shallow queue policy)
+    if (m_rawFrameQueue.size() >= MAX_RAW_FRAME_QUEUE_SIZE) {
+        if (!m_rawFrameQueue.empty()) {
+            m_rawFrameQueue.pop(); // Drop oldest
+            std::wcerr << L"[AudioEncoder] Dropped oldest raw frame due to full queue" << std::endl;
+        }
+    }
+
+    // Create frame and add to queue
+    RawAudioFrame frame;
+    frame.samples = std::move(samples); // Move data to avoid copy
+    frame.timestampUs = timestampUs;
+
+    m_rawFrameQueue.push(std::move(frame));
+    m_rawFrameCondition.notify_one(); // Wake encoder thread
+
+    return true;
 }
 
 bool AudioCapturer::QueueAudioPacket(std::vector<uint8_t>& data, int64_t timestampUs, uint32_t rtpTimestamp)
@@ -992,40 +1146,18 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
         // Extract one complete frame from the accumulated buffer
         std::copy(m_accumulatedSamples.begin(), m_accumulatedSamples.begin() + m_samplesPerFrame, m_frameBuffer.begin());
 
-        // Encode with Opus using the reusable buffer (no per-frame allocations)
-        int encodedSize = m_opusEncoder->encodeFrameToBuffer(m_frameBuffer.data(),
-                                                             m_encodedBuffer.data(),
-                                                             m_encodedBuffer.size());
-
-        if (encodedSize > 0) {
-            // Calculate RTP timestamp using the provided timestamp (48kHz clock)
-            // Convert microseconds to RTP timestamp units (48kHz = 48000 ticks per second)
-            uint32_t rtpTimestamp = 0;
-            if (timestampUs > 0 && m_initialAudioClockTime > 0) {
-                // Calculate RTP timestamp relative to initial audio clock time
-                int64_t relativeTimeUs = timestampUs - m_initialAudioClockTime;
-                rtpTimestamp = static_cast<uint32_t>((relativeTimeUs * 48LL) / 1000LL);
-            } else {
-                // Fallback: increment RTP timestamp by frame size (samples per channel)
-                m_rtpTimestamp += static_cast<uint32_t>(m_frameSizeSamples);
-                rtpTimestamp = m_rtpTimestamp;
-            }
-
-            // Queue packet for async processing (prevents capture thread blocking)
-            // The queue processor thread will handle the FFI call to sendAudioPacket
-            std::vector<uint8_t> packetData(m_encodedBuffer.begin(), m_encodedBuffer.begin() + encodedSize);
-            if (!QueueAudioPacket(packetData, timestampUs, rtpTimestamp)) {
-                std::wcerr << L"[AudioCapturer] Failed to queue audio packet" << std::endl;
-            } else {
-                // Log every 100 frames (disabled during streaming)
-                // static int frameCount = 0;
-                // if (++frameCount % 100 == 0) {
-                //     std::wcout << L"[AudioCapturer] Queued Opus frame " << frameCount << L", size: " << encodedSize
-                //                << L" bytes, RTP timestamp: " << rtpTimestamp << L", pts: " << timestampUs << L" us" << std::endl;
-                // }
-            }
+        // Queue raw audio frame for dedicated encoder thread (completely offloads encoding)
+        // This prevents any encoding work from running on the capture thread
+        std::vector<float> frameData(m_frameBuffer.begin(), m_frameBuffer.end());
+        if (!QueueRawFrame(frameData, timestampUs)) {
+            std::wcerr << L"[AudioCapturer] Failed to queue raw audio frame" << std::endl;
         } else {
-            std::wcerr << L"[AudioCapturer] Failed to encode audio frame with Opus" << std::endl;
+            // Log every 100 frames (disabled during streaming)
+            // static int frameCount = 0;
+            // if (++frameCount % 100 == 0) {
+            //     std::wcout << L"[AudioCapturer] Queued raw frame " << frameCount
+            //                << L" with " << frameData.size() << L" samples, pts: " << timestampUs << L" us" << std::endl;
+            // }
         }
 
         // Remove processed samples from the instance's accumulator
@@ -1175,9 +1307,23 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
             }
         }
 
+        // Read thread affinity settings
+        if (config.contains("useThreadAffinity")) {
+            s_audioConfig.useThreadAffinity = config["useThreadAffinity"].get<bool>();
+        }
+
+        if (config.contains("encoderThreadAffinityMask")) {
+            try {
+                s_audioConfig.encoderThreadAffinityMask = static_cast<DWORD>(config["encoderThreadAffinityMask"].get<int>());
+            } catch (...) {
+                s_audioConfig.encoderThreadAffinityMask = 0;
+            }
+        }
+
         std::wcout << L"[AudioCapturer] Audio config loaded: bitrate=" << s_audioConfig.bitrate
                    << L" bps, complexity=" << s_audioConfig.complexity
                    << L", frameSize=" << s_audioConfig.frameSizeMs << L"ms, channels=" << s_audioConfig.channels
+                   << L", threadAffinity=" << (s_audioConfig.useThreadAffinity ? L"enabled" : L"disabled")
                    << std::endl;
 
     } catch (const std::exception& e) {

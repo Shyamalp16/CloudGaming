@@ -22,6 +22,12 @@
 #include <nlohmann/json.hpp>  // For JSON configuration
 #include "OpusEncoder.h"
 
+// Forward declarations and helper structs
+struct RawAudioFrame {
+    std::vector<float> samples;
+    int64_t timestampUs;
+};
+
 class AudioCapturer
 {
 public:
@@ -45,6 +51,14 @@ private:
     void QueueProcessorThread();
     bool QueueAudioPacket(std::vector<uint8_t>& data, int64_t timestampUs, uint32_t rtpTimestamp);
     void ProcessQueuedPackets();
+
+    // Dedicated encoder thread methods
+    void StartEncoderThread();
+    void StopEncoderThread();
+    void EncoderThread();
+    bool QueueRawFrame(std::vector<float>& samples, int64_t timestampUs);
+    void ProcessRawFrames();
+    void EncodeAndQueueFrame(RawAudioFrame frame);
 
     // Audio resampling methods
     void ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out);
@@ -127,6 +141,8 @@ private:
         int application = 2049;        // OPUS_APPLICATION_AUDIO
         int frameSizeMs = 10;          // Frame size in milliseconds
         int channels = 2;              // Number of audio channels
+        bool useThreadAffinity = false;     // Use thread affinity for encoder
+        DWORD encoderThreadAffinityMask = 0; // CPU affinity mask (0 = no affinity)
     };
     static AudioConfig s_audioConfig;
 
@@ -152,6 +168,18 @@ private:
     std::condition_variable m_queueCondition;
     std::thread m_queueProcessorThread;
     std::atomic<bool> m_stopQueueProcessor;
+
+    // Dedicated encoder thread and raw frame queue
+    static constexpr size_t MAX_RAW_FRAME_QUEUE_SIZE = 4; // Allow some buffering for encoder
+    std::queue<RawAudioFrame> m_rawFrameQueue;
+    std::mutex m_rawFrameMutex;
+    std::condition_variable m_rawFrameCondition;
+    std::thread m_encoderThread;
+    std::atomic<bool> m_stopEncoder;
+
+    // Thread affinity control (optional for heavy loads)
+    bool m_useThreadAffinity = false;
+    DWORD m_encoderThreadAffinityMask = 0; // 0 = no affinity
 
     // Timing for 20ms frames
     std::chrono::high_resolution_clock::time_point m_startTime;

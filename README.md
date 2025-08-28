@@ -1431,6 +1431,8 @@ The Host includes a configurable Opus audio encoder optimized for low-latency ga
 | `application` | number | 2049 | Opus application type. 2049 = OPUS_APPLICATION_AUDIO (music/gaming). |
 | `frameSizeMs` | number | 10 | Frame size in milliseconds. 10ms = lowest latency, 20ms = more robust. |
 | `channels` | number | 2 | Number of audio channels. 1 = mono, 2 = stereo. |
+| `useThreadAffinity` | boolean | false | Enable thread affinity pinning for encoder thread (for heavy loads) |
+| `encoderThreadAffinityMask` | number | 0 | CPU affinity mask for encoder thread (0 = no affinity, e.g., 0x01 = CPU 0, 0x02 = CPU 1) |
 
 **Audio Tuning Recommendations:**
 
@@ -1471,6 +1473,39 @@ The Host includes a configurable Opus audio encoder optimized for low-latency ga
 - **MMCSS Thread Priority**: Ensures audio capture thread priority
 - **Configurable Frame Size**: Balance between latency and robustness
 - **Network Adaptation**: FEC and bitrate tuning for varying network conditions
+- **Dedicated Encoder Thread**: Completely isolates encoding from capture thread to prevent xruns
+- **Thread Affinity Support**: Optional CPU pinning for encoder thread under heavy loads
+
+### Audio Thread Architecture
+
+The audio system uses a multi-threaded architecture to prevent capture thread blocking:
+
+```
+Capture Thread ──Raw Audio Frames──┐
+                                   │
+                                   ▼
+Dedicated Encoder Thread ──Encoded Packets──┐
+                                            │
+                                            ▼
+WebRTC Queue Thread ──WebRTC/Go Layer───────► Network
+```
+
+**Thread Responsibilities:**
+- **Capture Thread**: WASAPI capture, frame accumulation, queue raw frames (never blocks on encoding)
+- **Encoder Thread**: Opus encoding, RTP timestamp calculation (isolated from capture timing)
+- **Queue Thread**: WebRTC FFI calls, network transmission (handles blocking operations)
+
+**Thread Affinity (Optional):**
+For heavy encoder loads, you can pin the encoder thread to specific CPU cores:
+
+```json
+{
+  "useThreadAffinity": true,
+  "encoderThreadAffinityMask": 2  // Pin to CPU core 1 (0x02)
+}
+```
+
+This prevents thread migration and ensures consistent encoder performance under load.
 
 ### Video Metrics (when `video.exportMetrics` is true)
 - Emitted once per second on the signaling WebSocket as a JSON message with `type: "video-metrics"`:
