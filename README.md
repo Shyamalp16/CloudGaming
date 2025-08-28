@@ -1862,6 +1862,87 @@ Buffer Completion Handler ◄─┴─Return to Pool───► Safe
 
 This mechanism provides **enterprise-grade safety** for buffer pool management, preventing subtle corruption issues while maintaining optimal performance! 🛡️⚡🔄
 
+### Error Recovery and Robustness
+
+The audio capture system includes comprehensive error recovery mechanisms that automatically handle device failures and transient errors, significantly improving reliability:
+
+**Automatic Error Recovery:**
+- **Transient Error Retry**: Automatically retries operations that fail due to temporary issues
+- **Device Invalidation Handling**: Detects and recovers from `AUDCLNT_E_DEVICE_INVALIDATED` errors
+- **Device Rediscovery**: Re-enumerates audio devices to find relocated process sessions
+- **Smart Retry Limits**: Prevents infinite retry loops with configurable attempt limits
+
+**Error Classification and Handling:**
+```cpp
+// Intelligent error classification
+bool ShouldRetryError(HRESULT hr, int retryCount) {
+    switch (hr) {
+        case AUDCLNT_E_DEVICE_INVALIDATED:
+            return true; // Device invalidated - requires reinitialization
+        case AUDCLNT_E_BUFFER_ERROR:
+            return true; // Buffer operation error - might be transient
+        case E_POINTER:
+            return true; // Null pointer - transient COM issue
+        default:
+            return false; // Don't retry other errors
+    }
+}
+```
+
+**Device Reinitialization Flow:**
+```
+1. Detect AUDCLNT_E_DEVICE_INVALIDATED error
+2. Clean up existing COM objects and resources
+3. Re-enumerate audio devices
+4. Search for target process session across all devices
+5. Reinitialize audio client with discovered device
+6. Resume capture with reinitialized client
+```
+
+**Recovery Capabilities:**
+- ✅ **Device Hot-Swap**: Handles audio device disconnection/reconnection
+- ✅ **Process Session Migration**: Recovers when process moves between devices
+- ✅ **Transient COM Errors**: Automatic retry for temporary COM failures
+- ✅ **Buffer Operation Errors**: Retry logic for buffer-related issues
+- ✅ **Graceful Degradation**: Continues operation after successful recovery
+
+**Robustness Features:**
+- **Consecutive Error Tracking**: Monitors error frequency to detect persistent issues
+- **Reinitialization Limits**: Prevents excessive reinitialization attempts
+- **Resource Cleanup**: Proper cleanup of all resources before reinitialization
+- **Error Context Logging**: Detailed logging with retry counts and context
+- **Recovery Success Metrics**: Tracks successful recovery operations
+
+**Error Recovery Flow:**
+```
+Capture Error Detected
+        ↓
+   LogErrorWithContext()
+        ↓
+   ShouldRetryError()?
+        ↓
+   Yes → Increment retry count
+        ↓
+   AUDCLNT_E_DEVICE_INVALIDATED?
+        ↓
+   Yes → ReinitializeAudioClient()
+        ↓
+   Success? → Continue capture
+        ↓
+   No → Sleep and retry
+        ↓
+   Max retries exceeded? → Exit
+```
+
+**Benefits:**
+- **Zero Downtime Recovery**: Automatic recovery from device failures
+- **Improved Reliability**: Handles real-world audio device scenarios
+- **User Experience**: Seamless audio capture despite device changes
+- **Debugging Support**: Comprehensive error logging and recovery metrics
+- **Production Ready**: Enterprise-grade error handling and recovery
+
+This error recovery system ensures the audio capture pipeline remains operational even in challenging audio device environments, providing **enterprise-grade robustness** with **automatic failure recovery**! 🛠️🔄⚡🎵
+
 ### Audio-Video Synchronization
 
 The system implements comprehensive AV synchronization to prevent drift and ensure perfect lip-sync:

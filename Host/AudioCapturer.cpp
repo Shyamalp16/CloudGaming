@@ -33,7 +33,12 @@ AudioCapturer::AudioCapturer() :
     m_hCaptureEvent(nullptr),
     m_hStopEvent(nullptr),
     m_hMmcssTask(nullptr),
-    m_mmcssTaskIndex(0)
+    m_mmcssTaskIndex(0),
+    m_consecutiveErrorCount(0),
+    m_deviceReinitCount(0),
+    m_targetProcessId(0),
+    m_hnsRequestedDuration(0),
+    m_pwfxOriginal(nullptr)
 {
     // Initialize Opus encoder with optimized settings for low-latency gaming
     m_opusEncoder = std::make_unique<OpusEncoderWrapper>();
@@ -64,6 +69,10 @@ AudioCapturer::~AudioCapturer()
 bool AudioCapturer::StartCapture(DWORD processId)
 {
     m_stopCapture = false;
+
+    // Store initialization parameters for potential reinitialization
+    m_targetProcessId = processId;
+    m_hnsRequestedDuration = 20000000; // 2 seconds default (can be made configurable)
 
     // Set this as the active instance for parameter updates
     s_activeInstance = this;
@@ -1113,9 +1122,32 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         hr = m_pCaptureClient->GetNextPacketSize(&numFramesAvailable);
         if (FAILED(hr))
         {
-            std::wcerr << L"Failed to get next packet size: " << _com_error(hr).ErrorMessage() << std::endl;
+            LogErrorWithContext(hr, L"Failed to get next packet size", m_consecutiveErrorCount);
+
+            // Try to recover from the error
+            if (ShouldRetryError(hr, m_consecutiveErrorCount)) {
+                m_consecutiveErrorCount++;
+
+                if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+                    // Device was invalidated, try to reinitialize
+                    if (ReinitializeAudioClient()) {
+                        std::wcout << L"[AudioCapturer] Successfully recovered from device invalidation" << std::endl;
+                        continue; // Continue with the reinitialized client
+                    }
+                } else {
+                    // For other transient errors, just retry after a short delay
+                    Sleep(100);
+                    continue;
+                }
+            }
+
+            // If we can't recover, exit
+            std::wcerr << L"[AudioCapturer] Unable to recover from error, terminating capture" << std::endl;
             goto Exit;
         }
+
+        // Reset consecutive error count on successful operation
+        m_consecutiveErrorCount = 0;
 
         while (numFramesAvailable != 0)
         {
@@ -1131,9 +1163,32 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
             if (FAILED(hr))
             {
-                std::wcerr << L"Failed to get buffer: " << _com_error(hr).ErrorMessage() << std::endl;
+                LogErrorWithContext(hr, L"Failed to get buffer", m_consecutiveErrorCount);
+
+                // Try to recover from the error
+                if (ShouldRetryError(hr, m_consecutiveErrorCount)) {
+                    m_consecutiveErrorCount++;
+
+                    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+                        // Device was invalidated, try to reinitialize
+                        if (ReinitializeAudioClient()) {
+                            std::wcout << L"[AudioCapturer] Successfully recovered from device invalidation during GetBuffer" << std::endl;
+                            break; // Break out of the inner loop to restart the outer loop
+                        }
+                    } else {
+                        // For other transient errors, just retry after a short delay
+                        Sleep(100);
+                        continue;
+                    }
+                }
+
+                // If we can't recover, exit
+                std::wcerr << L"[AudioCapturer] Unable to recover from GetBuffer error, terminating capture" << std::endl;
                 goto Exit;
             }
+
+            // Reset consecutive error count on successful operation
+            m_consecutiveErrorCount = 0;
 
             // ============================================================================
             // ZERO-COPY AUDIO PROCESSING PIPELINE - Optimized for minimal latency
@@ -1213,16 +1268,62 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             hr = m_pCaptureClient->ReleaseBuffer(numFramesAvailable);
             if (FAILED(hr))
             {
-                std::wcerr << L"Failed to release buffer: " << _com_error(hr).ErrorMessage() << std::endl;
+                LogErrorWithContext(hr, L"Failed to release buffer", m_consecutiveErrorCount);
+
+                // Try to recover from the error
+                if (ShouldRetryError(hr, m_consecutiveErrorCount)) {
+                    m_consecutiveErrorCount++;
+
+                    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+                        // Device was invalidated, try to reinitialize
+                        if (ReinitializeAudioClient()) {
+                            std::wcout << L"[AudioCapturer] Successfully recovered from device invalidation during ReleaseBuffer" << std::endl;
+                            break; // Break out of the inner loop to restart the outer loop
+                        }
+                    } else {
+                        // For other transient errors, just retry after a short delay
+                        Sleep(100);
+                        continue;
+                    }
+                }
+
+                // If we can't recover, exit
+                std::wcerr << L"[AudioCapturer] Unable to recover from ReleaseBuffer error, terminating capture" << std::endl;
                 goto Exit;
             }
+
+            // Reset consecutive error count on successful operation
+            m_consecutiveErrorCount = 0;
 
             hr = m_pCaptureClient->GetNextPacketSize(&numFramesAvailable);
             if (FAILED(hr))
             {
-                std::wcerr << L"Failed to get next packet size after release: " << _com_error(hr).ErrorMessage() << std::endl;
+                LogErrorWithContext(hr, L"Failed to get next packet size after release", m_consecutiveErrorCount);
+
+                // Try to recover from the error
+                if (ShouldRetryError(hr, m_consecutiveErrorCount)) {
+                    m_consecutiveErrorCount++;
+
+                    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+                        // Device was invalidated, try to reinitialize
+                        if (ReinitializeAudioClient()) {
+                            std::wcout << L"[AudioCapturer] Successfully recovered from device invalidation after ReleaseBuffer" << std::endl;
+                            break; // Break out of the inner loop to restart the outer loop
+                        }
+                    } else {
+                        // For other transient errors, just retry after a short delay
+                        Sleep(100);
+                        continue;
+                    }
+                }
+
+                // If we can't recover, exit
+                std::wcerr << L"[AudioCapturer] Unable to recover from GetNextPacketSize error after release, terminating capture" << std::endl;
                 goto Exit;
             }
+
+            // Reset consecutive error count on successful operation
+            m_consecutiveErrorCount = 0;
         }
 
         // Periodic performance logging (every 5 seconds)
@@ -1500,6 +1601,255 @@ void AudioCapturer::ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFr
 
     // Move temp buffer to original buffer (efficient move operation)
     buffer = std::move(tempBuffer);
+}
+
+// ============================================================================
+// ERROR RECOVERY AND ROBUSTNESS IMPLEMENTATION
+// ============================================================================
+
+void AudioCapturer::LogErrorWithContext(HRESULT hr, const std::wstring& context, int retryCount)
+{
+    std::wstringstream ss;
+    ss << L"[AudioCapturer] " << context;
+
+    if (retryCount > 0) {
+        ss << L" (retry " << retryCount << L")";
+    }
+
+    ss << L": " << _com_error(hr).ErrorMessage()
+       << L" (HRESULT: 0x" << std::hex << hr << std::dec << L")";
+
+    std::wcerr << ss.str() << std::endl;
+}
+
+bool AudioCapturer::ShouldRetryError(HRESULT hr, int retryCount)
+{
+    // Maximum retry attempts to prevent infinite loops
+    const int MAX_RETRY_ATTEMPTS = 3;
+
+    if (retryCount >= MAX_RETRY_ATTEMPTS) {
+        return false;
+    }
+
+    // Retry for specific transient errors
+    switch (hr) {
+        case AUDCLNT_E_DEVICE_INVALIDATED:
+            // Device was invalidated - requires reinitialization
+            return true;
+
+        case AUDCLNT_E_BUFFER_ERROR:
+            // Buffer operation error - might be transient
+            return true;
+
+        case E_POINTER:
+            // Null pointer error - might be transient COM issue
+            return true;
+
+        case HRESULT_FROM_WIN32(ERROR_TIMEOUT):
+            // Timeout error - might be transient
+            return true;
+
+        default:
+            // Don't retry for other errors
+            return false;
+    }
+}
+
+bool AudioCapturer::ReinitializeAudioClient()
+{
+    std::wcout << L"[AudioCapturer] Attempting to reinitialize audio client (attempt " << m_deviceReinitCount + 1 << L")" << std::endl;
+
+    // Limit the number of reinitialization attempts
+    const int MAX_REINIT_ATTEMPTS = 3;
+    if (m_deviceReinitCount >= MAX_REINIT_ATTEMPTS) {
+        std::wcerr << L"[AudioCapturer] Maximum reinitialization attempts reached, giving up" << std::endl;
+        return false;
+    }
+
+    m_deviceReinitCount++;
+
+    // Clean up existing resources
+    if (m_pAudioClient) {
+        m_pAudioClient->Stop();
+        m_pAudioClient.Reset();
+    }
+
+    if (m_pCaptureClient) {
+        m_pCaptureClient.Reset();
+    }
+
+    // Clean up DMO resampler
+    CleanupDMOResampler();
+
+    // Close event handles
+    if (m_hCaptureEvent) {
+        CloseHandle(m_hCaptureEvent);
+        m_hCaptureEvent = nullptr;
+    }
+
+    // Wait a moment for the system to stabilize
+    Sleep(500);
+
+    HRESULT hr = S_OK;
+
+    // Try to find the device again if reference is lost
+    if (!m_pDevice) {
+        std::wcout << L"[AudioCapturer] Device reference lost, attempting to rediscover device..." << std::endl;
+
+        // Clean up existing COM objects
+        if (m_pSessionControl2) {
+            m_pSessionControl2.Reset();
+        }
+
+        // Re-enumerate devices to find the target process
+        const CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
+        const IID IID_IMMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
+
+        hr = CoCreateInstance(
+            CLSID_MMDeviceEnumerator, NULL,
+            CLSCTX_ALL, IID_IMMDeviceEnumerator,
+            reinterpret_cast<void**>(m_pEnumerator.ReleaseAndGetAddressOf()));
+
+        if (FAILED(hr)) {
+            LogErrorWithContext(hr, L"Failed to recreate device enumerator during reinitialization", 0);
+            return false;
+        }
+
+        // Enumerate render endpoints
+        IMMDeviceCollection* pCollection = NULL;
+        hr = m_pEnumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pCollection);
+        if (FAILED(hr)) {
+            LogErrorWithContext(hr, L"Failed to enumerate audio endpoints during reinitialization", 0);
+            return false;
+        }
+
+        UINT deviceCount;
+        hr = pCollection->GetCount(&deviceCount);
+        if (FAILED(hr)) {
+            LogErrorWithContext(hr, L"Failed to get device count during reinitialization", 0);
+            pCollection->Release();
+            return false;
+        }
+
+        // Look for the target process session
+        bool foundSession = false;
+        for (UINT i = 0; i < deviceCount && !foundSession; ++i) {
+            IMMDevice* pDevice = NULL;
+            hr = pCollection->Item(i, &pDevice);
+            if (FAILED(hr)) {
+                continue;
+            }
+
+            // Check if this device has our target process session
+            IAudioSessionManager2* pSessionManager = NULL;
+            hr = pDevice->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, NULL, (void**)&pSessionManager);
+            if (SUCCEEDED(hr)) {
+                IAudioSessionEnumerator* pSessionEnumerator = NULL;
+                hr = pSessionManager->GetSessionEnumerator(&pSessionEnumerator);
+                if (SUCCEEDED(hr)) {
+                    int sessionCount;
+                    hr = pSessionEnumerator->GetCount(&sessionCount);
+                    if (SUCCEEDED(hr)) {
+                        for (int j = 0; j < sessionCount && !foundSession; ++j) {
+                            IAudioSessionControl* pSessionControl = NULL;
+                            hr = pSessionEnumerator->GetSession(j, &pSessionControl);
+                            if (SUCCEEDED(hr)) {
+                                IAudioSessionControl2* pSessionControl2 = NULL;
+                                hr = pSessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&pSessionControl2);
+                                if (SUCCEEDED(hr)) {
+                                    DWORD currentProcessId = 0;
+                                    hr = pSessionControl2->GetProcessId(&currentProcessId);
+                                    if (SUCCEEDED(hr) && currentProcessId == m_targetProcessId) {
+                                        // Found our target session
+                                        std::wcout << L"[AudioCapturer] Rediscovered target process session on device " << i << std::endl;
+                                        m_pDevice = pDevice; // ComPtr takes ownership
+                                        m_pSessionControl2 = pSessionControl2; // ComPtr takes ownership
+                                        foundSession = true;
+                                    } else {
+                                        pSessionControl2->Release();
+                                    }
+                                }
+                                pSessionControl->Release();
+                            }
+                        }
+                    }
+                    pSessionEnumerator->Release();
+                }
+                pSessionManager->Release();
+            }
+
+            if (!foundSession) {
+                pDevice->Release();
+            }
+        }
+
+        pCollection->Release();
+
+        if (!foundSession) {
+            std::wcerr << L"[AudioCapturer] Could not rediscover target process session during reinitialization" << std::endl;
+            return false;
+        }
+    }
+
+    // Reinitialize the audio client
+    hr = m_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL,
+                           reinterpret_cast<void**>(m_pAudioClient.ReleaseAndGetAddressOf()));
+    if (FAILED(hr)) {
+        LogErrorWithContext(hr, L"Failed to reactivate audio client during reinitialization", 0);
+        return false;
+    }
+
+    // Get the mix format again
+    WAVEFORMATEX* pwfx = nullptr;
+    hr = m_pAudioClient->GetMixFormat(&pwfx);
+    if (FAILED(hr)) {
+        LogErrorWithContext(hr, L"Failed to get mix format during reinitialization", 0);
+        return false;
+    }
+
+    // Try to initialize with the same parameters
+    DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK;
+    hr = m_pAudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, streamFlags,
+                                  m_hnsRequestedDuration, 0, pwfx, NULL);
+    if (FAILED(hr)) {
+        LogErrorWithContext(hr, L"Failed to reinitialize audio client", 0);
+        CoTaskMemFree(pwfx);
+        return false;
+    }
+
+    // Get buffer size
+    UINT32 bufferFrameCount;
+    hr = m_pAudioClient->GetBufferSize(&bufferFrameCount);
+    if (FAILED(hr)) {
+        LogErrorWithContext(hr, L"Failed to get buffer size during reinitialization", 0);
+        CoTaskMemFree(pwfx);
+        return false;
+    }
+
+    // Get capture client
+    hr = m_pAudioClient->GetService(__uuidof(IAudioCaptureClient),
+                                  reinterpret_cast<void**>(m_pCaptureClient.ReleaseAndGetAddressOf()));
+    if (FAILED(hr)) {
+        LogErrorWithContext(hr, L"Failed to get capture client during reinitialization", 0);
+        CoTaskMemFree(pwfx);
+        return false;
+    }
+
+    // Start the audio client
+    hr = m_pAudioClient->Start();
+    if (FAILED(hr)) {
+        LogErrorWithContext(hr, L"Failed to restart audio client", 0);
+        CoTaskMemFree(pwfx);
+        return false;
+    }
+
+    CoTaskMemFree(pwfx);
+
+    // Reset error counters on successful reinitialization
+    m_consecutiveErrorCount = 0;
+
+    std::wcout << L"[AudioCapturer] Successfully reinitialized audio client" << std::endl;
+    return true;
 }
 
 void AudioCapturer::ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out)

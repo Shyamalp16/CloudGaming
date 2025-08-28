@@ -95,6 +95,11 @@ private:
     // Test and validation methods
     void TestResamplerQuality(uint32_t testSampleRate, uint32_t testChannels);
 
+    // Error recovery and robustness methods
+    bool ReinitializeAudioClient();
+    bool ShouldRetryError(HRESULT hr, int retryCount);
+    void LogErrorWithContext(HRESULT hr, const std::wstring& context, int retryCount = 0);
+
     // Simple MediaBuffer implementation for DMO
     class CMediaBuffer : public IMediaBuffer {
     public:
@@ -272,6 +277,13 @@ private:
     bool m_resamplerInitialized = false;
     uint32_t m_currentInputSampleRate = 0;
     uint32_t m_currentInputChannels = 0;
+
+    // Error recovery and robustness state
+    int m_consecutiveErrorCount = 0;
+    int m_deviceReinitCount = 0;
+    DWORD m_targetProcessId = 0;
+    REFERENCE_TIME m_hnsRequestedDuration = 0;
+    WAVEFORMATEX* m_pwfxOriginal = nullptr;
 
     // Persistent audio float buffer to avoid per-packet allocations
     std::vector<float> m_floatBuffer;
