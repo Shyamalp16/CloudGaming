@@ -327,7 +327,7 @@ namespace MouseInputHandler {
 							if (j.contains("x") && j.contains("y")) {
 								x = j["x"].get<int>();
 								y = j["y"].get<int>();
-								std::cout << "[MouseInputHandler] Parsed mouse move to: (" << x << ", " << y << ")" << std::endl;
+								std::cout << "[MouseInput] MOVE x=" << x << " y=" << y << std::endl;
 								// Update last known cursor position
 								{
 									std::lock_guard<std::mutex> lock(mouseStateMutex);
@@ -345,7 +345,8 @@ namespace MouseInputHandler {
 								x = j["x"].get<int>();
 								y = j["y"].get<int>();
 								button = j["button"].get<int>();
-								std::cout << "[MouseInputHandler] Parsed - Type: " << jsType << ", X: " << x << ", Y: " << y << ", Button: " << button << std::endl;
+								std::cout << "[MouseInput] " << (jsType == "mousedown" ? "DOWN" : "UP  ")
+										  << " btn=" << button << " x=" << x << " y=" << y << std::endl;
 
 								// Collect action parameters inside minimal lock
 								bool simulateAction = false;

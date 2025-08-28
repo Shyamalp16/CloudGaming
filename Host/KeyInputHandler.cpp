@@ -424,6 +424,9 @@ namespace KeyInputHandler {
 						std::string jsType = j["type"].get<std::string>();
 						bool isClientKeyDown = (jsType == "keydown");
 						LOG_DEBUG("Parsed - Code: " + jsCode + ", Type: " + jsType);
+						// Emit concise input log for each key event
+						std::cout << "[KeyInput] " << (isClientKeyDown ? "DOWN" : "UP  ")
+							<< " code=" << jsCode << std::endl;
 
 						WORD vkCode = MapJavaScriptCodeToVK(jsCode);
 						if (vkCode == 0) {

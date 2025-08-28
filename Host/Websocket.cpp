@@ -34,6 +34,10 @@ std::thread g_websocket_thread;
 // Legacy video sender threads removed; encoder pushes directly to Pion
 std::thread g_metrics_thread;
 static std::atomic<bool> g_metrics_export_enabled{ false };
+// Input poller threads to bridge Go data channels -> C++ input handlers
+static std::atomic<bool> g_input_poll_running{ false };
+static std::thread g_kb_poller;
+static std::thread g_mouse_poller;
 
 // Allowed key codes (must match client-side codes and KeyInputHandler mapping)
 static const std::unordered_set<std::string> kValidKeyCodes = {
@@ -114,6 +118,50 @@ void startMetricsExport(bool enable) {
     }
 }
 
+static void startInputPollers() {
+    bool expected = false;
+    if (!g_input_poll_running.compare_exchange_strong(expected, true)) return;
+    // Keyboard poller
+    g_kb_poller = std::thread([](){
+        while (g_input_poll_running.load() && !ShutdownManager::IsShutdown()) {
+            try {
+                std::string msg = WebRTCWrapper::getDataChannelMessageString();
+                if (!msg.empty()) {
+                    enqueueKeyboardMessage(msg);
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            } catch (...) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+    });
+    // Mouse poller
+    g_mouse_poller = std::thread([](){
+        while (g_input_poll_running.load() && !ShutdownManager::IsShutdown()) {
+            try {
+                char* cMsg = getMouseChannelMessage();
+                if (cMsg) {
+                    std::string msg(cMsg);
+                    freeCString(cMsg);
+                    enqueueMouseMessage(msg);
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            } catch (...) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+    });
+}
+
+static void stopInputPollers() {
+    bool expected = true;
+    if (!g_input_poll_running.compare_exchange_strong(expected, false)) return;
+    if (g_kb_poller.joinable()) g_kb_poller.join();
+    if (g_mouse_poller.joinable()) g_mouse_poller.join();
+}
+
 void stopMetricsExport() {
     g_metrics_export_enabled.store(false);
     if (g_metrics_thread.joinable()) {
@@ -152,6 +200,7 @@ void handleOffer(const std::string& offer) {
     sendAnswer(); // Trigger sending the answer
     initKeyInputHandler();
     initMouseInputHandler();
+    startInputPollers();
 }
 
 void handleRemoteIceCandidate(const json& candidateJson) {
@@ -401,6 +450,7 @@ void initWebsocket(const std::string& roomId) {
 
 void stopWebsocket() {
     stopMetricsExport();
+    stopInputPollers();
     static std::atomic<bool> stopped{ false };
     bool expected = false;
     if (!stopped.compare_exchange_strong(expected, true)) {
