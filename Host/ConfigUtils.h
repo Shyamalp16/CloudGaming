@@ -15,6 +15,9 @@ namespace ConfigUtils {
 
     // Apply capture-related settings to WGC/capture helpers
     void ApplyCaptureSettings(const nlohmann::json& config, int configuredFps);
+
+    // Apply audio-related settings to AudioCapturer
+    void ApplyAudioSettings(const nlohmann::json& config);
 }
 
 

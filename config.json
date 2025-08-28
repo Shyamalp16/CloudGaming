@@ -39,6 +39,16 @@
       "borderRequired": false,
       "minUpdateInterval100ns": 0
     },
+    "audio": {
+      "bitrate": 64000,
+      "complexity": 5,
+      "expectedLossPerc": 10,
+      "enableFec": true,
+      "enableDtx": false,
+      "application": 2049,
+      "frameSizeMs": 10,
+      "channels": 2
+    },
     "input": {
       "blockWinKeys": true,
       "blockSystemKeys": false,

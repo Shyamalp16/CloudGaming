@@ -2,6 +2,7 @@
 #include "ConfigUtils.h"
 #include "Encoder.h"
 #include "CaptureHelpers.h"
+#include "AudioCapturer.h"
 
 #include <fstream>
 
@@ -140,6 +141,28 @@ void ApplyCaptureSettings(const nlohmann::json& config, int configuredFps)
             SetSkipUnchanged(skip);
         }
     } catch (...) {}
+}
+
+void ApplyAudioSettings(const nlohmann::json& config)
+{
+    try {
+        if (!(config.contains("host") && config["host"].contains("audio"))) {
+            std::wcout << L"[ConfigUtils] No audio configuration found, using defaults" << std::endl;
+            return;
+        }
+
+        auto acfg = config["host"]["audio"];
+
+        // Apply audio settings to AudioCapturer
+        AudioCapturer::SetAudioConfig(acfg);
+
+        std::wcout << L"[ConfigUtils] Audio configuration applied successfully" << std::endl;
+
+    } catch (const std::exception& e) {
+        std::wcerr << L"[ConfigUtils] Error applying audio settings: " << e.what() << std::endl;
+    } catch (...) {
+        std::wcerr << L"[ConfigUtils] Unknown error applying audio settings" << std::endl;
+    }
 }
 
 }

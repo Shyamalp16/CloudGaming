@@ -94,6 +94,7 @@ int main()
     int cfgFps = config.contains("host") && config["host"].contains("video") ? config["host"]["video"].value("fps", 120) : 120;
     ConfigUtils::ApplyVideoSettings(config);
     ConfigUtils::ApplyCaptureSettings(config, cfgFps);
+    ConfigUtils::ApplyAudioSettings(config);
     StartCapture();
     initWebsocket(roomId);
     // Optional metrics export to signaling channel

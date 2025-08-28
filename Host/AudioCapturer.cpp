@@ -24,8 +24,8 @@ AudioCapturer::AudioCapturer() :
     m_pCaptureClient(nullptr),
     m_nextFrameTime(0),
     m_rtpTimestamp(0),
-    m_frameSizeSamples(480), // 10ms at 48kHz (will be updated based on Opus settings)
-    m_samplesPerFrame(960), // 10ms at 48kHz stereo (will be updated based on Opus settings)
+    m_frameSizeSamples(480), // 10ms at 48kHz (will be updated based on config)
+    m_samplesPerFrame(960), // 10ms at 48kHz stereo (will be updated based on config)
     m_accumulatedCount(0)   // Initialize accumulation counter
 {
     // Initialize Opus encoder with optimized settings for low-latency gaming
@@ -57,23 +57,27 @@ bool AudioCapturer::StartCapture(DWORD processId)
     // ============================================================================
     // OPUS ENCODER CONFIGURATION - Optimized for low-latency gaming
     // ============================================================================
-    // Frame Size: 10ms (480 samples at 48kHz) - Better latency than 20ms frames
-    // RTP timestamps increment by 480 per frame (not 960) for correct timing
-    // Total samples per frame = frameSize * channels = 480 * 2 = 960 samples
+    // Frame Size: Configurable (default 10ms) - Lower latency than 20ms frames
+    // RTP timestamps increment by frameSize per frame for correct timing
+    // Total samples per frame = frameSize * channels
     // ============================================================================
 
     OpusEncoderWrapper::Settings settings;
-    settings.sampleRate = 48000;        // 48 kHz
-    settings.channels = 2;              // Stereo for game/media audio
-    settings.frameSize = 480;           // 10ms frames at 48kHz (optimal for gaming)
-    settings.bitrate = 64000;           // 64 kbps for stereo
-    settings.complexity = 6;            // Balance between quality and CPU usage
-    settings.useVbr = true;             // Variable bitrate
-    settings.constrainedVbr = true;     // Constrain VBR peaks
-    settings.enableFec = true;          // Forward Error Correction for packet loss
-    settings.expectedLossPerc = 10;     // Expect 10% packet loss
-    settings.enableDtx = false;         // Disable DTX for continuous game/media audio
-    settings.application = 2049;        // OPUS_APPLICATION_AUDIO for music/gaming
+
+    // Calculate frame size in samples from milliseconds
+    int frameSizeSamples = (s_audioConfig.frameSizeMs * 48000) / 1000; // 48kHz * ms / 1000
+
+    settings.sampleRate = 48000;                    // 48 kHz (fixed for Opus compatibility)
+    settings.channels = s_audioConfig.channels;      // Configurable: 1=mono, 2=stereo
+    settings.frameSize = frameSizeSamples;           // Configurable frame size
+    settings.bitrate = s_audioConfig.bitrate;        // Configurable bitrate (64-96kbps recommended)
+    settings.complexity = s_audioConfig.complexity;  // Configurable complexity (5-6 recommended)
+    settings.useVbr = true;                         // Variable bitrate (always recommended)
+    settings.constrainedVbr = true;                 // Constrain VBR peaks (recommended)
+    settings.enableFec = s_audioConfig.enableFec;    // Configurable FEC
+    settings.expectedLossPerc = s_audioConfig.expectedLossPerc; // Configurable loss expectation
+    settings.enableDtx = s_audioConfig.enableDtx;    // Configurable DTX
+    settings.application = s_audioConfig.application; // Configurable application type
     
     if (!m_opusEncoder->initialize(settings)) {
         std::wcerr << L"[AudioCapturer] Failed to initialize Opus encoder" << std::endl;
@@ -84,14 +88,15 @@ bool AudioCapturer::StartCapture(DWORD processId)
     m_startTime = std::chrono::high_resolution_clock::now();
     m_nextFrameTime = 0;
     m_rtpTimestamp = 0;
-    m_frameSizeSamples = settings.frameSize;  // Samples per frame per channel (for RTP timestamps)
-    m_samplesPerFrame = settings.frameSize * settings.channels;  // Total samples per frame
+    m_frameSizeSamples = settings.frameSize / settings.channels;  // Samples per frame per channel (for RTP timestamps)
+    m_samplesPerFrame = settings.frameSize;  // Total samples per frame (already includes channels)
     m_frameBuffer.resize(m_samplesPerFrame);
     
-    std::wcout << L"[AudioCapturer] Initialized Opus encoder: " 
-               << settings.sampleRate << L"Hz, " 
+    std::wcout << L"[AudioCapturer] Initialized Opus encoder: "
+               << settings.sampleRate << L"Hz, "
                << settings.channels << L" channels, "
-               << settings.frameSize << L" samples/frame, "
+               << settings.frameSize << L" total samples/frame ("
+               << (settings.frameSize / settings.channels) << L" per channel), "
                << settings.bitrate << L" bps" << std::endl;
     
     m_captureThread = std::thread(&AudioCapturer::CaptureThread, this, processId);
@@ -853,9 +858,9 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
     std::copy(samples, samples + sampleCount, m_accumulatedSamples.begin() + currentSize);
     m_accumulatedCount += sampleCount;
 
-    // Process complete 10ms frames based on Opus frame size (ensures consistent latency)
-    // m_samplesPerFrame = frameSize * channels = 480 * 2 = 960 total samples (10ms frames)
-    // RTP timestamps increment by m_frameSizeSamples (480) per frame for correct timing
+    // Process complete frames based on Opus frame size (ensures consistent latency)
+    // m_samplesPerFrame = total samples per frame (includes all channels)
+    // RTP timestamps increment by samples per channel for correct timing
     while (m_accumulatedCount >= m_samplesPerFrame) {
         // Extract one complete frame from the accumulated buffer
         std::copy(m_accumulatedSamples.begin(), m_accumulatedSamples.begin() + m_samplesPerFrame, m_frameBuffer.begin());
@@ -978,6 +983,77 @@ void AudioCapturer::ResampleTo48k(const float* in, size_t inFrames, uint32_t inR
         for (uint32_t ch = 0; ch < channels; ++ch) {
             m_resampleRemainder[ch] = in[(inFrames - 1) * channels + ch];
         }
+    }
+}
+
+// Static audio configuration instance
+AudioCapturer::AudioConfig AudioCapturer::s_audioConfig;
+
+// ============================================================================
+// AUDIO CONFIGURATION - Static method for config.json integration
+// ============================================================================
+
+void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
+{
+    try {
+        // Read bitrate (64-96 kbps recommended for stereo gaming)
+        if (config.contains("bitrate")) {
+            int bitrate = config["bitrate"].get<int>();
+            s_audioConfig.bitrate = (bitrate < 32000) ? 32000 : ((bitrate > 128000) ? 128000 : bitrate);
+        }
+
+        // Read complexity (5-6 recommended for low-latency gaming)
+        if (config.contains("complexity")) {
+            int complexity = config["complexity"].get<int>();
+            s_audioConfig.complexity = (complexity < 0) ? 0 : ((complexity > 10) ? 10 : complexity);
+        }
+
+        // Read expected loss percentage (for FEC tuning)
+        if (config.contains("expectedLossPerc")) {
+            int lossPerc = config["expectedLossPerc"].get<int>();
+            s_audioConfig.expectedLossPerc = (lossPerc < 0) ? 0 : ((lossPerc > 100) ? 100 : lossPerc);
+        }
+
+        // Read FEC enable flag
+        if (config.contains("enableFec")) {
+            s_audioConfig.enableFec = config["enableFec"].get<bool>();
+        }
+
+        // Read DTX enable flag
+        if (config.contains("enableDtx")) {
+            s_audioConfig.enableDtx = config["enableDtx"].get<bool>();
+        }
+
+        // Read application type
+        if (config.contains("application")) {
+            s_audioConfig.application = config["application"].get<int>();
+        }
+
+        // Read frame size in milliseconds (keep at 10ms for low latency)
+        if (config.contains("frameSizeMs")) {
+            int frameSizeMs = config["frameSizeMs"].get<int>();
+            if (frameSizeMs == 10 || frameSizeMs == 20 || frameSizeMs == 40) {
+                s_audioConfig.frameSizeMs = frameSizeMs;
+            }
+        }
+
+        // Read number of channels
+        if (config.contains("channels")) {
+            int channels = config["channels"].get<int>();
+            if (channels == 1 || channels == 2) {
+                s_audioConfig.channels = channels;
+            }
+        }
+
+        std::wcout << L"[AudioCapturer] Audio config loaded: bitrate=" << s_audioConfig.bitrate
+                   << L" bps, complexity=" << s_audioConfig.complexity
+                   << L", frameSize=" << s_audioConfig.frameSizeMs << L"ms, channels=" << s_audioConfig.channels
+                   << std::endl;
+
+    } catch (const std::exception& e) {
+        std::wcerr << L"[AudioCapturer] Error parsing audio config: " << e.what() << std::endl;
+    } catch (...) {
+        std::wcerr << L"[AudioCapturer] Unknown error parsing audio config" << std::endl;
     }
 }
 

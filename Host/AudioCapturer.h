@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cmath>  // For math functions like sqrt, sinf
 #include <wrl/client.h>
+#include <nlohmann/json.hpp>  // For JSON configuration
 #include "OpusEncoder.h"
 
 class AudioCapturer
@@ -26,6 +27,9 @@ public:
 
     bool StartCapture(DWORD processId);
     void StopCapture();
+
+    // Static method to configure audio settings from config.json
+    static void SetAudioConfig(const nlohmann::json& config);
 
 private:
     void CaptureThread(DWORD processId);
@@ -100,6 +104,19 @@ private:
     std::vector<float> m_frameBuffer;
     size_t m_samplesPerFrame;     // Total samples per frame (frameSize * channels)
     size_t m_frameSizeSamples;    // Samples per frame per channel (for RTP timestamps)
+
+    // Audio configuration (loaded from config.json)
+    struct AudioConfig {
+        int bitrate = 64000;           // Target bitrate in bps
+        int complexity = 5;            // Encoder complexity (0-10)
+        int expectedLossPerc = 10;     // Expected packet loss percentage
+        bool enableFec = true;         // Enable forward error correction
+        bool enableDtx = false;        // Enable discontinuous transmission
+        int application = 2049;        // OPUS_APPLICATION_AUDIO
+        int frameSizeMs = 10;          // Frame size in milliseconds
+        int channels = 2;              // Number of audio channels
+    };
+    static AudioConfig s_audioConfig;
 
     // Per-instance audio frame accumulation (replaces static variables)
     std::vector<float> m_accumulatedSamples;
