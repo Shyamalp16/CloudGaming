@@ -114,6 +114,11 @@ var (
 	connectionState      webrtc.PeerConnectionState
 	videoPayloadType     uint8 = 96
 	audioPayloadType     uint8 = 111
+
+	// Audio E2E latency measurement
+	audioPingCounter    uint64
+	audioPingTimestamps map[uint64]int64 // audioPingID -> hostSendTime
+	audioPingMutex      sync.Mutex
 	// Buffer remote ICE candidates received before remote SDP is set
 	pendingRemoteCandidates []webrtc.ICECandidateInit
 	// Cache latest RTT (ms) from ping/pong to combine with RTCP loss/jitter
@@ -487,6 +492,37 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	packetRTPTimestamp := currentAudioTS
 	packetSequence := currentAudioSeq
 
+	// Check if we should insert an audio ping marker (every 100 packets)
+	isAudioPing := (currentAudioSeq % 100) == 0
+	var audioPingID uint64
+
+	if isAudioPing {
+		audioPingMutex.Lock()
+		audioPingCounter++
+		audioPingID = audioPingCounter
+		audioPingTimestamps[audioPingID] = time.Now().UnixNano()
+		audioPingMutex.Unlock()
+
+		// Send audio ping via data channel
+		if latencyChannel != nil && latencyChannel.ReadyState() == webrtc.DataChannelStateOpen {
+			hostSendTime := time.Now().UnixNano()
+			audioPingMutex.Lock()
+			audioPingTimestamps[audioPingID] = hostSendTime
+			audioPingMutex.Unlock()
+
+			pingMessage := map[string]interface{}{
+				"type":           "audio_ping",
+				"ping_id":        audioPingID,
+				"host_send_time": fmt.Sprintf("%d", hostSendTime),
+				"sequence":       packetSequence,
+				"timestamp":      packetRTPTimestamp,
+			}
+			if pingJSON, err := json.Marshal(pingMessage); err == nil {
+				_ = latencyChannel.SendText(string(pingJSON))
+			}
+		}
+	}
+
 	// Increment sequence number for next packet
 	currentAudioSeq++
 
@@ -711,7 +747,9 @@ func createPeerConnectionGo() C.int {
 		mouseQueue = []string{}
 		lastAnswerSDP = ""
 		pendingRemoteCandidates = nil
-		pingTimestamps = make(map[uint64]int64) // Initialize/clear the map
+		pingTimestamps = make(map[uint64]int64)      // Initialize/clear the map
+		audioPingTimestamps = make(map[uint64]int64) // Initialize/clear audio ping map
+		audioPingCounter = 0                         // Reset audio ping counter
 		// Reset audio RTP state for new connection
 		audioMutex.Lock()
 		currentAudioSeq = 0
@@ -728,6 +766,8 @@ func createPeerConnectionGo() C.int {
 	} else {
 		// This is the first run, initialize the map.
 		pingTimestamps = make(map[uint64]int64)
+		audioPingTimestamps = make(map[uint64]int64) // Initialize audio ping map
+		audioPingCounter = 0                         // Initialize audio ping counter
 		// Initialize audio RTP state for first connection
 		audioMutex.Lock()
 		currentAudioSeq = 0
@@ -1201,6 +1241,44 @@ func createPeerConnectionGo() C.int {
 									}
 								} else {
 									log.Printf("[Go/Pion] [PONG] Invalid 'host_send_time' in pong message: %v", messageData["host_send_time"])
+								}
+							} else if msgType == "audio_ping_pong" {
+								if pingIDFloat, ok := messageData["ping_id"].(float64); ok {
+									pingID := uint64(pingIDFloat)
+									if hostSendTimeString, ok := messageData["host_send_time"].(string); ok {
+										hostSendTime, err := strconv.ParseInt(hostSendTimeString, 10, 64)
+										if err != nil {
+											log.Printf("[Go/Pion] Error parsing host_send_time from audio pong: %v", err)
+											return
+										}
+
+										audioPingMutex.Lock()
+										originalHostSendTime, found := audioPingTimestamps[pingID]
+										delete(audioPingTimestamps, pingID) // Clean up the map
+										audioPingMutex.Unlock()
+
+										if found {
+											// Verify the timestamp hasn't been tampered with
+											if hostSendTime != originalHostSendTime {
+												log.Printf("[Go/Pion] [AUDIO PONG] Timestamp mismatch for ping %d. Original: %d, Received: %d", pingID, originalHostSendTime, hostSendTime)
+												return
+											}
+											hostReceiveTime := time.Now().UnixNano()
+											rttNano := hostReceiveTime - hostSendTime
+											rttMilli := float64(rttNano) / float64(time.Millisecond)
+
+											log.Printf("[Go/Pion] [AUDIO PONG] Ping %d E2E latency: %.2f ms", pingID, rttMilli)
+
+											// Could cache audio latency for monitoring/combining with other metrics
+											// For now, just log the measurement
+										} else {
+											log.Printf("[Go/Pion] [AUDIO PONG] Ping ID %d not found in timestamps map", pingID)
+										}
+									} else {
+										log.Printf("[Go/Pion] [AUDIO PONG] Invalid 'host_send_time' in pong message: %v", messageData["host_send_time"])
+									}
+								} else {
+									log.Printf("[Go/Pion] [AUDIO PONG] Invalid 'ping_id' in pong message: %v", messageData["ping_id"])
 								}
 							} else {
 								log.Printf("[Go/Pion] [PONG] Invalid 'frame_id' in pong message: %v", messageData["frame_id"])

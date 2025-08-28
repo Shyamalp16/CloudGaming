@@ -254,6 +254,7 @@ private:
 
     // Event-driven capture
     HANDLE m_hCaptureEvent = nullptr;
+    HANDLE m_hStopEvent = nullptr;    // Stop event for clean thread shutdown
 
     // MMCSS (Multimedia Class Scheduler Service) for thread prioritization
     HANDLE m_hMmcssTask = nullptr;

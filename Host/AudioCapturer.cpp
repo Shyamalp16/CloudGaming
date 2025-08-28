@@ -29,7 +29,11 @@ AudioCapturer::AudioCapturer() :
     m_samplesPerFrame(960), // 10ms at 48kHz stereo (will be updated based on config)
     m_accumulatedCount(0),   // Initialize accumulation counter
     m_stopQueueProcessor(false),
-    m_stopEncoder(false)
+    m_stopEncoder(false),
+    m_hCaptureEvent(nullptr),
+    m_hStopEvent(nullptr),
+    m_hMmcssTask(nullptr),
+    m_mmcssTaskIndex(0)
 {
     // Initialize Opus encoder with optimized settings for low-latency gaming
     m_opusEncoder = std::make_unique<OpusEncoderWrapper>();
@@ -125,6 +129,12 @@ bool AudioCapturer::StartCapture(DWORD processId)
 void AudioCapturer::StopCapture()
 {
     m_stopCapture = true;
+
+    // Signal the stop event to wake up the capture thread immediately
+    if (m_hStopEvent) {
+        SetEvent(m_hStopEvent);
+    }
+
     if (m_captureThread.joinable()) { m_captureThread.join(); }
 
     // Stop encoder thread first (process remaining frames)
@@ -944,13 +954,21 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
     std::wcout << L"[AudioCapturer] Starting audio capture and Opus encoding..." << std::endl;
 
-    // Set up event handle for low-latency event-driven capture
+    // Set up event handles for low-latency event-driven capture and stop signaling
     if (m_pAudioClient) {
-        // Create event handle if not already created
+        // Create capture event handle if not already created
         if (!m_hCaptureEvent) {
             m_hCaptureEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
             if (!m_hCaptureEvent) {
                 std::wcerr << L"[AudioCapturer] Failed to create capture event handle: " << GetLastError() << std::endl;
+            }
+        }
+
+        // Create stop event handle for clean thread shutdown
+        if (!m_hStopEvent) {
+            m_hStopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr); // Manual reset event
+            if (!m_hStopEvent) {
+                std::wcerr << L"[AudioCapturer] Failed to create stop event handle: " << GetLastError() << std::endl;
             }
         }
 
@@ -1024,24 +1042,38 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     {
         captureCycles++;
 
-        if (eventMode && m_hCaptureEvent) {
-            // Use short timeout for low-latency responsiveness
-            // 5ms timeout allows quick response to stop signals while maintaining low latency
-            DWORD wait = WaitForSingleObject(m_hCaptureEvent, 5);
-            if (wait == WAIT_TIMEOUT) {
-                // Timeout - continue polling for stop signal
-                timeoutCount++;
+        if (eventMode && m_hCaptureEvent && m_hStopEvent) {
+            // Use WaitForMultipleObjects for clean stop signaling
+            // Wait on both capture event (data available) and stop event (shutdown requested)
+            HANDLE handles[2] = { m_hCaptureEvent, m_hStopEvent };
+            DWORD wait = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+
+            if (wait == WAIT_OBJECT_0) {
+                // Capture event signaled - data available, proceed with capture
+            } else if (wait == WAIT_OBJECT_0 + 1) {
+                // Stop event signaled - clean shutdown requested
+                std::wcout << L"[AudioCapturer] Stop event signaled, initiating clean shutdown..." << std::endl;
+                break; // Exit the capture loop
+            } else if (wait == WAIT_TIMEOUT) {
+                // This shouldn't happen with INFINITE timeout, but handle it
+                std::wcerr << L"[AudioCapturer] WaitForMultipleObjects timeout (unexpected)" << std::endl;
                 continue;
-            } else if (wait == WAIT_OBJECT_0) {
-                // Event signaled - data available, proceed with capture
             } else {
                 // Wait failed - log error and continue
-                std::wcerr << L"[AudioCapturer] WaitForSingleObject failed: " << GetLastError() << std::endl;
+                std::wcerr << L"[AudioCapturer] WaitForMultipleObjects failed: " << GetLastError() << std::endl;
                 continue;
             }
         } else {
-            // Polling mode: sleep for calculated interval
-            Sleep(sleepMs);
+            // Fallback polling mode with stop signal check
+            // Use shorter sleep intervals to remain responsive to stop signals
+            for (DWORD slept = 0; slept < sleepMs && !m_stopCapture; slept += 1) {
+                Sleep(1); // Sleep in 1ms increments to check stop flag frequently
+            }
+
+            if (m_stopCapture) {
+                std::wcout << L"[AudioCapturer] Stop signal detected in polling mode, shutting down..." << std::endl;
+                break;
+            }
         }
 
         hr = m_pCaptureClient->GetNextPacketSize(&numFramesAvailable);
@@ -1191,6 +1223,16 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 Exit:
     std::wcout << L"[AudioCapturer] Audio capture stopped." << std::endl;
 
+    // Clean up event handles
+    if (m_hCaptureEvent) {
+        CloseHandle(m_hCaptureEvent);
+        m_hCaptureEvent = nullptr;
+    }
+    if (m_hStopEvent) {
+        CloseHandle(m_hStopEvent);
+        m_hStopEvent = nullptr;
+    }
+
     // Clean up MMCSS registration
     if (m_hMmcssTask != nullptr) {
         BOOL mmcssReverted = AvRevertMmThreadCharacteristics(m_hMmcssTask);
@@ -1203,7 +1245,6 @@ Exit:
         m_mmcssTaskIndex = 0;
     }
 
-    if (m_hCaptureEvent) { CloseHandle(m_hCaptureEvent); m_hCaptureEvent = nullptr; }
     if (pwfx) { CoTaskMemFree(pwfx); pwfx = nullptr; }
     if (pSessionControl2) pSessionControl2->Release();
     if (pSessionControl) pSessionControl->Release();
