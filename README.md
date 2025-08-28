@@ -449,6 +449,264 @@ These systems work together to provide enterprise-grade input handling:
 
 ---
 
+## Input Configuration Reference
+
+This section provides a comprehensive reference for all input-related configuration options available in the system.
+
+### 1. Logging Configuration
+
+Controls logging behavior to optimize performance during high-frequency input events.
+
+```cpp
+#include "InputStats.h"
+
+// Create logging configuration
+InputStats::LoggingConfig loggingConfig;
+loggingConfig.enablePerEventLogging = false;      // Enable detailed per-event logging (default: false)
+loggingConfig.enableAggregatedLogging = true;     // Enable 10Hz aggregated stats (default: true)
+loggingConfig.enableMouseMoveCoalescing = true;   // Coalesce rapid mouse moves (default: true)
+loggingConfig.aggregatedLogIntervalMs = 100;      // Logging interval in ms (default: 100ms = 10Hz)
+loggingConfig.maxMouseMovesPerFrame = 1;          // Max mouse moves to process per frame (default: 1)
+
+// Apply configuration
+InputStats::updateLoggingConfig(loggingConfig);
+
+// Or use individual setters
+InputStats::enablePerEventLogging(false);         // For debugging only - impacts performance
+InputStats::enableAggregatedLogging(true);        // Recommended for production monitoring
+InputStats::enableMouseMoveCoalescing(true);      // Reduces processing during rapid mouse movement
+InputStats::setAggregatedLogInterval(100);        // 10Hz - balance between monitoring and performance
+```
+
+#### Logging Configuration Options:
+- **enablePerEventLogging**: When `true`, logs every individual input event (high performance impact)
+- **enableAggregatedLogging**: When `true`, logs aggregated statistics at configured interval
+- **enableMouseMoveCoalescing**: When `true`, combines rapid mouse movements into single events
+- **aggregatedLogIntervalMs**: How often to log aggregated stats (100ms = 10Hz, 1000ms = 1Hz)
+- **maxMouseMovesPerFrame**: Limits mouse processing to prevent queue buildup
+
+### 2. Sequence Management Configuration
+
+Handles desynchronization recovery for reliable input delivery over unreliable networks.
+
+```cpp
+#include "InputSequenceManager.h"
+
+// Create sequence configuration
+InputSequenceManager::SequenceConfig seqConfig;
+seqConfig.maxGapBeforeRecovery = 10;              // Max gap before triggering recovery (default: 10)
+seqConfig.recoveryThrottleMs = 1000;              // Min time between recoveries (default: 1000ms)
+seqConfig.enableGapRecovery = true;               // Enable gap-based recovery (default: true)
+seqConfig.enableSnapshotRecovery = true;          // Enable snapshot recovery (default: true)
+seqConfig.snapshotRequestTimeoutMs = 5000;        // Timeout for snapshot requests (default: 5000ms)
+
+// Apply configuration
+InputSequenceManager::updateGlobalConfig(seqConfig);
+```
+
+#### Sequence Configuration Options:
+- **maxGapBeforeRecovery**: Sequence gap size that triggers recovery (smaller = more sensitive)
+- **recoveryThrottleMs**: Minimum time between recovery operations (prevents recovery storms)
+- **enableGapRecovery**: Whether to perform recovery on sequence gaps
+- **enableSnapshotRecovery**: Whether to request state snapshots for large gaps
+- **snapshotRequestTimeoutMs**: How long to wait for snapshot responses
+
+### 3. Input Injection Configuration
+
+Controls input injection behavior and preconditions for secure, reliable input delivery.
+
+```cpp
+#include "InputInjection.h"
+
+// Get default policy
+auto policy = InputInjection::getDefaultPolicy();
+policy.skipOnForegroundCheckFailure = true;        // Skip injection if window not foreground
+policy.skipOnWindowStateFailure = true;           // Skip injection if window minimized/invisible
+policy.attemptFocusSteal = false;                 // Whether to try bringing window to foreground
+policy.focusStealTimeoutMs = 100;                 // Timeout for focus steal attempts
+
+// Apply custom policy
+InputInjection::setDefaultPolicy(policy);
+```
+
+#### Input Injection Options:
+- **skipOnForegroundCheckFailure**: Skip injection if target window is not foreground
+- **skipOnWindowStateFailure**: Skip injection if target window is minimized or invisible
+- **attemptFocusSteal**: Try to bring target window to foreground if not active
+- **focusStealTimeoutMs**: Timeout for focus steal operations
+
+### 4. Input State Machine Configuration
+
+Configures keyboard state management and stuck key recovery.
+
+```cpp
+#include "InputStateMachine.h"
+
+// Create FSM configuration
+InputStateMachine::FSMConfig fsmConfig;
+fsmConfig.modifierKeyTimeout = 2000;               // Timeout for modifier keys (default: 2000ms)
+fsmConfig.regularKeyTimeout = 5000;               // Timeout for regular keys (default: 5000ms)
+fsmConfig.enableRegularKeyTimeout = false;        // Enable timeout for regular keys (default: false)
+fsmConfig.onlyRecoverModifiers = true;            // Only recover stuck modifiers (default: true)
+
+// Create FSM with custom config
+InputStateMachine::KeyStateFSM fsm(fsmConfig);
+```
+
+#### FSM Configuration Options:
+- **modifierKeyTimeout**: How long before declaring modifier keys (Ctrl, Alt, Shift, Win) stuck
+- **regularKeyTimeout**: How long before declaring regular keys stuck (if enabled)
+- **enableRegularKeyTimeout**: Whether to enable timeout recovery for regular keys
+- **onlyRecoverModifiers**: If true, only performs recovery on modifier keys
+
+### 5. Mouse Coordinate Transformation Configuration
+
+Configures mouse coordinate mapping from client to host screen space.
+
+```cpp
+#include "MouseCoordinateTransform.h"
+
+// Create transformation configuration
+MouseCoordinateTransform::TransformConfig transformConfig;
+transformConfig.captureScaleX = 1.0f;              // Horizontal scale factor (default: 1.0)
+transformConfig.captureScaleY = 1.0f;              // Vertical scale factor (default: 1.0)
+transformConfig.enableDPIScaling = true;           // Enable DPI-aware scaling (default: true)
+transformConfig.enableClipping = true;             // Clip to target window bounds (default: true)
+transformConfig.virtualDesktopOffsetX = 0;         // Virtual desktop X offset (default: 0)
+transformConfig.virtualDesktopOffsetY = 0;         // Virtual desktop Y offset (default: 0)
+
+// Update global configuration
+MouseCoordinateTransform::updateGlobalConfig(transformConfig);
+```
+
+#### Coordinate Transformation Options:
+- **captureScaleX/Y**: Scale factors for captured content (affects mouse positioning)
+- **enableDPIScaling**: Whether to apply DPI scaling to coordinates
+- **enableClipping**: Whether to clip mouse coordinates to target window bounds
+- **virtualDesktopOffsetX/Y**: Offset for virtual desktop positioning
+
+### 6. Windows Key Blocking Configuration
+
+Controls which keys are blocked from injection to prevent system interference.
+
+```cpp
+#include "KeyInputHandler.h"
+
+// Windows key blocking is configured via the shouldBlockKey function
+// The following keys are blocked by default:
+const std::vector<std::string> blockedKeys = {
+    "MetaLeft",     // Left Windows key
+    "MetaRight"     // Right Windows key
+};
+
+// To check if a key should be blocked (used internally):
+bool shouldBlock = shouldBlockKey("MetaLeft"); // Returns true
+
+// To modify blocking behavior, you would need to update the
+// shouldBlockKey function in KeyInputHandler.cpp
+```
+
+#### Windows Key Blocking Options:
+- **MetaLeft**: Left Windows key (⊞ Win) - blocked by default
+- **MetaRight**: Right Windows key (⊞ Win) - blocked by default
+- **Custom Blocking**: Can be extended to block other system keys
+
+### 7. Input Statistics Configuration
+
+Controls how input statistics are collected and reported.
+
+```cpp
+#include "InputStats.h"
+
+// Statistics are configured via the LoggingConfig
+InputStats::LoggingConfig statsConfig;
+statsConfig.enableAggregatedLogging = true;        // Enable periodic statistics logging
+statsConfig.aggregatedLogIntervalMs = 100;         // How often to log stats (100ms = 10Hz)
+
+// The StatsLogger automatically uses these settings
+```
+
+### 8. Complete Configuration Example
+
+Here's a complete example showing all input systems configured for optimal gaming performance:
+
+```cpp
+#include "InputStats.h"
+#include "InputSequenceManager.h"
+#include "InputInjection.h"
+#include "InputStateMachine.h"
+#include "MouseCoordinateTransform.h"
+
+// 1. Configure logging for high-performance gaming
+InputStats::LoggingConfig loggingConfig;
+loggingConfig.enablePerEventLogging = false;       // Disable for performance
+loggingConfig.enableAggregatedLogging = true;      // Enable monitoring
+loggingConfig.enableMouseMoveCoalescing = true;    // Essential for gaming
+loggingConfig.aggregatedLogIntervalMs = 100;       // 10Hz monitoring
+loggingConfig.maxMouseMovesPerFrame = 1;           // Single move per frame
+InputStats::updateLoggingConfig(loggingConfig);
+
+// 2. Configure sequence management for reliability
+InputSequenceManager::SequenceConfig seqConfig;
+seqConfig.maxGapBeforeRecovery = 5;                // Quick recovery for gaming
+seqConfig.recoveryThrottleMs = 500;                // Faster recovery
+seqConfig.enableGapRecovery = true;
+seqConfig.enableSnapshotRecovery = true;
+seqConfig.snapshotRequestTimeoutMs = 3000;         // Faster snapshot timeout
+InputSequenceManager::updateGlobalConfig(seqConfig);
+
+// 3. Configure injection for gaming focus
+auto injectPolicy = InputInjection::getDefaultPolicy();
+injectPolicy.skipOnForegroundCheckFailure = false; // Allow background injection for games
+injectPolicy.skipOnWindowStateFailure = false;     // Allow injection to minimized games
+injectPolicy.attemptFocusSteal = true;             // Bring game to foreground
+injectPolicy.focusStealTimeoutMs = 50;             // Fast focus steal
+InputInjection::setDefaultPolicy(injectPolicy);
+
+// 4. Configure FSM for gaming (short timeouts)
+InputStateMachine::FSMConfig fsmConfig;
+fsmConfig.modifierKeyTimeout = 1000;               // Quick modifier recovery
+fsmConfig.regularKeyTimeout = 3000;               // Regular key recovery
+fsmConfig.enableRegularKeyTimeout = true;         // Enable for gaming
+fsmConfig.onlyRecoverModifiers = false;           // Recover all stuck keys
+
+// 5. Configure coordinate transformation for gaming
+MouseCoordinateTransform::TransformConfig transformConfig;
+transformConfig.enableDPIScaling = true;           // Enable DPI scaling
+transformConfig.enableClipping = false;            // Allow mouse outside game window
+transformConfig.captureScaleX = 1.0f;              // No horizontal scaling
+transformConfig.captureScaleY = 1.0f;              // No vertical scaling
+transformConfig.virtualDesktopOffsetX = 0;         // No virtual desktop offset
+transformConfig.virtualDesktopOffsetY = 0;         // No virtual desktop offset
+MouseCoordinateTransform::updateGlobalConfig(transformConfig);
+
+// Note: Windows key blocking is handled automatically in KeyInputHandler
+// MetaLeft and MetaRight keys are blocked by default to prevent system interference
+```
+
+### Configuration Recommendations
+
+#### For Gaming:
+- **Logging**: Disable per-event logging, enable coalescing, 10Hz aggregated stats
+- **Sequence**: Short recovery timeouts, enable all recovery mechanisms
+- **Injection**: Allow focus steal, skip foreground checks for overlay support
+- **FSM**: Short timeouts for quick stuck key recovery
+- **Coordinates**: Enable DPI scaling, disable clipping for multi-monitor setups
+
+#### For Office/Productivity:
+- **Logging**: Enable aggregated logging, disable coalescing for precision
+- **Sequence**: Standard recovery timeouts, conservative gap detection
+- **Injection**: Strict foreground checking, no focus steal
+- **FSM**: Longer timeouts, modifier-only recovery
+- **Coordinates**: Enable clipping and DPI scaling
+
+#### For Development/Debugging:
+- **Logging**: Enable per-event logging, disable coalescing, 1Hz aggregated stats
+- **Sequence**: Short recovery timeouts, verbose recovery logging
+- **Injection**: Relaxed checks for testing
+- **FSM**: Enable all timeouts and recovery mechanisms
+- **Coordinates**: Enable all features for comprehensive testing
+
 ## Building and Running
 
 This is a complex project with multiple components.
