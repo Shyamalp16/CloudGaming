@@ -63,6 +63,9 @@ bool AudioCapturer::StartCapture(DWORD processId)
 
     // Set this as the active instance for parameter updates
     s_activeInstance = this;
+
+    // Initialize shared reference clock for AV synchronization
+    InitializeSharedReferenceClock();
     
     // ============================================================================
     // OPUS ENCODER CONFIGURATION - Optimized for low-latency gaming
@@ -1108,7 +1111,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 totalSamples = m_floatBuffer.size();
             }
 
-            // Calculate timestamp for this audio data using IAudioClock (single source of truth)
+            // Calculate timestamp for this audio data using shared reference clock for AV sync
             int64_t timestampUs = 0;
             UINT64 audioClockPos = 0;
             UINT64 audioClockQpc = 0;
@@ -1121,17 +1124,22 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     // Store the initial audio clock time for RTP timestamp calculation
                     if (m_initialAudioClockTime == 0) {
                         m_initialAudioClockTime = timestampUs;
-                        std::wcout << L"[AudioCapturer] Initial audio clock time: " << m_initialAudioClockTime << L" us" << std::endl;
+                        std::wcout << L"[AudioCapturer] Initial audio clock time (IAudioClock): " << m_initialAudioClockTime << L" us" << std::endl;
                     }
                 } else {
-                    std::wcerr << L"[AudioCapturer] Failed to get audio clock position, using fallback" << std::endl;
-                    auto currentTime = std::chrono::high_resolution_clock::now();
-                    timestampUs = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - m_startTime).count();
+                    std::wcerr << L"[AudioCapturer] Failed to get audio clock position, using shared reference clock" << std::endl;
+                    timestampUs = GetSharedReferenceTimeUs();
                 }
             } else {
-                std::wcerr << L"[AudioCapturer] Audio clock not available, using system clock fallback" << std::endl;
-                auto currentTime = std::chrono::high_resolution_clock::now();
-                timestampUs = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - m_startTime).count();
+                std::wcerr << L"[AudioCapturer] Audio clock not available, using shared reference clock for AV sync" << std::endl;
+                timestampUs = GetSharedReferenceTimeUs();
+            }
+
+            // Store the initial timestamp for RTP timestamp calculation if not set
+            if (m_initialAudioClockTime == 0) {
+                m_initialAudioClockTime = timestampUs;
+                std::wcout << L"[AudioCapturer] Initial audio reference time: " << m_initialAudioClockTime
+                          << L" us (shared clock synchronized)" << std::endl;
             }
             
             // Process audio frame for Opus encoding and WebRTC transmission
@@ -1403,6 +1411,52 @@ void AudioCapturer::ResampleTo48k(const float* in, size_t inFrames, uint32_t inR
 
 // Static audio configuration instance
 AudioCapturer::AudioConfig AudioCapturer::s_audioConfig;
+
+// ============================================================================
+// SHARED REFERENCE CLOCK - AV Synchronization
+// Ensures audio and video use the same reference time to prevent drift
+// ============================================================================
+
+void AudioCapturer::InitializeSharedReferenceClock() {
+    bool expected = false;
+    if (s_sharedReferenceInitialized.compare_exchange_strong(expected, true)) {
+        // Only initialize once across all instances
+        s_sharedReferenceTime = std::chrono::steady_clock::now();
+        auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+            s_sharedReferenceTime.time_since_epoch()).count();
+        std::wcout << L"[AV-Sync] Shared reference clock initialized at " << nowUs << L" us" << std::endl;
+    }
+}
+
+int64_t AudioCapturer::GetSharedReferenceTimeUs() {
+    if (!s_sharedReferenceInitialized.load()) {
+        InitializeSharedReferenceClock();
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    auto duration = now - s_sharedReferenceTime;
+    return std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+}
+
+void AudioCapturer::LogAVSyncStatus() {
+    if (!s_sharedReferenceInitialized.load()) {
+        std::wcout << L"[AV-Sync] Shared reference clock not initialized" << std::endl;
+        return;
+    }
+
+    auto currentTime = GetSharedReferenceTimeUs();
+    auto wallClock = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+
+    std::wcout << L"[AV-Sync] Status:" << std::endl;
+    std::wcout << L"  Shared reference time: " << currentTime << L" us" << std::endl;
+    std::wcout << L"  Wall clock time: " << wallClock << L" us" << std::endl;
+    std::wcout << L"  Time since init: " << (wallClock - currentTime) << L" us" << std::endl;
+
+    if (s_activeInstance && s_activeInstance->m_initialAudioClockTime > 0) {
+        std::wcout << L"  Audio initial time: " << s_activeInstance->m_initialAudioClockTime << L" us" << std::endl;
+    }
+}
 
 // ============================================================================
 // AUDIO BITRATE ADAPTATION - RTCP feedback integration

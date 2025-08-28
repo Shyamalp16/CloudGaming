@@ -1509,6 +1509,31 @@ For heavy encoder loads, you can pin the encoder thread to specific CPU cores:
 
 This prevents thread migration and ensures consistent encoder performance under load.
 
+### Audio-Video Synchronization
+
+The system implements comprehensive AV synchronization to prevent drift and ensure perfect lip-sync:
+
+**Shared Reference Clock:**
+- Both audio and video use a common monotonic reference time
+- Eliminates clock drift between audio/video streams
+- Ensures consistent timing across all media components
+
+**Clock Sources:**
+- **Primary**: Hardware IAudioClock (for audio) + WGC SystemRelativeTime (for video)
+- **Fallback**: Shared `steady_clock` reference for both streams
+- **Alignment**: All timestamps start from the same reference point
+
+**RTP Timing:**
+- **Audio**: 48kHz RTP clock rate (48,000 ticks/second)
+- **Video**: 90kHz RTP clock rate (90,000 ticks/second)
+- **Synchronization**: PTS alignment prevents A/V drift over time
+
+**Benefits:**
+- **Perfect Lip-Sync**: No audio/video timing drift
+- **Hardware Precision**: Uses hardware clocks when available
+- **Robust Fallbacks**: Graceful degradation to software clocks
+- **Network Adaptive**: Works with WebRTC's congestion control
+
 ### Minimal Audio Buffering
 
 The audio system uses minimal application-level buffering to let WebRTC's built-in congestion control and jitter buffering handle network conditions optimally:

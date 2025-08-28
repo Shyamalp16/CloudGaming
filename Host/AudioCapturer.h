@@ -54,6 +54,11 @@ public:
     // Dynamic Opus parameter updates
     static void UpdateOpusParameters(int bitrate, int expectedLossPerc, int complexity, int fecEnabled = -1);
 
+    // Shared reference clock for AV synchronization
+    static void InitializeSharedReferenceClock();
+    static int64_t GetSharedReferenceTimeUs();
+    static void LogAVSyncStatus();
+
 private:
     void CaptureThread(DWORD processId);
     bool ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, void* format, std::vector<float>& floatData);
@@ -225,6 +230,10 @@ private:
     // Minimal buffering performance monitoring (optional)
     static inline bool s_enableBufferMonitoring = false;  // Enable queue depth logging
     static inline int s_bufferMonitorInterval = 1000;     // Log every N operations
+
+    // Shared reference clock for AV synchronization
+    static inline std::chrono::steady_clock::time_point s_sharedReferenceTime{};
+    static inline std::atomic<bool> s_sharedReferenceInitialized = false;
 
     // Timing for 20ms frames
     std::chrono::high_resolution_clock::time_point m_startTime;

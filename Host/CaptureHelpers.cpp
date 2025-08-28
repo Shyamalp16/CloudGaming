@@ -1,5 +1,6 @@
 #include "CaptureHelpers.h"
 #include "GlobalTime.h"
+#include "AudioCapturer.h"
 #include <chrono>
 #include <iostream>
 #include <wincodec.h>
@@ -228,8 +229,13 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                         timestamp = static_cast<int64_t>(srt.count() / 10);
                     } catch (...) {}
                     if (timestamp <= 0) {
-                        // Fallback to steady_clock if SRT unavailable
-                        timestamp = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+                        // Fallback to shared reference clock for AV synchronization
+                        timestamp = AudioCapturer::GetSharedReferenceTimeUs();
+                        static bool loggedSharedClock = false;
+                        if (!loggedSharedClock) {
+                            std::wcout << L"[VideoCapture] Using shared reference clock for AV sync at " << timestamp << L" us" << std::endl;
+                            loggedSharedClock = true;
+                        }
                     }
                     // Update capture fps EWMA instead of printing
                     {
@@ -315,6 +321,9 @@ static inline size_t RingSize() {
 }
 
 void StartCapture() {
+    // Initialize shared reference clock for AV synchronization
+    AudioCapturer::InitializeSharedReferenceClock();
+
     for (auto& thread : workerThreads) {
         if (thread.joinable()) thread.join();
     }
