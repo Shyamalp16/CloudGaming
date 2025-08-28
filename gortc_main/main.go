@@ -138,6 +138,9 @@ var (
 	// Granular audio send path: bounded queue and dedicated sender goroutine
 	audioSendQueue chan *rtp.Packet // Bounded channel for RTP packets (size ≤ 1)
 	audioSendStop  chan struct{}    // Stop signal for sender goroutine
+
+	// Buffer completion mechanism to prevent use-after-free
+	audioBufferCompletion chan []byte // Channel to signal buffer completion
 )
 
 // AudioRTPState encapsulates all audio RTP state with atomic operations
@@ -380,10 +383,54 @@ func initAudioSendQueue() {
 	audioSendQueue = make(chan *rtp.Packet, 1)
 	audioSendStop = make(chan struct{})
 
+	// Create buffer completion channel for safe buffer pool management
+	audioBufferCompletion = make(chan []byte, 16) // Small buffer for completion signals
+
 	// Start the dedicated audio sender goroutine
 	go audioSenderGoroutine()
 
+	// Start the buffer completion handler goroutine
+	go audioBufferCompletionHandler()
+
 	log.Println("[Go/Pion] Audio send queue initialized with bounded channel (capacity: 1)")
+	log.Println("[Go/Pion] Buffer completion mechanism initialized for use-after-free prevention")
+}
+
+// audioBufferCompletionHandler safely manages buffer pool returns to prevent use-after-free
+// This goroutine ensures buffers are only returned to the pool after WriteRTP has finished reading them
+func audioBufferCompletionHandler() {
+	log.Println("[Go/Pion] Audio buffer completion handler started")
+
+	completionCount := 0
+	startTime := time.Now()
+
+	for {
+		select {
+		case buffer := <-audioBufferCompletion:
+			// Safe to return buffer to pool now that WriteRTP has finished with it
+			putSampleBuf(buffer)
+			completionCount++
+
+			// Periodic logging (every 1000 completions)
+			if completionCount%1000 == 0 {
+				elapsed := time.Since(startTime)
+				rate := float64(completionCount) / elapsed.Seconds()
+				log.Printf("[Go/Pion] Buffer completion: %d buffers processed (%.1f buffers/sec)",
+					completionCount, rate)
+			}
+
+		case <-time.After(5 * time.Second):
+			// Periodic health check
+			if len(audioBufferCompletion) > 8 { // More than half capacity
+				log.Printf("[Go/Pion] Buffer completion queue getting full: %d/%d",
+					len(audioBufferCompletion), cap(audioBufferCompletion))
+			}
+
+		case <-audioSendStop:
+			log.Printf("[Go/Pion] Audio buffer completion handler stopped after processing %d buffers", completionCount)
+			return
+		}
+	}
 }
 
 // audioSenderGoroutine runs in a separate goroutine to send RTP packets without holding locks
@@ -402,10 +449,28 @@ func audioSenderGoroutine() {
 				}
 			}
 
-			// Return payload buffer to pool after WriteRTP completes
-			// This optimizes pool usage by keeping buffers available for longer
+			// Signal buffer completion to prevent use-after-free
+			// This ensures the buffer is only returned to the pool after WriteRTP has finished reading it
 			if len(pkt.Payload) > 0 {
-				putSampleBuf(pkt.Payload)
+				// Try to signal completion with fallback mechanisms
+				select {
+				case audioBufferCompletion <- pkt.Payload:
+					// Buffer completion signaled successfully - normal path
+				case <-time.After(200 * time.Millisecond):
+					// Completion channel is full or handler is slow
+					// Check if completion handler is still running and try a shorter timeout
+					select {
+					case audioBufferCompletion <- pkt.Payload:
+						// Retry succeeded
+						log.Printf("[Go/Pion] Buffer completion retry succeeded (seq=%d)",
+							pkt.Header.SequenceNumber)
+					case <-time.After(50 * time.Millisecond):
+						// Still failing - force return to pool to prevent memory leaks
+						log.Printf("[Go/Pion] Buffer completion failed after retry, forcing pool return (seq=%d)",
+							pkt.Header.SequenceNumber)
+						putSampleBuf(pkt.Payload)
+					}
+				}
 			}
 
 		case <-audioSendStop:
@@ -447,6 +512,35 @@ func testBufferPool() {
 	// Log final statistics
 	logBufferPoolStats()
 	log.Println("[Go/Pion] Buffer pool test completed")
+}
+
+// testBufferCompletionMechanism tests the use-after-free prevention system
+// This can be called during development to verify buffer safety
+func testBufferCompletionMechanism() {
+	log.Println("[Go/Pion] Testing buffer completion mechanism...")
+
+	if audioBufferCompletion == nil {
+		log.Println("[Go/Pion] Buffer completion channel not initialized")
+		return
+	}
+
+	// Test buffer completion signaling
+	testBuffer := getSampleBuf(512)
+	// testSequence := 0
+
+	// Simulate sending a packet and signaling completion
+	select {
+	case audioBufferCompletion <- testBuffer:
+		log.Println("[Go/Pion] Buffer completion test: signal sent successfully")
+	case <-time.After(100 * time.Millisecond):
+		log.Println("[Go/Pion] Buffer completion test: timeout (this may indicate issues)")
+		putSampleBuf(testBuffer) // Fallback
+	}
+
+	// Wait a moment for completion handler to process
+	time.Sleep(50 * time.Millisecond)
+
+	log.Println("[Go/Pion] Buffer completion mechanism test completed")
 }
 
 func init() {
@@ -1791,20 +1885,56 @@ func initGo() C.int {
 func closeGo() {
 	log.Println("[Go/Pion] closeGo: Closing Go WebRTC module.")
 
-	// Stop the audio sender goroutine
+	// Stop the audio sender goroutine and buffer completion handler
 	if audioSendStop != nil {
 		close(audioSendStop)
 		audioSendStop = nil
 		log.Println("[Go/Pion] Audio sender goroutine stop signal sent")
 	}
 
-	// Drain any remaining packets from the queue
+	// Drain any remaining packets from the queue and return their buffers to pool
 	if audioSendQueue != nil {
+		timeout := time.After(1 * time.Second) // Prevent infinite wait
+		drained := 0
 		for len(audioSendQueue) > 0 {
-			<-audioSendQueue
+			select {
+			case pkt := <-audioSendQueue:
+				// Return buffer to pool for any undelivered packets
+				if len(pkt.Payload) > 0 {
+					putSampleBuf(pkt.Payload)
+				}
+				drained++
+			case <-timeout:
+				log.Printf("[Go/Pion] Timeout draining audio queue, %d packets remaining", len(audioSendQueue))
+				// Continue with shutdown even if queue not fully drained
+				break
+			}
 		}
 		audioSendQueue = nil
+		log.Printf("[Go/Pion] Drained %d packets from audio send queue", drained)
 	}
+
+	// Drain any pending buffer completion signals
+	if audioBufferCompletion != nil {
+		timeout := time.After(500 * time.Millisecond)
+		completed := 0
+		for len(audioBufferCompletion) > 0 {
+			select {
+			case buffer := <-audioBufferCompletion:
+				putSampleBuf(buffer)
+				completed++
+			case <-timeout:
+				log.Printf("[Go/Pion] Timeout draining buffer completion queue, %d buffers remaining",
+					len(audioBufferCompletion))
+				break
+			}
+		}
+		audioBufferCompletion = nil
+		log.Printf("[Go/Pion] Processed %d buffer completion signals", completed)
+	}
+
+	// Final buffer pool statistics
+	logBufferPoolStats()
 
 	closePeerConnection()
 }

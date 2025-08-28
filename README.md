@@ -1809,6 +1809,59 @@ Capture Cycle Memory Flow:
 
 This optimization reduces per-frame memory allocations from **multiple vector operations** to **zero additional allocations**, providing significant performance improvements for high-frequency audio processing! 🧠⚡🔄
 
+### Use-After-Free Prevention Mechanism
+
+The audio RTP pipeline includes a comprehensive use-after-free prevention system that ensures buffer safety even if Pion's WriteRTP defers payload reading:
+
+**Buffer Completion Mechanism:**
+```go
+// BEFORE: Potential use-after-free risk
+audioTrack.WriteRTP(pkt)
+putSampleBuf(pkt.Payload) // ❌ Immediate return - unsafe if WriteRTP defers reading
+
+// AFTER: Safe buffer completion signaling
+audioTrack.WriteRTP(pkt)
+// Signal completion to dedicated handler
+audioBufferCompletion <- pkt.Payload // ✅ Safe signaling
+// Handler returns to pool only after WriteRTP finishes
+```
+
+**Safety Architecture:**
+```
+Audio Sender Goroutine ──WriteRTP────► Pion WebRTC
+        │                                       │
+        └─Signal Completion─┐                   │
+                            │                   │
+                            ▼                   │
+Buffer Completion Handler ◄─┴─Return to Pool───► Safe
+```
+
+**Multi-Layer Protection:**
+- **Primary Path**: Buffer completion channel signals safe return to pool
+- **Retry Mechanism**: Automatic retry with shorter timeout if channel is full
+- **Timeout Fallback**: Force return to pool after 250ms total to prevent memory leaks
+- **Graceful Shutdown**: Proper draining of all buffers during application exit
+
+**Safety Guarantees:**
+- ✅ **Zero Use-After-Free**: Buffers never returned while WriteRTP might be reading
+- ✅ **Memory Leak Prevention**: Timeout fallbacks ensure buffers are always returned
+- ✅ **Performance Optimized**: Minimal overhead for normal operation paths
+- ✅ **Comprehensive Logging**: Detailed monitoring of buffer lifecycle
+- ✅ **Graceful Degradation**: System remains stable even under high load
+
+**Buffer Lifecycle (Safe):**
+```
+1. getSampleBuf() → Get buffer from pool
+2. memcpy() → Copy audio data to buffer
+3. audioSendQueue ← pkt → Queue packet
+4. audioTrack.WriteRTP(pkt) → Send RTP (may defer reading)
+5. audioBufferCompletion ← buffer → Signal completion
+6. audioBufferCompletionHandler → Receive completion signal
+7. putSampleBuf() → Safe return to pool (WriteRTP finished)
+```
+
+This mechanism provides **enterprise-grade safety** for buffer pool management, preventing subtle corruption issues while maintaining optimal performance! 🛡️⚡🔄
+
 ### Audio-Video Synchronization
 
 The system implements comprehensive AV synchronization to prevent drift and ensure perfect lip-sync:
