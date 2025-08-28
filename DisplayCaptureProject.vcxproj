@@ -112,6 +112,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Host\AppInit.h" />
+    <ClInclude Include="Host\InputStateMachine.h" />
     <ClInclude Include="Host\ConfigUtils.h" />
     <ClInclude Include="Host\GraphicsAndCapture.h" />
     <ClInclude Include="Host\Runtime.h" />
@@ -137,6 +138,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Host\AppInit.cpp" />
+    <ClCompile Include="Host\InputStateMachine.cpp" />
     <ClCompile Include="Host\ConfigUtils.cpp" />
     <ClCompile Include="Host\GraphicsAndCapture.cpp" />
     <ClCompile Include="Host\Runtime.cpp" />

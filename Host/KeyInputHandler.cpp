@@ -2,6 +2,7 @@
 #include "ShutdownManager.h"
 #include "pion_webrtc.h"
 #include "Logging.h"
+#include "Metrics.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <atomic>
@@ -13,9 +14,12 @@
 #include <thread>
 #include <chrono>
 #include "WindowUtils.h"
+#include "InputSchema.h"
+#include "InputInjection.h"
+#include "InputStateMachine.h"
+
 
 using json = nlohmann::json;
-#include "Metrics.h"
 
 // Initialize logging system
 static inline void InitializeInputLogging() {
@@ -39,6 +43,9 @@ namespace KeyInputHandler {
 	static std::unordered_map<WORD, std::string> vkDownToJsCode;
 	// Canonical identity map keyed by (scancode | 0x8000 if extended)
 	static std::unordered_map<uint16_t, std::string> scanIdDownToJs;
+
+	// FSM instance for state management and recovery
+	static InputStateMachine::KeyStateFSM keyStateFSM;
 
 	// Blocking queue infrastructure
 	static std::queue<std::string> keyboardMessageQueue;
@@ -268,6 +275,10 @@ namespace KeyInputHandler {
 		queueCondition.notify_one();
 	}
 
+    // Observability
+    static Stats g_stats;
+    const Stats& getStats() { return g_stats; }
+
 	void simulateKeyPress(const std::string& key) {
 		LOG_DEBUG("Simulating key press for: '" + key + "'");
 
@@ -379,6 +390,11 @@ namespace KeyInputHandler {
 			LOG_TRACE("Sending Input (Virtual Key) - JSCode: '" + eventCode + "', VK: " + std::to_string(virtualKeyCode) + ", Flags: " + std::to_string(input.ki.dwFlags) + " (" + (isKeyDown ? "DOWN" : "UP") + ")");
 		}
 
+		// Check injection preconditions before sending input
+		if (!InputInjection::shouldInjectInput(InputInjection::getDefaultPolicy(), "keyboard")) {
+			return; // Skip injection based on policy
+		}
+
 		UINT sent = SendInput(1, &input, sizeof(INPUT));
 		if (sent != 1) {
 			DWORD errorCode = GetLastError();
@@ -389,6 +405,7 @@ namespace KeyInputHandler {
 			LOG_ERROR("SendInput failed for '" + eventCode + "' (" + (isKeyDown ? "DOWN" : "UP") + "). Error Code: " + std::to_string(errorCode) + ", Message: " + std::string(errorMsg));
 		} else {
 			LOG_TRACE("SendInput succeeded for '" + eventCode + "' (" + (isKeyDown ? "DOWN" : "UP") + ")");
+			InputInjection::markInjectionSuccess();
 		}
 	}
 
@@ -420,9 +437,9 @@ namespace KeyInputHandler {
 					LOG_DEBUG("Processing message from queue: " + message);
 
 					json j = json::parse(message);
-					if (j.is_object() && j.contains("code") && j.contains("type")) {
-						std::string jsCode = j["code"].get<std::string>();
-						std::string jsType = j["type"].get<std::string>();
+					if (j.is_object() && j.contains(InputSchema::kCode) && j.contains(InputSchema::kType)) {
+						std::string jsCode = j[InputSchema::kCode].get<std::string>();
+						std::string jsType = j[InputSchema::kType].get<std::string>();
 						bool isClientKeyDown = (jsType == "keydown");
 						LOG_DEBUG("Parsed - Code: " + jsCode + ", Type: " + jsType);
 						// Emit concise input log for each key event
@@ -480,16 +497,41 @@ namespace KeyInputHandler {
 							}
 						}
 
-						// SendInput outside the lock
+						// Process through FSM for state management and recovery
 						if (simulateAction && !jsForInject.empty()) {
-							// Guard: only inject when target window is foreground
-							HWND target = WindowUtils::GetTargetWindow();
-							if (target && GetForegroundWindow() == target) {
-								SimulateWindowsKeyEvent(jsForInject, actionIsDown);
-							} else {
-								LOG_DEBUG("Skipping key inject; target window not in foreground");
+							auto eventTime = std::chrono::steady_clock::now();
+							auto transitionResult = keyStateFSM.processKeyEvent(jsForInject, actionIsDown, eventTime);
+
+							switch (transitionResult) {
+								case InputStateMachine::TransitionResult::ACCEPTED:
+									// Check injection preconditions before injecting
+									if (!InputInjection::shouldInjectInput(InputInjection::getDefaultPolicy(), "keyboard")) {
+										// Skip injection based on policy (logged by shouldInjectInput)
+										break;
+									}
+
+									// Inject the key event
+									SimulateWindowsKeyEvent(jsForInject, actionIsDown);
+									InputInjection::markInjectionSuccess();
+
+									// Update legacy metrics for compatibility
+									if (!actionIsDown) {
+										InputMetrics::inc(InputMetrics::injectedKeys());
+									}
+									break;
+
+								case InputStateMachine::TransitionResult::IGNORED_INVALID:
+									std::cout << "[KeyInput] FSM ignored invalid transition for '" << jsForInject << "' (" << (actionIsDown ? "down" : "up") << ")" << std::endl;
+									break;
+
+								case InputStateMachine::TransitionResult::IGNORED_STALE:
+									std::cout << "[KeyInput] FSM ignored stale event for '" << jsForInject << "' (" << (actionIsDown ? "down" : "up") << ")" << std::endl;
+									break;
+
+								case InputStateMachine::TransitionResult::RECOVERED:
+									std::cout << "[KeyInput] FSM recovered stuck key '" << jsForInject << "'" << std::endl;
+									break;
 							}
-							if (!actionIsDown) { InputMetrics::inc(InputMetrics::injectedKeys()); }
 						}
 					} else {
 						LOG_WARN("Ignoring message: Invalid JSON format or missing 'code'/'type'. Message: " + message);
@@ -551,6 +593,12 @@ namespace KeyInputHandler {
 				}
 			}
 
+			// Initialize FSM with injection callback
+			keyStateFSM.initialize([](const std::string& jsCode, bool isDown) {
+				SimulateWindowsKeyEvent(jsCode, isDown);
+			});
+			keyStateFSM.startWatchdog();
+
 			messageThread = std::thread(messagePollingLoop);
 			LOG_INFO("Blocking queue started for data channel messages");
 		}else {
@@ -561,6 +609,8 @@ namespace KeyInputHandler {
 	void cleanup() {
 		if (isRunning.load()) {
 			isRunning.store(false);
+			// Stop FSM watchdog
+			keyStateFSM.stopWatchdog();
 			// Wake the blocking thread for shutdown
 			wakeKeyboardThreadInternal();
 			if (messageThread.joinable()) {
@@ -571,6 +621,13 @@ namespace KeyInputHandler {
 			LOG_INFO("Cleanup called, but polling was not running");
 		}
 	}
+
+	void emergencyReleaseAllKeys() {
+		std::cout << "[KeyInputHandler] Emergency release of all keys requested" << std::endl;
+		keyStateFSM.releaseAllKeys();
+		InputMetrics::inc(InputMetrics::fsmEmergencyReleases());
+	}
+
 }
 
 extern "C" void initKeyInputHandler() {
@@ -579,6 +636,10 @@ extern "C" void initKeyInputHandler() {
 
 extern "C" void stopKeyInputHandler() {
 	KeyInputHandler::cleanup();
+}
+
+extern "C" void emergencyReleaseAllKeys() {
+	KeyInputHandler::emergencyReleaseAllKeys();
 }
 
 extern "C" void wakeKeyboardThread() {

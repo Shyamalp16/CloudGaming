@@ -21,11 +21,17 @@ namespace KeyInputHandler {
     void initializeDataChannel();
     void simulateKeyPress(const std::string& key);
     void cleanup();
+    void emergencyReleaseAllKeys(); // For disconnect/reconnect scenarios
 
     // Internal functions
     void SimulateWindowsKeyEvent(const std::string& eventCode, bool isKeyDown);
+
+    // Counters for observability (reads are racy but acceptable for telemetry)
+    struct Stats { unsigned dropped{0}; unsigned injected{0}; unsigned skipped{0}; unsigned resets{0}; };
+    const Stats& getStats();
 }
 
 extern "C" void initKeyInputHandler();
+extern "C" void emergencyReleaseAllKeys();
 
 #endif

@@ -12,6 +12,8 @@
 #include "Metrics.h"
 #include "Config.h"
 #include "WindowUtils.h"
+#include "InputSchema.h"
+#include "InputInjection.h"
 
 
 using json = nlohmann::json;
@@ -215,11 +217,19 @@ namespace MouseInputHandler {
 				btnInput.mi.mouseData = input.mi.mouseData;
 
 				INPUT inputs[2] = { moveInput, btnInput };
+
+				// Check injection preconditions before sending input
+				if (!InputInjection::shouldInjectInput(InputInjection::getDefaultPolicy(), "mouse")) {
+					return; // Skip injection based on policy
+				}
+
 				UINT sent = SendInput(2, inputs, sizeof(INPUT));
 				if (sent != 2) {
 					DWORD errorCode = GetLastError();
 					std::cerr << "[MouseInputHandler] SendInput split click failed! Error Code: " << errorCode
 						<< ", Error Message: " << std::system_category().message(errorCode) << std::endl;
+				} else {
+					InputInjection::markInjectionSuccess();
 				}
 				return;
 			} else {
@@ -280,6 +290,11 @@ namespace MouseInputHandler {
 			return;
 		}
 
+		// Check injection preconditions before sending input
+		if (!InputInjection::shouldInjectInput(InputInjection::getDefaultPolicy(), "mouse")) {
+			return; // Skip injection based on policy
+		}
+
 		UINT sent = SendInput(1, &input, sizeof(INPUT));
 		if (sent != 1) {
 			DWORD errorCode = GetLastError();
@@ -291,6 +306,7 @@ namespace MouseInputHandler {
 		else {
 			InputMetrics::inc(InputMetrics::injectedMouse());
 			std::cout << "[MouseInputHandler] SendInput succeeded for mouse event '" << eventType << "'" << std::endl;
+			InputInjection::markInjectionSuccess();
 		}
 	}
 
@@ -321,14 +337,14 @@ namespace MouseInputHandler {
 				try {
 					MouseLogDebug(std::string("[MouseInputHandler] Processing mouse message from queue: ") + message);
 					json j = json::parse(message);
-					if (j.is_object() && j.contains("type")) {
-						std::string jsType = j["type"].get<std::string>();
+					if (j.is_object() && j.contains(InputSchema::kType)) {
+						std::string jsType = j[InputSchema::kType].get<std::string>();
 						int x = -1, y = -1, button = -1;
 
-						if (jsType == "mousemove") {
-							if (j.contains("x") && j.contains("y")) {
-								x = j["x"].get<int>();
-								y = j["y"].get<int>();
+						if (jsType == InputSchema::kMouseMove) {
+							if (j.contains(InputSchema::kX) && j.contains(InputSchema::kY)) {
+								x = j[InputSchema::kX].get<int>();
+								y = j[InputSchema::kY].get<int>();
 								std::cout << "[MouseInput] MOVE x=" << x << " y=" << y << std::endl;
 								// Update last known cursor position
 								{
@@ -349,11 +365,11 @@ namespace MouseInputHandler {
 								std::cerr << "[MouseInputHandler] Missing 'x' or 'y' in mouse move message." << std::endl;
 							}
 						}
-						else if (jsType == "mousedown" || jsType == "mouseup") {
-							if (j.contains("x") && j.contains("y") && j.contains("button")) {
-								x = j["x"].get<int>();
-								y = j["y"].get<int>();
-								button = j["button"].get<int>();
+						else if (jsType == InputSchema::kMouseDown || jsType == InputSchema::kMouseUp) {
+							if (j.contains(InputSchema::kX) && j.contains(InputSchema::kY) && j.contains(InputSchema::kButton)) {
+								x = j[InputSchema::kX].get<int>();
+								y = j[InputSchema::kY].get<int>();
+								button = j[InputSchema::kButton].get<int>();
 								std::cout << "[MouseInput] " << (jsType == "mousedown" ? "DOWN" : "UP  ")
 										  << " btn=" << button << " x=" << x << " y=" << y << std::endl;
 
