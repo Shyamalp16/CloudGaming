@@ -87,6 +87,7 @@ void ApplyVideoSettings(const nlohmann::json& config)
     } catch (...) {}
 }
 
+
 void ApplyCaptureSettings(const nlohmann::json& config, int configuredFps)
 {
     try {
