@@ -25,7 +25,7 @@
 static constexpr int kDefaultFramePoolBuffers = 3;
 static constexpr int kMaxFramePoolBuffers = 16;
 static constexpr int kDefaultTargetFps = 120;
-static constexpr int kMaxQueuedFramesDefault = 8;
+static constexpr int kMaxQueuedFramesDefault = 2;
 static constexpr int kPacingMaxBurstFramesDefault = 8;
 static constexpr int kOneSecondUs = 1000000;
 

@@ -167,7 +167,7 @@ static std::condition_variable g_sendCV;
 static std::deque<QueuedSample> g_sendQueue;
 static std::atomic<bool> g_senderRunning{false};
 static std::thread g_senderThread;
-static constexpr size_t kMaxSendQueue = 3; // drop oldest when backlogged to avoid growth
+static constexpr size_t kMaxSendQueue = 3; // Low-latency: drop oldest when backlogged to prevent queue growth and latency spikes
 
 static void SenderLoop() {
     // Elevate sender thread to MMCSS 'Games' for timely packet delivery

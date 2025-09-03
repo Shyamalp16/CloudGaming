@@ -1,6 +1,7 @@
 #include "AudioCapturer.h"
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <comdef.h>
 #include <vector>
 #include <algorithm>
@@ -247,11 +248,14 @@ void AudioCapturer::QueueProcessorThread()
 
             // Send to WebRTC (this is the potentially blocking FFI call)
             // With minimal buffering, this should rarely block due to WebRTC congestion control
+            AUDIO_LOG_DEBUG(L"[AudioQueue] Sending packet: " << packet.data.size() << L" bytes, timestamp: " << packet.timestampUs);
             int result = sendAudioPacket(packet.data.data(),
                                        static_cast<int>(packet.data.size()),
                                        packet.timestampUs);
             if (result != 0) {
-                std::wcerr << L"[AudioQueue] Failed to send audio packet to WebRTC. Error: " << result << std::endl;
+                AUDIO_LOG_ERROR(L"[AudioQueue] Failed to send audio packet to WebRTC. Error: " << result);
+            } else {
+                AUDIO_LOG_DEBUG(L"[AudioQueue] Packet sent successfully");
             }
 
             lock.lock();
@@ -379,6 +383,7 @@ void AudioCapturer::EncoderThread()
 
         if (PopFrameFromRingBuffer(frame, timestamp)) {
             // We have a frame to encode
+            AUDIO_LOG_DEBUG(L"[AudioEncoder] Processing frame: " << frame.size() << L" samples, timestamp: " << timestamp);
             RawAudioFrame rawFrame;
             rawFrame.samples = std::move(frame);
             rawFrame.timestampUs = timestamp;
@@ -1181,6 +1186,11 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     {
         captureCycles++;
 
+        // Periodic heartbeat log to verify capture loop is running
+        if (captureCycles % 1000 == 0) {
+            AUDIO_LOG_DEBUG(L"[AudioCapturer] Capture loop heartbeat: cycle " << captureCycles << L", processed " << dataPacketsProcessed << L" packets");
+        }
+
         // Periodic error statistics logging (every 1000 cycles if there were errors)
         if (captureCycles % 1000 == 0 && m_errorStats.totalErrors > 0) {
             LogErrorStats();
@@ -1221,6 +1231,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         }
 
         hr = m_pCaptureClient->GetNextPacketSize(&numFramesAvailable);
+        AUDIO_LOG_DEBUG(L"[AudioCapturer] GetNextPacketSize: hr=" << hr << L", frames=" << numFramesAvailable);
+
         if (FAILED(hr))
         {
             LogErrorWithContext(hr, L"Failed to get next packet size", m_consecutiveErrorCount);
@@ -1275,6 +1287,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 &flags,
                 &devPos,
                 &qpcPos);
+
+            AUDIO_LOG_DEBUG(L"[AudioCapturer] GetBuffer result: hr=" << hr << L", frames=" << numFramesAvailable);
 
             if (FAILED(hr))
             {
@@ -1338,13 +1352,25 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             // Convert PCM to float directly in the persistent buffer
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
                 // Silent frame - fill with zeros
+                AUDIO_LOG_DEBUG(L"[AudioCapturer] Silent frame detected");
                 std::fill(m_floatBuffer.begin(), m_floatBuffer.begin() + totalSamples, 0.0f);
             } else {
                 // Convert PCM data to float format in-place
+                AUDIO_LOG_DEBUG(L"[AudioCapturer] Converting PCM data: " << numFramesAvailable << L" frames");
                 if (!ConvertPCMToFloat(pData, numFramesAvailable, static_cast<void*>(pwfx), m_floatBuffer)) {
                     AUDIO_LOG_ERROR(L"[AudioCapturer] Failed to convert PCM to float format");
                     goto Exit;
                 }
+
+                // Check if the converted data has any non-zero values
+                bool hasAudioData = false;
+                for (size_t i = 0; i < totalSamples && i < 100; ++i) { // Check first 100 samples
+                    if (std::abs(m_floatBuffer[i]) > 0.0001f) { // Threshold for silence
+                        hasAudioData = true;
+                        break;
+                    }
+                }
+                AUDIO_LOG_DEBUG(L"[AudioCapturer] Audio data check: " << (hasAudioData ? L"Has signal" : L"Silent/near-silent"));
             }
 
             // Resample to 48kHz if source rate differs (zero-allocation optimization)
@@ -1392,6 +1418,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             
             // Process audio frame for Opus encoding and WebRTC transmission
             // Use the persistent buffer directly (zero-copy optimization)
+            AUDIO_LOG_DEBUG(L"[AudioCapturer] Processing audio frame: " << totalSamples << L" samples");
             ProcessAudioFrame(m_floatBuffer.data(), totalSamples, timestampUs);
 
             hr = m_pCaptureClient->ReleaseBuffer(numFramesAvailable);
@@ -1763,7 +1790,7 @@ void AudioCapturer::ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFr
 
 void AudioCapturer::LogErrorWithContext(HRESULT hr, const std::wstring& context, int retryCount)
 {
-    std::wstringstream ss;
+    std::wostringstream ss;
     ss << L"[AudioCapturer] " << context;
 
     if (retryCount > 0) {

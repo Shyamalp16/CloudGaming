@@ -199,7 +199,7 @@ private:
     // These macros compile to no-ops in release builds, eliminating overhead
 #define AUDIO_LOG_DEBUG(msg) \
     do { \
-        static bool enableDebugLogs = false; /* Set to true for debugging */ \
+        static bool enableDebugLogs = true; /* Set to false for production */ \
         if (enableDebugLogs) { \
             std::wcout << msg << std::endl; \
         } \

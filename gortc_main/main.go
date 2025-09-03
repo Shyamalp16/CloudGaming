@@ -720,15 +720,21 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 
 //export sendVideoSample
 func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.int {
+	// Check connection state and track availability with minimal lock time
 	pcMutex.Lock()
-	defer pcMutex.Unlock()
-
 	if peerConnection == nil || videoTrack == nil {
+		pcMutex.Unlock()
 		return -1
 	}
 	if connectionState != webrtc.PeerConnectionStateConnected {
+		pcMutex.Unlock()
 		return 0
 	}
+
+	// Get a copy of the track pointer and other shared state while holding the lock
+	// track := videoTrack
+	feedbackChannel := videoFeedbackChannel
+	pcMutex.Unlock() // Release global lock immediately
 
 	// Reuse buffer from pool to avoid per-call allocation
 	n := int(size)
@@ -737,6 +743,7 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 	dur := time.Duration(int64(durationUs)) * time.Microsecond
 
 	if err := videoTrack.WriteSample(media.Sample{Data: buf, Duration: dur}); err != nil {
+		putSampleBuf(buf) // Return buffer on error
 		return -1
 	}
 	// Return buffer to pool after write
@@ -751,7 +758,7 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 	}
 
 	// Optional RTT ping to client (unchanged):
-	if videoFeedbackChannel != nil && videoFeedbackChannel.ReadyState() == webrtc.DataChannelStateOpen {
+	if feedbackChannel != nil && feedbackChannel.ReadyState() == webrtc.DataChannelStateOpen {
 		videoFrameCounter++
 		hostSendTime := time.Now().UnixNano()
 		pingTimestampsMutex.Lock()
@@ -763,7 +770,7 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 			"host_send_time": fmt.Sprintf("%d", hostSendTime),
 		}
 		if pingJSON, err := json.Marshal(pingMessage); err == nil {
-			_ = videoFeedbackChannel.SendText(string(pingJSON))
+			_ = feedbackChannel.SendText(string(pingJSON))
 		}
 	}
 	return 0

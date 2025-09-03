@@ -93,6 +93,8 @@ void ApplyCaptureSettings(const nlohmann::json& config, int configuredFps)
         if (!(config.contains("host") && config["host"].contains("capture"))) {
             if (configuredFps > 0) {
                 long long interval = 10000000LL / configuredFps;
+                // Enforce minimum interval of 1ms to prevent excessive CPU usage
+                interval = std::max(interval, 10000LL); // 1ms in 100ns units
                 SetMinUpdateInterval100ns(interval);
             }
             return;
@@ -132,6 +134,8 @@ void ApplyCaptureSettings(const nlohmann::json& config, int configuredFps)
         } else {
             if (configuredFps > 0) {
                 long long interval = 10000000LL / configuredFps;
+                // Enforce minimum interval of 1ms to prevent excessive CPU usage
+                interval = std::max(interval, 10000LL); // 1ms in 100ns units
                 SetMinUpdateInterval100ns(interval);
             }
         }
