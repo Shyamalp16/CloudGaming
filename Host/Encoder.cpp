@@ -21,6 +21,7 @@
 #include <avrt.h>
 #pragma comment(lib, "Avrt.lib")
 #include "AdaptiveQualityControl.h"
+#include "ThreadPriorityManager.h"
 
 // Removed unused software conversion components
 int Encoder::currentWidth = 0;
@@ -811,6 +812,24 @@ namespace Encoder {
     }
 
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps) {
+        // Set up MMCSS for encoder thread to ensure priority scheduling
+        static bool encoderThreadConfigured = false;
+        if (!encoderThreadConfigured) {
+            encoderThreadConfigured = true;
+            // Configure encoder thread with MMCSS "Games" class for consistent timing
+            ThreadPriorityManager::MMCSSHandle encoderMMCSS;
+            ThreadPriorityManager::ThreadPriorityConfig encoderConfig;
+            encoderConfig.mmcssClass = ThreadPriorityManager::MMCSSClass::Games;
+            encoderConfig.taskName = "VideoEncoder";
+            encoderConfig.enableMMCSS = true;
+            encoderConfig.enableTimeCritical = false; // Use high priority but not time critical
+            encoderConfig.threadPriority = THREAD_PRIORITY_HIGHEST;
+
+            if (encoderMMCSS.elevate(encoderConfig)) {
+                std::cout << "[Encoder] MMCSS priority configured for encoder thread (Games class)" << std::endl;
+            }
+        }
+
         // Encode and drain under mutex, but handoff outside
         std::vector<uint8_t> merged;
         std::lock_guard<std::mutex> lock(g_encoderMutex);

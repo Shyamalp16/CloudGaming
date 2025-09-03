@@ -1,6 +1,7 @@
 #include "CaptureHelpers.h"
 #include "GlobalTime.h"
 #include "AudioCapturer.h"
+#include "ThreadPriorityManager.h"
 #include <chrono>
 #include <iostream>
 #include <iomanip>
@@ -391,6 +392,24 @@ static inline size_t RingSize() {
 }
 
 void StartCapture() {
+    // Set up MMCSS for capture thread to ensure consistent frame timing
+    static bool captureThreadConfigured = false;
+    if (!captureThreadConfigured) {
+        captureThreadConfigured = true;
+        // Configure capture thread with MMCSS "Capture" class for real-time capture
+        ThreadPriorityManager::MMCSSHandle captureMMCSS;
+        ThreadPriorityManager::ThreadPriorityConfig captureConfig;
+        captureConfig.mmcssClass = ThreadPriorityManager::MMCSSClass::Capture;
+        captureConfig.taskName = "VideoCapture";
+        captureConfig.enableMMCSS = true;
+        captureConfig.enableTimeCritical = false; // Use high priority but not time critical
+        captureConfig.threadPriority = THREAD_PRIORITY_HIGHEST;
+
+        if (captureMMCSS.elevate(captureConfig)) {
+            std::cout << "[Capture] MMCSS priority configured for capture thread (Capture class)" << std::endl;
+        }
+    }
+
     // Initialize shared reference clock for AV synchronization
     AudioCapturer::InitializeSharedReferenceClock();
 

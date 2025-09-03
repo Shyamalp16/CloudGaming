@@ -5,9 +5,13 @@ package main
 
 /*
 #cgo CFLAGS: -I.
+#cgo LDFLAGS: -lavrt
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <windows.h>
+#include <avrt.h>
+#pragma comment(lib, "avrt.lib")
 
 // Enhanced WebRTC stats callback for comprehensive monitoring
 typedef void (*WebRTCStatsCallback)(double packetLoss, double rtt, double jitter,
@@ -42,6 +46,28 @@ static inline void callWebRTCStatsCallback(WebRTCStatsCallback f, double p, doub
 // forward to them from inside this DLL, replace these with proper imports via LDFLAGS.
 static inline void wakeKeyboardThread(void) { }
 static inline void wakeMouseThread(void) { }
+
+// MMCSS setup for Go threads
+static HANDLE goMMCSSHandle = NULL;
+
+static void SetupGoThreadMMCSS(void) {
+    if (goMMCSSHandle == NULL) {
+        // Set up MMCSS for Go threads with "Games" class for consistent timing
+        DWORD taskIndex = 0;
+        goMMCSSHandle = AvSetMmThreadCharacteristicsA("Games", &taskIndex);
+        if (goMMCSSHandle != NULL) {
+            // Set thread priority to highest for real-time performance
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        }
+    }
+}
+
+static void CleanupGoThreadMMCSS(void) {
+    if (goMMCSSHandle != NULL) {
+        AvRevertMmThreadCharacteristics(goMMCSSHandle);
+        goMMCSSHandle = NULL;
+    }
+}
 
 */
 import "C"
@@ -547,7 +573,9 @@ func audioBufferCompletionHandler() {
 // audioSenderGoroutine runs in a separate goroutine to send RTP packets without holding locks
 // This prevents head-of-line blocking and keeps the send path lock-granular
 func audioSenderGoroutine() {
-	log.Println("[Go/Pion] Audio sender goroutine started")
+	// Set up MMCSS for this goroutine to ensure consistent timing
+	C.SetupGoThreadMMCSS()
+	log.Println("[Go/Pion] Audio sender goroutine started with MMCSS priority (Games class)")
 
 	for {
 		select {
@@ -594,7 +622,9 @@ func audioSenderGoroutine() {
 // videoSenderGoroutine runs in a separate goroutine to send video samples without holding locks
 // This prevents head-of-line blocking and keeps the video send path lock-granular
 func videoSenderGoroutine() {
-	log.Println("[Go/Pion] Video sender goroutine started")
+	// Set up MMCSS for this goroutine to ensure consistent timing
+	C.SetupGoThreadMMCSS()
+	log.Println("[Go/Pion] Video sender goroutine started with MMCSS priority (Games class)")
 
 	// Watchdog to detect if we're not consuming samples fast enough
 	lastSampleTime := time.Now()

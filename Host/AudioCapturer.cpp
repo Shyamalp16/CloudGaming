@@ -1,4 +1,5 @@
 #include "AudioCapturer.h"
+#include "ThreadPriorityManager.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -71,6 +72,24 @@ AudioCapturer::~AudioCapturer()
 
 bool AudioCapturer::StartCapture(DWORD processId)
 {
+    // Set up MMCSS for audio capture thread to ensure consistent timing
+    static bool audioCaptureThreadConfigured = false;
+    if (!audioCaptureThreadConfigured) {
+        audioCaptureThreadConfigured = true;
+        // Configure audio capture thread with MMCSS "Audio" class for real-time audio
+        ThreadPriorityManager::MMCSSHandle audioMMCSS;
+        ThreadPriorityManager::ThreadPriorityConfig audioConfig;
+        audioConfig.mmcssClass = ThreadPriorityManager::MMCSSClass::Audio;
+        audioConfig.taskName = "AudioCapture";
+        audioConfig.enableMMCSS = true;
+        audioConfig.enableTimeCritical = false; // Use high priority but not time critical
+        audioConfig.threadPriority = THREAD_PRIORITY_HIGHEST;
+
+        if (audioMMCSS.elevate(audioConfig)) {
+            std::cout << "[Audio] MMCSS priority configured for audio capture thread (Audio class)" << std::endl;
+        }
+    }
+
     m_stopCapture = false;
     
     // Store initialization parameters for potential reinitialization
