@@ -158,7 +158,7 @@ static std::string g_nvRc = "cbr";
 static int g_nvBf = 0;
 static int g_nvRcLookahead = 0;
 static int g_nvAsyncDepth = 2;
-static int g_nvSurfaces = 8;
+static int g_nvSurfaces = 3; // Optimized: async_depth + 1 for minimal buffering
 // Pacing from capture timestamps (EWMA of inter-frame delta)
 static std::atomic<long long> g_lastCaptureTsUs{0};
 static std::atomic<long long> g_smoothedDurUs{0};
@@ -843,12 +843,12 @@ namespace Encoder {
         currentHeight = height;
         codecCtx->time_base = AVRational{ 1, fps };
         codecCtx->framerate = { fps, 1 };
-        codecCtx->gop_size = fps * 2; // IDR every ~2 seconds to reduce keyframe overhead
+        codecCtx->gop_size = fps * 2; // IDR every ~2 seconds: balances compression efficiency with low latency
         codecCtx->max_b_frames = 0; // low-latency
         codecCtx->bit_rate = g_startBitrateBps; // configurable start bitrate
-        // Initialize VBV to track target bitrate and avoid pulsing
+        // Initialize VBV for low-latency: use 1x bitrate for stricter latency control
         codecCtx->rc_max_rate = codecCtx->bit_rate;
-        codecCtx->rc_buffer_size = codecCtx->bit_rate * 2;
+        codecCtx->rc_buffer_size = codecCtx->bit_rate; // Tighter VBV: 1x bitrate for minimal buffering
 
         // Signal SDR BT.709 range for desktop capture; configurable full/limited
         codecCtx->color_range     = g_fullRangeColor ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
@@ -944,11 +944,11 @@ namespace Encoder {
                 snprintf(buf, sizeof(buf), "%d", g_nvSurfaces);
                 av_dict_set(&opts, "surfaces", buf, 0);
             }
-            // Looser VBV to reduce quality pulsing
+            // Tighter VBV for low-latency: use 1x bitrate to minimize buffering
             char rateBuf[32];
             char buf2[32];
             snprintf(rateBuf, sizeof(rateBuf), "%d", codecCtx->bit_rate);
-            snprintf(buf2, sizeof(buf2), "%d", codecCtx->bit_rate * 2);
+            snprintf(buf2, sizeof(buf2), "%d", codecCtx->bit_rate); // Tighter: 1x bitrate for minimal latency
             av_dict_set(&opts, "maxrate", rateBuf, 0);
             av_dict_set(&opts, "bufsize", buf2, 0);
             // Ensure color metadata is set on stream
@@ -1022,6 +1022,38 @@ namespace Encoder {
         g_outputViewLru.setCapacity(std::max<size_t>(8, g_hwFrames.size()));
 
         std::wcout << L"[Encoder] " << std::wstring(encoderName.begin(), encoderName.end()) << " encoder initialized successfully." << std::endl;
+
+        // Log low-latency optimizations
+        if (encoderName == "h264_nvenc") {
+            std::wcout << L"[Encoder] Low-latency NVENC settings applied:" << std::endl;
+            std::wcout << L"[Encoder]   - Preset: " << std::wstring(g_nvPreset.begin(), g_nvPreset.end()) << L" (optimized for speed)" << std::endl;
+            std::wcout << L"[Encoder]   - Async Depth: " << g_nvAsyncDepth << L" (minimal internal buffering)" << std::endl;
+            std::wcout << L"[Encoder]   - Surfaces: " << g_nvSurfaces << L" (async_depth + 1 for optimal throughput)" << std::endl;
+            std::wcout << L"[Encoder]   - VBV Buffer: " << (codecCtx->rc_buffer_size / 1000) << L"kb (1x bitrate for strict latency)" << std::endl;
+            std::wcout << L"[Encoder]   - B-frames: " << codecCtx->max_b_frames << L" (disabled for low latency)" << std::endl;
+            std::wcout << L"[Encoder]   - GOP Size: " << codecCtx->gop_size << L" frames (IDR every ~" << (codecCtx->gop_size / fps) << L"s)" << std::endl;
+
+            // Validate optimal settings for low latency
+            if (g_nvSurfaces > g_nvAsyncDepth + 2) {
+                std::wcout << L"[Encoder] WARNING: Surfaces (" << g_nvSurfaces << L") significantly exceed async_depth + 1 ("
+                          << (g_nvAsyncDepth + 1) << L"). Consider reducing for lower latency." << std::endl;
+            }
+            if (codecCtx->rc_buffer_size > codecCtx->bit_rate) {
+                std::wcout << L"[Encoder] WARNING: VBV buffer (" << (codecCtx->rc_buffer_size / 1000)
+                          << L"kb) exceeds bitrate (" << (codecCtx->bit_rate / 1000) << L"kb). Latency may be higher than optimal." << std::endl;
+            }
+            // Validate preset for latency optimization
+            if (g_nvPreset != "p4" && g_nvPreset != "p5") {
+                std::wcout << L"[Encoder] INFO: Using preset '" << std::wstring(g_nvPreset.begin(), g_nvPreset.end())
+                          << L"'. For optimal low-latency, consider p4 or p5 presets." << std::endl;
+            }
+            // Validate async_depth is reasonable
+            if (g_nvAsyncDepth > 3) {
+                std::wcout << L"[Encoder] WARNING: async_depth (" << g_nvAsyncDepth
+                          << L") is high. Values > 3 may increase latency. Consider 1-2 for low latency." << std::endl;
+            }
+        }
+
         // Ensure sender thread is running after encoder is ready
         StartSenderThreadIfNeeded();
     }
