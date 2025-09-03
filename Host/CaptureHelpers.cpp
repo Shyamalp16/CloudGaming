@@ -3,6 +3,7 @@
 #include "AudioCapturer.h"
 #include <chrono>
 #include <iostream>
+#include <iomanip>
 #include <wincodec.h>
 #include <string>
 #include <filesystem>
@@ -79,6 +80,11 @@ static size_t g_metadataCapacity = 0;
 static std::atomic<uint64_t> g_overwriteDrops{ 0 }; // times we overwrote oldest due to full ring
 static std::atomic<uint64_t> g_backpressureSkips{ 0 }; // frames skipped by consumer due to encoder backpressure
 static std::atomic<int> g_lastProcessedSeq{ -1 }; // monotonicity tracking
+
+// Timestamp source tracking for A/V sync debugging
+static std::atomic<uint64_t> g_systemRelativeTimeFrames{ 0 }; // frames using WGC SystemRelativeTime
+static std::atomic<uint64_t> g_fallbackTimeFrames{ 0 }; // frames using audio reference clock fallback
+static std::chrono::steady_clock::time_point g_lastTimestampReport = std::chrono::steady_clock::now();
 static std::atomic<uint64_t> g_outOfOrder{ 0 }; // frames observed out of order
 
 static std::atomic<int> g_targetFps{kDefaultTargetFps};
@@ -245,17 +251,88 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                     // MINIMAL CALLBACK: Only essential work here to reduce WGC backpressure
                     int sequenceNumber = frameSequenceCounter++;
 
-                    // Extract timestamp (minimal work)
+                    // Extract timestamp with robust validation and fallback logging
                     int64_t timestamp = 0;
                     int64_t systemRelativeTimeUs = 0;
+                    bool usedSystemRelativeTime = true;
+
                     try {
                         auto srt = frame.SystemRelativeTime();
                         systemRelativeTimeUs = static_cast<int64_t>(srt.count() / 10);
-                        timestamp = systemRelativeTimeUs;
-                    } catch (...) {}
-                    if (timestamp <= 0) {
+
+                        // Validate the timestamp is reasonable (not negative, not too far in future)
+                        auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+
+                        if (systemRelativeTimeUs > 0 && systemRelativeTimeUs <= (nowUs + 1000000)) { // Within 1 second of now
+                            timestamp = systemRelativeTimeUs;
+                            g_systemRelativeTimeFrames.fetch_add(1, std::memory_order_relaxed);
+                        } else {
+                            // Invalid SystemRelativeTime, fall back
+                            usedSystemRelativeTime = false;
+                            static bool loggedInvalidSrt = false;
+                            if (!loggedInvalidSrt) {
+                                std::wcout << L"[VideoCapture] WARNING: Invalid SystemRelativeTime (" << systemRelativeTimeUs
+                                          << L" μs), falling back to audio reference clock. This may affect A/V sync." << std::endl;
+                                loggedInvalidSrt = true;
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        // Exception getting SystemRelativeTime, fall back
+                        usedSystemRelativeTime = false;
+                        static bool loggedSrtException = false;
+                        if (!loggedSrtException) {
+                            std::wcout << L"[VideoCapture] WARNING: Exception getting SystemRelativeTime: " << e.what()
+                                      << L". Falling back to audio reference clock. This may affect A/V sync." << std::endl;
+                            loggedSrtException = true;
+                        }
+                    } catch (...) {
+                        // Generic exception, fall back
+                        usedSystemRelativeTime = false;
+                        static bool loggedSrtGenericException = false;
+                        if (!loggedSrtGenericException) {
+                            std::wcout << L"[VideoCapture] WARNING: Unknown exception getting SystemRelativeTime. "
+                                      << L"Falling back to audio reference clock. This may affect A/V sync." << std::endl;
+                            loggedSrtGenericException = true;
+                        }
+                    }
+
+                    if (!usedSystemRelativeTime || timestamp <= 0) {
                         timestamp = AudioCapturer::GetSharedReferenceTimeUs();
                         systemRelativeTimeUs = timestamp;
+                        g_fallbackTimeFrames.fetch_add(1, std::memory_order_relaxed);
+
+                        // Log fallback usage (one-time warning)
+                        static bool loggedFallbackUsage = false;
+                        if (!loggedFallbackUsage) {
+                            std::wcout << L"[VideoCapture] INFO: Using audio reference clock fallback for video timestamps. "
+                                      << L"This ensures A/V sync but may introduce slight timing variations." << std::endl;
+                            loggedFallbackUsage = true;
+                        }
+                    }
+
+                    // Periodic timestamp source reporting for A/V sync debugging
+                    {
+                        auto now = std::chrono::steady_clock::now();
+                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_lastTimestampReport);
+                        if (elapsed.count() >= 60) { // Report every minute
+                            uint64_t srtFrames = g_systemRelativeTimeFrames.load(std::memory_order_relaxed);
+                            uint64_t fallbackFrames = g_fallbackTimeFrames.load(std::memory_order_relaxed);
+                            uint64_t totalFrames = srtFrames + fallbackFrames;
+
+                            if (totalFrames > 0) {
+                                double srtPercentage = (static_cast<double>(srtFrames) / totalFrames) * 100.0;
+                                std::wcout << L"[VideoCapture] Timestamp source stats (last " << elapsed.count()
+                                          << L"s): " << srtFrames << L" SRT frames (" << std::fixed << std::setprecision(1)
+                                          << srtPercentage << L"%), " << fallbackFrames << L" fallback frames ("
+                                          << (100.0 - srtPercentage) << L"%)" << std::endl;
+                            }
+
+                            // Reset counters for next period
+                            g_systemRelativeTimeFrames.store(0, std::memory_order_relaxed);
+                            g_fallbackTimeFrames.store(0, std::memory_order_relaxed);
+                            g_lastTimestampReport = now;
+                        }
                     }
 
                     // Extract content size for deferred processing
