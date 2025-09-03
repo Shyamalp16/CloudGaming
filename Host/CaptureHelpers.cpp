@@ -215,10 +215,10 @@ GraphicsCaptureSession createCaptureSession(
                 session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ val });
                 std::wcout << L"[WGC] MinUpdateInterval set to " << val << L" (100ns units)" << std::endl;
             } else {
-                // Fallback: set conservative default (33ms for ~30fps) to ensure low latency
-                auto fallbackVal = 333333LL; // 33.333ms in 100ns units
+                // Fallback: set high-performance default (8.33ms for 120fps) for debugging
+                auto fallbackVal = 83333LL; // 8.333ms in 100ns units (120fps)
                 session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ fallbackVal });
-                std::wcout << L"[WGC] MinUpdateInterval not configured, using conservative fallback: " << fallbackVal << L" (100ns units, ~30fps)" << std::endl;
+                std::wcout << L"[WGC] MinUpdateInterval not configured, using high-performance fallback: " << fallbackVal << L" (100ns units, ~120fps)" << std::endl;
             }
         } catch (...) {
             // Exception fallback: set very conservative default to prevent high latency
