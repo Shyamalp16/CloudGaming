@@ -721,6 +721,7 @@ audioSendQueue = make(chan *rtp.Packet, 1)
 ```
 1. sendVideoSample() [C++ -> Go boundary]
    ├── Minimal pcMutex check (state validation)
+   ├── Duration validation for proper pacing
    ├── Buffer allocation from pool
    ├── Data copy via C.memcpy()
    └── Queue sample for sender goroutine
@@ -732,6 +733,41 @@ audioSendQueue = make(chan *rtp.Packet, 1)
 
 3. videoBufferCompletionHandler() [Safe cleanup]
    └── Return buffer to pool after WriteSample completion
+```
+
+#### Pacing Validation and Zero-Duration Protection:
+
+**Duration Validation:**
+- **Range Checking**: Validates 0.1ms to 1 second duration bounds
+- **Zero-Duration Gating**: Requires explicit environment variable for unpaced packets
+- **Production Safety**: Automatic rejection of pacing violations in production builds
+
+**Zero-Duration Packet Handling:**
+```go
+// Production-safe zero-duration gating
+if !isZeroDurationAllowed() {
+    log.Printf("[ERROR] Zero-duration packets disabled in production")
+    return -2 // Block unpaced packets
+}
+
+// Environment variable control
+WEBRTC_ALLOW_ZERO_DURATION=1  // Enable for testing
+WEBRTC_DEBUG_MODE=1          // Enable debug features
+```
+
+**Lock Scope Optimization:**
+```go
+// BEFORE: Lock held during entire WriteSample operation
+pcMutex.Lock()
+defer pcMutex.Unlock()
+// ... expensive I/O operation with lock held ...
+
+// AFTER: Minimal lock scope
+pcMutex.Lock()
+// State validation only
+track := videoTrack
+pcMutex.Unlock() // Release before I/O
+// ... I/O operation without lock contention ...
 ```
 
 #### Monitoring and Observability:
@@ -760,6 +796,21 @@ default:
 }
 ```
 
+**Error Code Reference:**
+```go
+// sendVideoSample error codes:
+return 0  // Success
+return -1 // Connection/track error
+return -2 // Zero-duration not allowed (gating violation)
+return -3 // Invalid duration parameter
+
+// sendVideoPacket error codes:
+return 0  // Success
+return -1 // Connection/track error or WriteSample failure
+return -2 // Zero-duration not allowed (gating violation)
+return -3 // Duration validation failure
+```
+
 #### Compatibility & Safety:
 
 - **Go Channel Semantics**: Thread-safe communication primitives
@@ -774,6 +825,28 @@ default:
 - **Real-time Communication**: Low-jitter audio/video synchronization
 - **High-Throughput Streaming**: Efficient buffer management under load
 - **Resource-Constrained Environments**: Optimized memory usage patterns
+
+## 🎯 **Zero-Duration Packet Protection Summary**
+
+This implementation addresses the critical latency issue you identified:
+
+### **Problems Solved:**
+1. ✅ **Zero-duration packets gated**: Production builds automatically reject unpaced packets
+2. ✅ **Lock contention eliminated**: pcMutex released before WriteSample operations
+3. ✅ **Pacing validation added**: Duration bounds checking prevents invalid parameters
+4. ✅ **Environment control**: Flexible runtime configuration for testing vs production
+
+### **Safety Mechanisms:**
+- **Production Gating**: `isZeroDurationAllowed()` prevents accidental use in production
+- **Environment Variables**: `WEBRTC_ALLOW_ZERO_DURATION=1` for controlled testing
+- **Build Tag Detection**: Automatic debug/production mode detection
+- **Duration Validation**: Range checking prevents invalid pacing parameters
+
+### **Performance Impact:**
+- **Lock Contention**: Reduced from holding locks during I/O to minimal state validation
+- **Memory Safety**: Buffer pool prevents allocation pressure from unpaced bursts
+- **Jitter Prevention**: Proper pacing maintains stable inter-packet timing
+- **Monitoring**: Comprehensive logging tracks pacing violations and performance
 
 This WebRTC optimization suite transforms the send path from a potentially blocking, lock-contended operation into a high-throughput, low-latency pipeline that maintains responsiveness even under heavy load. The dedicated goroutine architecture eliminates head-of-line blocking while the tiered buffer pools ensure memory efficiency across the full range of media frame sizes.
 

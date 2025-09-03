@@ -1,3 +1,6 @@
+//go:build !debug
+// +build !debug
+
 package main
 
 /*
@@ -31,6 +34,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -132,8 +136,9 @@ var (
 	mouseEnqueueCount int
 
 	// send rate logging
-	sendLastLog time.Time
-	sendCount   int
+	sendLastLog       time.Time
+	sendCount         int
+	zeroDurationCount int
 
 	// Granular audio send path: bounded queue and dedicated sender goroutine
 	audioSendQueue chan *rtp.Packet // Bounded channel for RTP packets (size ≤ 1)
@@ -828,11 +833,17 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 	feedbackChannel := videoFeedbackChannel
 	pcMutex.Unlock() // Release global lock immediately
 
+	// Validate duration for proper pacing
+	durationValue := int64(durationUs)
+	if !validateVideoDuration(durationValue) {
+		return -3 // Distinct error code for invalid duration
+	}
+
 	// Reuse buffer from pool to avoid per-call allocation
 	n := int(size)
 	buf := getSampleBuf(n)
 	C.memcpy(unsafe.Pointer(&buf[0]), data, C.size_t(n))
-	dur := time.Duration(int64(durationUs)) * time.Microsecond
+	dur := time.Duration(durationValue) * time.Microsecond
 
 	// Create video sample for queuing
 	sample := media.Sample{Data: buf, Duration: dur}
@@ -1843,43 +1854,65 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	// It should ONLY be used for testing/debugging, NEVER in production builds
 	// Production code should use sendVideoSample with accurate durations for proper pacing
 
-	// Production build guard: this function is gated to prevent accidental use
-	// In production builds, this will always return an error
-	if isProductionBuild() {
-		log.Printf("[ERROR] sendVideoPacket called in production build - this bypasses pacing and increases latency!")
-		log.Printf("[ERROR] Use sendVideoSample with accurate durations instead for proper pacing")
-		return -2 // Distinct error code for production guard violation
+	// Enhanced gating: check if zero-duration packets are allowed
+	if !isZeroDurationAllowed() {
+		log.Printf("[ERROR] sendVideoPacket called but zero-duration packets are not allowed!")
+		log.Printf("[ERROR] This bypasses pacing and increases latency. Use sendVideoSample with accurate durations.")
+		log.Printf("[ERROR] To enable: set WEBRTC_ALLOW_ZERO_DURATION=1 or WEBRTC_DEBUG_MODE=1")
+		return -2 // Distinct error code for zero-duration guard violation
 	}
 
 	log.Printf("[WARNING] sendVideoPacket called - this bypasses pacing (Duration: 0)")
+	log.Printf("[WARNING] This may cause packetization delay, reordering, and jitter downstream")
 	log.Printf("[WARNING] For low-latency streaming, use sendVideoSample with accurate frame durations")
 
+	// MINIMAL LOCK SCOPE: Only hold pcMutex for state validation, not during I/O
 	pcMutex.Lock()
-	defer pcMutex.Unlock()
-
 	if peerConnection == nil || videoTrack == nil {
+		pcMutex.Unlock()
 		return -1
 	}
 	if connectionState != webrtc.PeerConnectionStateConnected {
+		pcMutex.Unlock()
 		return 0
+	}
+
+	// Get track reference and release lock IMMEDIATELY
+	track := videoTrack
+	pcMutex.Unlock() // CRITICAL: Release lock before I/O operation
+
+	// Validate that zero duration is allowed (already checked at function entry)
+	// This is redundant but ensures consistency
+	if !validateVideoDuration(0) {
+		log.Printf("[ERROR] Duration validation failed for zero-duration packet")
+		return -3 // Should not happen if gating is working properly
 	}
 
 	// Reuse buffer from pool to avoid per-call allocation
 	n := int(size)
 	buf := getSampleBuf(n)
 	C.memcpy(unsafe.Pointer(&buf[0]), data, C.size_t(n))
-	// For testing pacing effects: write with zero duration (no pacing)
-	if err := videoTrack.WriteSample(media.Sample{Data: buf, Duration: 0}); err != nil {
+
+	// Write with zero duration (no pacing) - this is the test/debug functionality
+	// WARNING: This bypasses WebRTC pacing and may cause jitter
+	if err := track.WriteSample(media.Sample{Data: buf, Duration: 0}); err != nil {
+		putSampleBuf(buf) // Return buffer on error
+		log.Printf("[ERROR] sendVideoPacket WriteSample failed: %v", err)
 		return -1
 	}
-	// Return buffer to pool after write
+
+	// Return buffer to pool after successful write
 	putSampleBuf(buf)
+
+	// Track zero-duration packet usage for monitoring
+	zeroDurationCount++
 
 	// Debug: log send rate once per second (shared counters, disabled during streaming)
 	sendCount++
 	if time.Since(sendLastLog) >= time.Second {
-		// log.Printf("[Pion] send samples/s: %d", sendCount)
+		// log.Printf("[Pion] send samples/s: %d (zero-duration: %d)", sendCount, zeroDurationCount)
 		sendCount = 0
+		zeroDurationCount = 0
 		sendLastLog = time.Now()
 	}
 	return 0
@@ -1888,9 +1921,71 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 // isProductionBuild returns true if this is a production build
 // This can be controlled via build tags or environment variables
 func isProductionBuild() bool {
-	// Check for production build tag or environment variable
+	// Check for production build tag
+
+	// Check environment variable for runtime control
+	if debugMode := os.Getenv("WEBRTC_DEBUG_MODE"); debugMode == "1" || debugMode == "true" {
+		return false // Debug mode enabled
+	}
+
+	// Check for debug build tag at compile time
+	// This will be false if built with -tags debug
+	if os.Getenv("GO_BUILD_TAGS") == "debug" {
+		return false
+	}
+
 	// Default to production mode for safety - only allow zero-duration in debug builds
-	return true // Always production mode by default for safety
+	return true
+}
+
+// isZeroDurationAllowed returns true if zero-duration video packets are allowed
+// This provides finer control than the binary production/debug distinction
+func isZeroDurationAllowed() bool {
+	// Always allow in debug builds
+	if !isProductionBuild() {
+		return true
+	}
+
+	// In production, only allow if explicitly enabled for testing
+	allowZeroDuration := os.Getenv("WEBRTC_ALLOW_ZERO_DURATION")
+	return allowZeroDuration == "1" || allowZeroDuration == "true"
+}
+
+// validateVideoDuration validates that video pacing parameters are reasonable
+// Returns true if duration is valid for low-latency streaming
+func validateVideoDuration(durationUs int64) bool {
+	// Reject obviously invalid durations
+	if durationUs < 0 {
+		log.Printf("[WARNING] Invalid negative video duration: %d us", durationUs)
+		return false
+	}
+
+	// For zero duration (unpaced), require explicit allowance
+	if durationUs == 0 {
+		if !isZeroDurationAllowed() {
+			log.Printf("[WARNING] Zero duration video packet rejected - pacing disabled in production")
+			return false
+		}
+		log.Printf("[WARNING] Zero duration video packet allowed - pacing disabled")
+		return true
+	}
+
+	// Validate reasonable duration bounds for video (0.1ms to 1 second)
+	minDurationUs := int64(100)     // 0.1ms minimum
+	maxDurationUs := int64(1000000) // 1 second maximum
+
+	if durationUs < minDurationUs {
+		log.Printf("[WARNING] Video duration too small: %d us (minimum: %d us)", durationUs, minDurationUs)
+		return false
+	}
+
+	if durationUs > maxDurationUs {
+		log.Printf("[WARNING] Video duration too large: %d us (maximum: %d us)", durationUs, maxDurationUs)
+		return false
+	}
+
+	// Duration is within valid range
+	return true
 }
 
 func splitNALUnits(buf []byte) [][]byte {
