@@ -62,12 +62,22 @@ std::string StatsLogger::getStatsString() {
 
     // Mouse stats
     auto& mouse = globalInputStats.mouse;
+    auto totalMouseProcessed = mouse.events_under_1ms.load() + mouse.events_under_5ms.load() +
+                              mouse.events_under_10ms.load() + mouse.events_over_10ms.load();
     ss << "Mouse: " << mouse.events_received.load() << " in, "
        << mouse.events_injected.load() << " inj, "
        << mouse.events_skipped_foreground.load() << " skip, "
        << mouse.moves_coalesced.load() << " coal, "
        << mouse.clicks_processed.load() << " click, "
-       << mouse.wheel_events.load() << " wheel | ";
+       << mouse.wheel_events.load() << " wheel";
+
+    if (totalMouseProcessed > 0) {
+        ss << " | Latency: " << mouse.events_under_1ms.load() << " <1ms, "
+           << mouse.events_under_5ms.load() << " <5ms, "
+           << mouse.events_under_10ms.load() << " <10ms, "
+           << mouse.events_over_10ms.load() << " >10ms";
+    }
+    ss << " | ";
 
     // Coordinate transformation stats
     auto coordSuccess = InputMetrics::load(InputMetrics::mouseCoordTransformSuccess());

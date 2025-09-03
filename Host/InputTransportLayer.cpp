@@ -230,8 +230,8 @@ void Layer::processingLoop() {
         try {
             std::unique_lock<std::mutex> lock(queueMutex);
 
-            // Wait for messages or timeout
-            queueCondition.wait_for(lock, config.inputQueueTimeout, [this]() {
+            // Wait for messages with shorter timeout for responsiveness
+            queueCondition.wait_for(lock, std::chrono::milliseconds(1), [this]() {
                 return !messageQueue.empty() || shouldStop.load();
             });
 
@@ -243,7 +243,13 @@ void Layer::processingLoop() {
 
                 lock.unlock(); // Unlock while processing to allow new messages
 
-                if (shouldProcessMessage(message) && messageHandler) {
+                // Fast-path message processing with minimal validation
+                if (message.type.empty()) {
+                    // Skip invalid messages without full validation
+                    continue;
+                }
+
+                if (messageHandler) {
                     try {
                         messageHandler(message);
                         processed++;

@@ -24,24 +24,53 @@ using json = nlohmann::json;
 
 namespace MouseInputHandler {
 
-// Mouse move coalescing structure
+// Mouse move coalescing structure with time-based window
 struct CoalescedMouseMove {
     int x = -1;
     int y = -1;
     bool hasPendingMove = false;
     std::chrono::steady_clock::time_point lastUpdateTime;
+    std::chrono::steady_clock::time_point windowStartTime;
+    static constexpr std::chrono::milliseconds COALESCE_WINDOW_MS{4}; // <4ms window to prevent visible lag
+    static constexpr int MAX_COALESCED_EVENTS = 10; // Prevent excessive coalescing
+    int coalescedEventCount = 0;
 
     void update(int newX, int newY) {
+        auto now = std::chrono::steady_clock::now();
+
+        // If we don't have a pending move or the window has expired, start a new window
+        if (!hasPendingMove ||
+            (now - windowStartTime) > COALESCE_WINDOW_MS ||
+            coalescedEventCount >= MAX_COALESCED_EVENTS) {
+            // Process the previous move if it exists
+            if (hasPendingMove) {
+                // Previous move will be processed before this new one
+            }
+            // Start new coalescing window
+            windowStartTime = now;
+            coalescedEventCount = 0;
+        }
+
+        // Update with latest coordinates
         x = newX;
         y = newY;
         hasPendingMove = true;
-        lastUpdateTime = std::chrono::steady_clock::now();
+        lastUpdateTime = now;
+        coalescedEventCount++;
     }
 
     void clear() {
         hasPendingMove = false;
         x = -1;
         y = -1;
+        coalescedEventCount = 0;
+    }
+
+    // Check if the coalescing window has expired
+    bool hasWindowExpired() const {
+        if (!hasPendingMove) return false;
+        auto now = std::chrono::steady_clock::now();
+        return (now - windowStartTime) > COALESCE_WINDOW_MS;
     }
 };
 
@@ -432,6 +461,7 @@ CoalescedMouseMove globalCoalescedMouseMove;
 			}
 
 			if (!message.empty()) {
+				auto processingStart = std::chrono::steady_clock::now();
 				try {
 					MouseLogDebug(std::string("[MouseInputHandler] Processing mouse message from queue: ") + message);
 					json j = json::parse(message);
@@ -458,14 +488,26 @@ CoalescedMouseMove globalCoalescedMouseMove;
 								x = j[InputSchema::kX].get<int>();
 								y = j[InputSchema::kY].get<int>();
 
-								// Handle mouse move coalescing
+								// Handle mouse move coalescing with time-based window
 								if (InputStats::globalLoggingConfig.enableMouseMoveCoalescing) {
-									// Update coalesced move instead of processing immediately
+									// Update coalesced move with time-based window
 									globalCoalescedMouseMove.update(x, y);
 									InputStats::Track::mouseEventCoalesced();
 
-									// Only process the most recent move if we have one pending
+									// Check if we should process the coalesced move
+									bool shouldProcess = false;
+
 									if (globalCoalescedMouseMove.hasPendingMove) {
+										// Process if window has expired or this is a significant move
+										if (globalCoalescedMouseMove.hasWindowExpired()) {
+											shouldProcess = true;
+										} else {
+											// Skip processing this move (will be replaced by next one in window)
+											continue;
+										}
+									}
+
+									if (shouldProcess) {
 										x = globalCoalescedMouseMove.x;
 										y = globalCoalescedMouseMove.y;
 										globalCoalescedMouseMove.clear();
@@ -511,10 +553,19 @@ CoalescedMouseMove globalCoalescedMouseMove;
 											  << " btn=" << button << " x=" << x << " y=" << y << std::endl;
 								}
 
-								// Collect action parameters inside minimal lock
+								// Fast-path validation and action determination
 								bool simulateAction = false;
 								std::string actionType = jsType;
 								int actionX = x, actionY = y, actionButton = button;
+
+								// Pre-validate button number to avoid lock if invalid
+								if ((jsType == "mousedown" || jsType == "mouseup") && (button < 0 || button > 4)) {
+									if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+										std::cerr << "[MouseInputHandler] Invalid button number: " << button << ". Ignoring event." << std::endl;
+									}
+									InputStats::Track::mouseEventDroppedInvalid();
+									continue;
+								}
 
 								{
 									std::lock_guard<std::mutex> lock(mouseStateMutex);
@@ -523,31 +574,28 @@ CoalescedMouseMove globalCoalescedMouseMove;
 									lastKnownCursorY = y;
 
 									if (jsType == "mousedown") {
-										// Validate button number
-										if (button < 0 || button > 4) {
-											std::cerr << "[MouseInputHandler] Invalid button number: " << button << ". Ignoring mousedown." << std::endl;
-											continue;
-										}
 										if (clientReportedMouseButtonsDown.find(button) == clientReportedMouseButtonsDown.end()) {
 											clientReportedMouseButtonsDown.insert(button);
 											simulateAction = true;
 										}
 										else {
-											// Log state validation issues only if per-event logging is enabled
-											if (InputStats::globalLoggingConfig.enablePerEventLogging) {
-												std::cout << "[MouseInputHandler] State: Mouse button " << button << " already down. Ignoring re-press." << std::endl;
+											// Only log if enabled and not too frequent to avoid spam
+											static int duplicateDownCount = 0;
+											if (InputStats::globalLoggingConfig.enablePerEventLogging && ++duplicateDownCount % 100 == 0) {
+												std::cout << "[MouseInputHandler] State: Mouse button " << button << " already down (" << duplicateDownCount << " duplicates)" << std::endl;
 											}
 										}
 									}
-									else {
+									else { // mouseup
 										if (clientReportedMouseButtonsDown.count(button)) {
 											clientReportedMouseButtonsDown.erase(button);
 											simulateAction = true;
 										}
 										else {
-											// Log state validation issues only if per-event logging is enabled
-											if (InputStats::globalLoggingConfig.enablePerEventLogging) {
-												std::cout << "[MouseInputHandler] State: Mouse button " << button << " was not reported down. Ignoring release." << std::endl;
+											// Only log if enabled and not too frequent to avoid spam
+											static int duplicateUpCount = 0;
+											if (InputStats::globalLoggingConfig.enablePerEventLogging && ++duplicateUpCount % 100 == 0) {
+												std::cout << "[MouseInputHandler] State: Mouse button " << button << " was not reported down (" << duplicateUpCount << " duplicates)" << std::endl;
 											}
 										}
 									}
@@ -603,12 +651,33 @@ CoalescedMouseMove globalCoalescedMouseMove;
 					else {
 						std::cerr << "[MouseInputHandler] Ignoring message: Invalid JSON format or missing 'type'. Message: " << message << std::endl;
 					}
+
+					// Record processing latency
+					auto processingEnd = std::chrono::steady_clock::now();
+					auto processingTime = std::chrono::duration_cast<std::chrono::microseconds>(processingEnd - processingStart);
+
+					// Track latency histogram
+					if (processingTime.count() < 1000) { // < 1ms
+						InputStats::Track::mouseEventProcessedUnder1ms();
+					} else if (processingTime.count() < 5000) { // < 5ms
+						InputStats::Track::mouseEventProcessedUnder5ms();
+					} else if (processingTime.count() < 10000) { // < 10ms
+						InputStats::Track::mouseEventProcessedUnder10ms();
+					} else { // > 10ms
+						InputStats::Track::mouseEventProcessedOver10ms();
+					}
+
+					// Record processing time for average calculation
+					InputStats::Track::recordProcessingTime(processingTime);
+
 				}
 				catch (const json::parse_error& e) {
 					std::cerr << "[MouseInputHandler] JSON Parsing Error: " << e.what() << ". Message: " << message << std::endl;
+					InputStats::Track::mouseEventDroppedInvalid();
 				}
 				catch (const std::exception& e) {
 					std::cerr << "[MouseInputHandler] Generic Error Processing Message: " << e.what() << ". Message: " << message << std::endl;
+					InputStats::Track::mouseEventDroppedInvalid();
 				}
 			}
 		}

@@ -37,6 +37,12 @@ struct MouseStats {
     std::atomic<uint64_t> clicks_processed{0};     // Click events processed
     std::atomic<uint64_t> wheel_events{0};         // Wheel events processed
 
+    // Latency tracking
+    std::atomic<uint64_t> events_under_1ms{0};     // Events processed in <1ms
+    std::atomic<uint64_t> events_under_5ms{0};     // Events processed in <5ms
+    std::atomic<uint64_t> events_under_10ms{0};    // Events processed in <10ms
+    std::atomic<uint64_t> events_over_10ms{0};     // Events processed in >10ms
+
     // Computed metrics
     double injection_success_rate{0.0};
     double skip_rate{0.0};
@@ -93,6 +99,10 @@ struct InputHealthStats {
         mouse.moves_coalesced.store(0);
         mouse.clicks_processed.store(0);
         mouse.wheel_events.store(0);
+        mouse.events_under_1ms.store(0);
+        mouse.events_under_5ms.store(0);
+        mouse.events_under_10ms.store(0);
+        mouse.events_over_10ms.store(0);
 
         total_events_processed.store(0);
         uptime_seconds.store(0);
@@ -256,6 +266,26 @@ inline void mouseClickProcessed() {
 
 inline void mouseWheelEvent() {
     globalInputStats.mouse.wheel_events.fetch_add(1);
+}
+
+inline void mouseEventProcessedUnder1ms() {
+    globalInputStats.mouse.events_under_1ms.fetch_add(1);
+}
+
+inline void mouseEventProcessedUnder5ms() {
+    globalInputStats.mouse.events_under_5ms.fetch_add(1);
+}
+
+inline void mouseEventProcessedUnder10ms() {
+    globalInputStats.mouse.events_under_10ms.fetch_add(1);
+}
+
+inline void mouseEventProcessedOver10ms() {
+    globalInputStats.mouse.events_over_10ms.fetch_add(1);
+}
+
+inline void mouseEventDroppedInvalid() {
+    globalInputStats.mouse.events_received.fetch_add(1); // Still count as received
 }
 
 // Processing time tracking
