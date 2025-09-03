@@ -418,7 +418,7 @@ void StartCapture() {
                     }
                 }
                 // Additional safety: if queue is critically full (near capacity), be more aggressive
-                else if (sz >= g_maxQueuedFrames.load() - 1 && sz > 2) {
+                else if (sz >= g_maxQueuedFrames - 1 && sz > 2) {
                     size_t newTail = (head + g_ringCapacity - 1) % g_ringCapacity;
                     size_t skipped = (sz - 1);
                     g_ringTail.store(newTail, std::memory_order_release);
@@ -428,7 +428,7 @@ void StartCapture() {
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCriticalLog);
                     if (elapsed.count() >= 2000) { // Log critical events less frequently
-                        std::wcout << L"[Capture] CRITICAL: Queue nearly full, dropped " << skipped << L" frames, depth was " << sz << L"/" << g_maxQueuedFrames.load() << std::endl;
+                        std::wcout << L"[Capture] CRITICAL: Queue nearly full, dropped " << skipped << L" frames, depth was " << sz << L"/" << g_maxQueuedFrames << std::endl;
                         lastCriticalLog = now;
                     }
                 }
