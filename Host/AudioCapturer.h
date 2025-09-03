@@ -62,6 +62,7 @@ public:
 private:
     void CaptureThread(DWORD processId);
     bool ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, void* format, std::vector<float>& floatData);
+    bool ConvertPCMToFloatInPlace(const BYTE* pcmData, UINT32 numFrames, void* format, float* outputBuffer, size_t outputBufferSize);
     void ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs);
 
     // Queue management methods
@@ -86,6 +87,7 @@ private:
     // Audio resampling methods
     void ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out);
     void ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFrames, uint32_t inRate, uint32_t channels);
+    bool ResampleTo48kInPlaceConstrained(std::vector<float>& buffer, size_t inFrames, uint32_t inRate, uint32_t channels, size_t maxBufferSize);
 
     // DMO Resampler methods for high-quality audio resampling
     bool InitializeDMOResampler(uint32_t inputSampleRate, uint32_t inputChannels);

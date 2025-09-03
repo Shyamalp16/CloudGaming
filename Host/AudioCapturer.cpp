@@ -47,9 +47,11 @@ AudioCapturer::AudioCapturer() :
     // Initialize zero-copy audio pipeline with ring buffer
     InitializeRingBuffer();
 
-    // Pre-allocate working buffers with minimal sizes (will be resized as needed)
-    m_floatBuffer.reserve(m_samplesPerFrame); // Reserve space for PCM to float conversion
-    m_currentFrameBuffer.reserve(m_samplesPerFrame); // Reserve space for current frame accumulation
+    // Pre-allocate working buffers with fixed sizes to avoid dynamic resizing
+    m_floatBuffer.resize(m_samplesPerFrame); // Fixed size for PCM to float conversion
+    m_currentFrameBuffer.resize(m_samplesPerFrame); // Fixed size for current frame accumulation
+    std::fill(m_floatBuffer.begin(), m_floatBuffer.end(), 0.0f); // Initialize to silence
+    std::fill(m_currentFrameBuffer.begin(), m_currentFrameBuffer.end(), 0.0f); // Initialize to silence
 
     // Fixed-size buffer is already allocated, no initialization needed
     // Size: 512 bytes (optimized for Opus packets <256 bytes at 64 kbps)
@@ -940,16 +942,28 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 // If forcing 48kHz stereo, modify the format before initialization
                 WAVEFORMATEX* targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
                 if (s_audioConfig.wasapi.force48kHzStereo) {
-                    // Create a new format structure with 48kHz stereo
-                    static WAVEFORMATEX forcedFormat = {};
-                    forcedFormat.wFormatTag = WAVE_FORMAT_PCM;
-                    forcedFormat.nChannels = 2; // Force stereo
-                    forcedFormat.nSamplesPerSec = 48000; // Force 48kHz
-                    forcedFormat.nAvgBytesPerSec = 48000 * 2 * 2; // 48kHz * 2 channels * 2 bytes per sample (16-bit)
-                    forcedFormat.nBlockAlign = 2 * 2; // 2 channels * 2 bytes per sample
-                    forcedFormat.wBitsPerSample = 16;
-                    forcedFormat.cbSize = 0;
-                    targetFormat = &forcedFormat;
+                    // Check if device already provides optimal format to avoid unnecessary conversions
+                    bool isAlreadyOptimal = (pwfx->nSamplesPerSec == 48000 &&
+                                           pwfx->nChannels == 2 &&
+                                           pwfx->wBitsPerSample == 16 &&
+                                           pwfx->wFormatTag == WAVE_FORMAT_PCM);
+
+                    if (isAlreadyOptimal) {
+                        std::wcout << L"[AudioCapturer] Target process device already provides optimal 48kHz stereo PCM format - no conversion needed" << std::endl;
+                        targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
+                    } else {
+                        // Create a new format structure with 48kHz stereo
+                        static WAVEFORMATEX forcedFormat = {};
+                        forcedFormat.wFormatTag = WAVE_FORMAT_PCM;
+                        forcedFormat.nChannels = 2; // Force stereo
+                        forcedFormat.nSamplesPerSec = 48000; // Force 48kHz
+                        forcedFormat.nAvgBytesPerSec = 48000 * 2 * 2; // 48kHz * 2 channels * 2 bytes per sample (16-bit)
+                        forcedFormat.nBlockAlign = 2 * 2; // 2 channels * 2 bytes per sample
+                        forcedFormat.wBitsPerSample = 16;
+                        forcedFormat.cbSize = 0;
+                        targetFormat = &forcedFormat;
+                        std::wcout << L"[AudioCapturer] Forcing 48kHz stereo PCM format for target process optimal latency" << std::endl;
+                    }
                 }
 
                 hr = m_pAudioClient->Initialize(
@@ -1099,16 +1113,28 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         // If forcing 48kHz stereo, modify the format before initialization
         WAVEFORMATEX* targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
         if (s_audioConfig.wasapi.force48kHzStereo) {
-            // Create a new format structure with 48kHz stereo
-            static WAVEFORMATEX forcedFormat = {};
-            forcedFormat.wFormatTag = WAVE_FORMAT_PCM;
-            forcedFormat.nChannels = 2; // Force stereo
-            forcedFormat.nSamplesPerSec = 48000; // Force 48kHz
-            forcedFormat.nAvgBytesPerSec = 48000 * 2 * 2; // 48kHz * 2 channels * 2 bytes per sample (16-bit)
-            forcedFormat.nBlockAlign = 2 * 2; // 2 channels * 2 bytes per sample
-            forcedFormat.wBitsPerSample = 16;
-            forcedFormat.cbSize = 0;
-            targetFormat = &forcedFormat;
+            // Check if device already provides optimal format to avoid unnecessary conversions
+            bool isAlreadyOptimal = (pwfx->nSamplesPerSec == 48000 &&
+                                   pwfx->nChannels == 2 &&
+                                   pwfx->wBitsPerSample == 16 &&
+                                   pwfx->wFormatTag == WAVE_FORMAT_PCM);
+
+            if (isAlreadyOptimal) {
+                std::wcout << L"[AudioCapturer] Device already provides optimal 48kHz stereo PCM format - no conversion needed" << std::endl;
+                targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
+            } else {
+                // Create a new format structure with 48kHz stereo
+                static WAVEFORMATEX forcedFormat = {};
+                forcedFormat.wFormatTag = WAVE_FORMAT_PCM;
+                forcedFormat.nChannels = 2; // Force stereo
+                forcedFormat.nSamplesPerSec = 48000; // Force 48kHz
+                forcedFormat.nAvgBytesPerSec = 48000 * 2 * 2; // 48kHz * 2 channels * 2 bytes per sample (16-bit)
+                forcedFormat.nBlockAlign = 2 * 2; // 2 channels * 2 bytes per sample
+                forcedFormat.wBitsPerSample = 16;
+                forcedFormat.cbSize = 0;
+                targetFormat = &forcedFormat;
+                std::wcout << L"[AudioCapturer] Forcing 48kHz stereo PCM format for optimal latency" << std::endl;
+            }
         }
 
         hr = m_pAudioClient->Initialize(
@@ -1437,19 +1463,21 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             m_consecutiveErrorCount = 0;
 
             // ============================================================================
-            // ZERO-COPY AUDIO PROCESSING PIPELINE - Optimized for minimal latency
+            // ZERO-ALLOCATION AUDIO PROCESSING PIPELINE - Optimized for minimal latency
             // ============================================================================
-            // 1. Convert PCM to float directly in persistent buffer (eliminates copy)
+            // 1. Convert PCM to float directly in pre-allocated buffer (eliminates allocation)
             // 2. Resample in-place using DMO with efficient buffer swaps
             // 3. Feed encoder directly from persistent buffers (no intermediate copies)
-            // 4. Pre-sized buffers eliminate resize overhead during runtime
+            // 4. Fixed-size buffers eliminate resize overhead during runtime
             // ============================================================================
 
             size_t totalSamples = static_cast<size_t>(numFramesAvailable) * static_cast<size_t>(pwfx->nChannels);
 
-            // Ensure buffer is large enough (pre-sized in constructor, but handle edge cases)
-            if (m_floatBuffer.size() < totalSamples) {
-                m_floatBuffer.resize(totalSamples);
+            // Check if we can fit the data in our pre-allocated buffer
+            if (totalSamples > m_floatBuffer.size()) {
+                std::wcerr << L"[AudioCapturer] Incoming audio data (" << totalSamples << L" samples) exceeds pre-allocated buffer size ("
+                          << m_floatBuffer.size() << L" samples). Dropping frame to maintain latency." << std::endl;
+                continue; // Skip this frame to maintain low latency
             }
 
             // Convert PCM to float directly in the persistent buffer
@@ -1458,9 +1486,9 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 AUDIO_LOG_DEBUG(L"[AudioCapturer] Silent frame detected");
                 std::fill(m_floatBuffer.begin(), m_floatBuffer.begin() + totalSamples, 0.0f);
             } else {
-                // Convert PCM data to float format in-place
+                // Convert PCM to float directly in pre-allocated buffer (zero-allocation)
                 AUDIO_LOG_DEBUG(L"[AudioCapturer] Converting PCM data: " << numFramesAvailable << L" frames");
-                if (!ConvertPCMToFloat(pData, numFramesAvailable, static_cast<void*>(pwfx), m_floatBuffer)) {
+                if (!ConvertPCMToFloatInPlace(pData, numFramesAvailable, static_cast<void*>(pwfx), m_floatBuffer.data(), m_floatBuffer.size())) {
                     AUDIO_LOG_ERROR(L"[AudioCapturer] Failed to convert PCM to float format");
                     goto Exit;
                 }
@@ -1480,12 +1508,23 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             if (pwfx->nSamplesPerSec != 48000) {
                 uint32_t channels = pwfx->nChannels;
 
-                // Use optimized resampling that works directly with m_floatBuffer
-                // This eliminates the temporary vector creation entirely
-                ResampleTo48kInPlace(m_floatBuffer, numFramesAvailable, pwfx->nSamplesPerSec, channels);
+                // Calculate expected output size
+                double ratio = 48000.0 / static_cast<double>(pwfx->nSamplesPerSec);
+                size_t expectedOutputSamples = static_cast<size_t>(std::ceil(totalSamples * ratio));
 
-                // Update totalSamples to reflect the new (resampled) sample count
-                totalSamples = m_floatBuffer.size();
+                // Check if resampled data will fit in our pre-allocated buffer
+                if (expectedOutputSamples > m_floatBuffer.size()) {
+                    std::wcerr << L"[AudioCapturer] Resampled audio data (" << expectedOutputSamples << L" samples) would exceed buffer size ("
+                              << m_floatBuffer.size() << L" samples). Skipping resampling to maintain latency." << std::endl;
+                    // Continue with original rate - quality degradation but maintains latency
+                } else {
+                    // Use optimized resampling that works within pre-allocated buffer limits
+                    if (!ResampleTo48kInPlaceConstrained(m_floatBuffer, numFramesAvailable, pwfx->nSamplesPerSec, channels, m_floatBuffer.size())) {
+                        std::wcerr << L"[AudioCapturer] Resampling failed, continuing with original sample rate" << std::endl;
+                    }
+                    // Update totalSamples to reflect the new (resampled) sample count
+                    totalSamples = m_floatBuffer.size();
+                }
             }
 
             // Calculate timestamp for this audio data using shared reference clock for AV sync
@@ -1729,8 +1768,67 @@ bool AudioCapturer::ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, voi
     }
 
     return false;
-    
+
     return true;
+}
+
+bool AudioCapturer::ConvertPCMToFloatInPlace(const BYTE* pcmData, UINT32 numFrames, void* formatPtr, float* outputBuffer, size_t outputBufferSize)
+{
+    if (!pcmData || !formatPtr || numFrames == 0 || !outputBuffer) return false;
+
+    // Cast to WAVEFORMATEX - this is safe since we know the type from the caller
+    const WAVEFORMATEX* format = static_cast<const WAVEFORMATEX*>(formatPtr);
+    const size_t totalSamples = static_cast<size_t>(numFrames) * static_cast<size_t>(format->nChannels);
+
+    // Check if output buffer is large enough
+    if (outputBufferSize < totalSamples) {
+        std::wcerr << L"[AudioCapturer] Output buffer too small for PCM conversion: " << outputBufferSize << L" < " << totalSamples << std::endl;
+        return false;
+    }
+
+    WORD tag = format->wFormatTag;
+    WORD bitsPerSample = format->wBitsPerSample;
+
+    // Handle WAVE_FORMAT_EXTENSIBLE by inspecting SubFormat
+    if (tag == WAVE_FORMAT_EXTENSIBLE && format->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+        const WAVEFORMATEXTENSIBLE* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
+        // Prefer valid bits if set
+        if (ext->Samples.wValidBitsPerSample) {
+            bitsPerSample = ext->Samples.wValidBitsPerSample;
+        }
+
+        if (IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
+            tag = WAVE_FORMAT_IEEE_FLOAT;
+        } else if (IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_PCM)) {
+            tag = WAVE_FORMAT_PCM;
+        }
+    }
+
+    if (tag == WAVE_FORMAT_IEEE_FLOAT) {
+        if (bitsPerSample == 32) {
+            const float* pcmFloat = reinterpret_cast<const float*>(pcmData);
+            std::copy(pcmFloat, pcmFloat + totalSamples, outputBuffer);
+            return true;
+        }
+        return false;
+    } else if (tag == WAVE_FORMAT_PCM) {
+        if (bitsPerSample == 16) {
+            const int16_t* pcm16 = reinterpret_cast<const int16_t*>(pcmData);
+            for (size_t i = 0; i < totalSamples; ++i) {
+                outputBuffer[i] = static_cast<float>(pcm16[i]) / 32768.0f; // 2^15
+            }
+            return true;
+        } else if (bitsPerSample == 32) {
+            const int32_t* pcm32 = reinterpret_cast<const int32_t*>(pcmData);
+            for (size_t i = 0; i < totalSamples; ++i) {
+                outputBuffer[i] = static_cast<float>(pcm32[i]) / 2147483648.0f; // 2^31
+            }
+            return true;
+        }
+        return false;
+    }
+
+    return false;
 }
 
 void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs)
@@ -1785,6 +1883,73 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
 
 
 
+
+bool AudioCapturer::ResampleTo48kInPlaceConstrained(std::vector<float>& buffer, size_t inFrames, uint32_t inRate, uint32_t channels, size_t maxBufferSize)
+{
+    // ============================================================================
+    // CONSTRAINED ZERO-ALLOCATION IN-PLACE RESAMPLING
+    // ============================================================================
+    // This function resamples directly in the provided buffer without exceeding
+    // the maximum buffer size, prioritizing latency over quality when needed.
+
+    if (inRate == 48000) {
+        // No resampling needed - buffer is already at target rate
+        return true;
+    }
+
+    double ratio = 48000.0 / static_cast<double>(inRate);
+    size_t outFrames = static_cast<size_t>(std::ceil((inFrames) * ratio));
+    size_t inputSamples = inFrames * channels;
+    size_t outputSamples = outFrames * channels;
+
+    // Check if output will fit in the buffer
+    if (outputSamples > maxBufferSize) {
+        std::wcerr << L"[AudioResample] Output size (" << outputSamples << ") exceeds buffer limit (" << maxBufferSize << ")" << std::endl;
+        return false;
+    }
+
+    // For continuity across calls when rates remain the same
+    if (m_lastInputRate != inRate) {
+        m_resamplePhase = 0.0;
+        m_resampleRemainder.assign(channels, 0.0f);
+        m_lastInputRate = inRate;
+    }
+
+    // Perform in-place resampling using a memory-efficient approach
+    // We work backwards from the end to avoid overwriting input data
+    size_t writePos = outputSamples - 1;
+
+    for (size_t o = outFrames; o > 0; --o) {
+        double srcPos = ((o - 1) / ratio);
+        size_t srcFrame = static_cast<size_t>(srcPos);
+        double frac = srcPos - srcFrame;
+
+        for (uint32_t ch = 0; ch < channels; ++ch) {
+            if (writePos >= outputSamples) break; // Safety check
+
+            float sample = 0.0f;
+            if (srcFrame < inFrames) {
+                size_t srcIdx = srcFrame * channels + ch;
+                if (srcIdx < buffer.size()) {
+                    // Simple nearest neighbor for now - can be optimized to linear interpolation
+                    sample = buffer[srcIdx];
+                }
+            }
+
+            buffer[writePos--] = sample;
+        }
+    }
+
+    // Resize buffer to actual output size (should not exceed maxBufferSize)
+    if (outputSamples <= maxBufferSize) {
+        buffer.resize(outputSamples);
+    } else {
+        std::wcerr << L"[AudioResample] Unexpected buffer size after constrained resampling" << std::endl;
+        return false;
+    }
+
+    return true;
+}
 
 void AudioCapturer::ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFrames, uint32_t inRate, uint32_t channels)
 {

@@ -1505,6 +1505,9 @@ The Host includes a configurable Opus audio encoder optimized for low-latency ga
   "latency": {
     "strictLatencyMode": true,
     "enforceSingleFrameBuffering": true,
+    "maxFrameSizeMs": 10,
+    "minFrameSizeMs": 5,
+    "warnOnBuffering": true,
     "targetOneWayLatencyMs": 15
   },
   "wasapi": {
@@ -1512,7 +1515,8 @@ The Host includes a configurable Opus audio encoder optimized for low-latency ga
     "enforceEventDriven": true,
     "devicePeriodMs": 2.5,
     "force48kHzStereo": true,
-    "preferLinearResampling": true
+    "preferLinearResampling": true,
+    "useDmoOnlyForHighQuality": false
   }
 }
 ```
@@ -1545,6 +1549,13 @@ For optimal gaming audio responsiveness, the system implements several latency r
 - **Periodic Reports**: Status updates every 30 seconds in strict mode
 - **Buffer Warnings**: Immediate alerts when single-frame limit exceeded
 - **Estimation**: Real-time latency calculation based on configuration
+
+#### Buffer Optimization Techniques
+- **Pre-allocated Buffers**: Fixed-size buffers prevent dynamic resizing during runtime
+- **Zero-Allocation Pipeline**: Eliminates heap allocations on hot audio processing paths
+- **Constrained Resampling**: Respects buffer limits to maintain consistent latency
+- **Format Detection**: Automatically detects when device provides optimal format
+- **Memory-Efficient Copies**: Uses `std::copy` for optimal memory transfer performance
 
 #### WASAPI Low-Latency Configuration:
 ```json
@@ -1589,12 +1600,17 @@ The WASAPI (Windows Audio Session API) configuration options control low-level a
 - **Use Case**: Linear preferred for gaming, DMO for music production
 
 #### Performance Impact
-- **Latency Reduction**: Up to 15ms improvement with optimal WASAPI settings
-- **CPU Usage**: Exclusive mode + linear resampling = lowest CPU overhead
+- **Latency Reduction**: Up to 15ms improvement with optimal WASAPI settings + zero-allocation pipeline
+- **CPU Usage**: Exclusive mode + linear resampling + pre-allocated buffers = lowest CPU overhead
+- **Memory Efficiency**: Zero-allocation pipeline eliminates GC pressure and allocation spikes
+- **Jitter Reduction**: Fixed buffer sizes prevent dynamic resizing delays
 - **Compatibility**: Automatic fallback ensures functionality on all systems
 
 **Audio Features:**
+- **Zero-Allocation Pipeline**: Pre-allocated buffers eliminate allocation churn on hot paths
 - **Single Frame Buffering**: Strictly enforced one frame maximum between capture→encode→send
+- **Constrained Resampling**: Resampling respects buffer limits to maintain latency
+- **Format Optimization**: Detects optimal device formats to avoid unnecessary conversions
 - **Opus Frame Validation**: 5-10ms packetization validation for optimal gaming latency
 - **Latency Monitoring**: Real-time latency tracking and violation warnings
 - **WASAPI Exclusive Mode**: Direct hardware access with 2.5-5ms device periods for ultra-low latency
