@@ -48,6 +48,13 @@ struct FrameData {
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface{ nullptr }; // deferred copy source
 };
 
+// Deferred frame metadata for consumer thread processing
+struct DeferredFrameMetadata {
+    int64_t systemRelativeTimeUs;
+    winrt::Windows::Graphics::SizeInt32 contentSize;
+    bool shouldSkipUnchanged;
+};
+
 // (Removed) FrameComparator used by priority_queue in older design
 
 // Single-producer single-consumer ring buffer: capture callback -> encoder thread
@@ -61,6 +68,12 @@ static std::atomic<size_t> g_ringTail{ 0 }; // next read position (consumer move
 static size_t g_ringCapacity = 0;           // equals g_maxQueuedFrames (number of slots)
 static std::mutex g_ringMutex;              // only for consumer wait
 static std::condition_variable g_ringCV;    // wake consumer when producer pushes
+
+// Deferred metadata ring for consumer thread (same capacity as frame ring)
+static std::vector<DeferredFrameMetadata> g_metadataRing;
+static std::atomic<size_t> g_metadataHead{ 0 };
+static std::atomic<size_t> g_metadataTail{ 0 };
+static size_t g_metadataCapacity = 0;
 
 // Metrics
 static std::atomic<uint64_t> g_overwriteDrops{ 0 }; // times we overwrote oldest due to full ring
@@ -226,94 +239,62 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                     auto frame = sender.TryGetNextFrame();
                     if (!frame) break;
 
-                    // (Removed) pool Recreate; revert to previous behavior
-
                     auto surface = frame.Surface();
                     if (!surface) continue;
 
+                    // MINIMAL CALLBACK: Only essential work here to reduce WGC backpressure
                     int sequenceNumber = frameSequenceCounter++;
-                    // Timestamp in microseconds for encoder/Go layer
-                    // Prefer WGC SystemRelativeTime (100ns units) for stable, system-aligned timestamps
+
+                    // Extract timestamp (minimal work)
                     int64_t timestamp = 0;
+                    int64_t systemRelativeTimeUs = 0;
                     try {
                         auto srt = frame.SystemRelativeTime();
-                        // Convert 100ns units to microseconds
-                        timestamp = static_cast<int64_t>(srt.count() / 10);
+                        systemRelativeTimeUs = static_cast<int64_t>(srt.count() / 10);
+                        timestamp = systemRelativeTimeUs;
                     } catch (...) {}
                     if (timestamp <= 0) {
-                        // Fallback to shared reference clock for AV synchronization
                         timestamp = AudioCapturer::GetSharedReferenceTimeUs();
-                        static bool loggedSharedClock = false;
-                        if (!loggedSharedClock) {
-                            std::wcout << L"[VideoCapture] Using shared reference clock for AV sync at " << timestamp << L" us" << std::endl;
-                            loggedSharedClock = true;
-                        }
+                        systemRelativeTimeUs = timestamp;
                     }
-                    // Update capture fps EWMA instead of printing
-                    {
-                        static int capCount = 0;
-                        static int64_t windowStartUs = 0;
-                        capCount++;
-                        if (windowStartUs == 0) windowStartUs = timestamp;
-                        int64_t elapsed = timestamp - windowStartUs;
-                        if (elapsed >= kOneSecondUs) { // ~1s window
-                            double fps = static_cast<double>(capCount) * 1'000'000.0 / static_cast<double>(elapsed);
-                            VideoMetrics::ewmaUpdate(VideoMetrics::captureFps(), fps);
-                            capCount = 0;
-                            windowStartUs = timestamp;
-                        }
-                    }
-                    // Log ContentSize when it changes (disabled during streaming)
+
+                    // Extract content size for deferred processing
+                    winrt::Windows::Graphics::SizeInt32 contentSize{ 0, 0 };
                     try {
-                        auto cs = frame.ContentSize();
-                        static std::atomic<int> lastLoggedW{ 0 };
-                        static std::atomic<int> lastLoggedH{ 0 };
-                        if (cs.Width != lastLoggedW.load() || cs.Height != lastLoggedH.load()) {
-                            std::wcout << L"[WGC] ContentSize changed: " << cs.Width << L"x" << cs.Height << std::endl;
-                            lastLoggedW.store(cs.Width);
-                            lastLoggedH.store(cs.Height);
-                        }
+                        contentSize = frame.ContentSize();
                     } catch (...) {}
-                    // Heuristic unchanged-frame skip: compare SystemRelativeTime delta and optionally derived size
-                    if (g_skipUnchanged.load()) {
-                        try {
-                            static int64_t lastSrtUs = 0;
-                            int64_t srtUs = timestamp; // already converted above
-                            if (lastSrtUs != 0) {
-                                // If extremely small delta (< 1000us), likely no new content; let consumer decide to drop aggressively
-                                if (srtUs - lastSrtUs <= 1000) {
-                                    // Skip enqueue and continue; rely on capture cadence
-                                    lastSrtUs = srtUs;
-                                    continue;
-                                }
-                            }
-                            lastSrtUs = srtUs;
-                        } catch (...) {}
-                    }
-                    // Ultra-light: push surface + timestamp into SPSC ring (latest-frame-wins)
+
+                    // Ultra-light enqueue: minimal work in callback
                     if (g_ringCapacity > 0) {
-                        ETW_MARK("Capture_Enqueue_Start");
-                        int64_t enqueueStartUs = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
-                        // Compute next head and detect full
+                        // Compute next positions
                         size_t head = g_ringHead.load(std::memory_order_relaxed);
                         size_t nextHead = (head + 1) % g_ringCapacity;
                         size_t tail = g_ringTail.load(std::memory_order_acquire);
+
                         if (nextHead == tail) {
                             // Full: drop oldest (advance tail) to keep latest
                             g_ringTail.store((tail + 1) % g_ringCapacity, std::memory_order_release);
                             g_overwriteDrops.fetch_add(1, std::memory_order_relaxed);
                         }
+
+                        // Store frame data (minimal)
                         g_ring[head].sequenceNumber = sequenceNumber;
                         g_ring[head].texture = nullptr;
                         g_ring[head].timestamp = timestamp;
                         g_ring[head].surface = surface;
+
+                        // Store metadata for deferred processing (consumer thread)
+                        size_t metadataHead = g_metadataHead.load(std::memory_order_relaxed);
+                        g_metadataRing[metadataHead].systemRelativeTimeUs = systemRelativeTimeUs;
+                        g_metadataRing[metadataHead].contentSize = contentSize;
+                        g_metadataRing[metadataHead].shouldSkipUnchanged = g_skipUnchanged.load();
+
+                        // Update both ring heads
                         g_ringHead.store(nextHead, std::memory_order_release);
-                        // Notify consumer
+                        g_metadataHead.store((metadataHead + 1) % g_metadataCapacity, std::memory_order_release);
+
+                        // Notify consumer (minimal)
                         g_ringCV.notify_one();
-                        ETW_MARK("Capture_Enqueue_End");
-                        int64_t enqueueEndUs = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
-                        double dtUs = static_cast<double>(enqueueEndUs - enqueueStartUs);
-                        if (dtUs > 0) VideoMetrics::ewmaUpdate(VideoMetrics::captureToEnqueueUsAvg(), dtUs);
                     }
                 }
             }
@@ -353,6 +334,12 @@ void StartCapture() {
         g_ringTail.store(0, std::memory_order_relaxed);
         g_overwriteDrops.store(0, std::memory_order_relaxed);
         g_backpressureSkips.store(0, std::memory_order_relaxed);
+
+        // Initialize metadata ring with same capacity
+        g_metadataCapacity = g_ringCapacity;
+        g_metadataRing.assign(g_metadataCapacity, DeferredFrameMetadata{});
+        g_metadataHead.store(0, std::memory_order_relaxed);
+        g_metadataTail.store(0, std::memory_order_relaxed);
     }
 
     // Single encode/transmit consumer thread
@@ -442,6 +429,55 @@ void StartCapture() {
                 job = g_ring[tail];
                 g_ringTail.store((tail + 1) % g_ringCapacity, std::memory_order_release);
             }
+            // DEFERRED PROCESSING: Handle work moved from callback to reduce WGC backpressure
+            {
+                // Pop corresponding metadata from metadata ring
+                size_t metadataTail = g_metadataTail.load(std::memory_order_acquire);
+                DeferredFrameMetadata metadata = g_metadataRing[metadataTail];
+                g_metadataTail.store((metadataTail + 1) % g_metadataCapacity, std::memory_order_release);
+
+                // 1. FPS calculation (moved from callback)
+                {
+                    static int capCount = 0;
+                    static int64_t windowStartUs = 0;
+                    capCount++;
+                    if (windowStartUs == 0) windowStartUs = metadata.systemRelativeTimeUs;
+                    int64_t elapsed = metadata.systemRelativeTimeUs - windowStartUs;
+                    if (elapsed >= kOneSecondUs) { // ~1s window
+                        double fps = static_cast<double>(capCount) * 1'000'000.0 / static_cast<double>(elapsed);
+                        VideoMetrics::ewmaUpdate(VideoMetrics::captureFps(), fps);
+                        capCount = 0;
+                        windowStartUs = metadata.systemRelativeTimeUs;
+                    }
+                }
+
+                // 2. Content size change detection (moved from callback)
+                try {
+                    static std::atomic<int> lastLoggedW{ 0 };
+                    static std::atomic<int> lastLoggedH{ 0 };
+                    if (metadata.contentSize.Width != lastLoggedW.load() || metadata.contentSize.Height != lastLoggedH.load()) {
+                        std::wcout << L"[WGC] ContentSize changed: " << metadata.contentSize.Width << L"x" << metadata.contentSize.Height << std::endl;
+                        lastLoggedW.store(metadata.contentSize.Width);
+                        lastLoggedH.store(metadata.contentSize.Height);
+                    }
+                } catch (...) {}
+
+                // 3. Unchanged frame skipping (moved from callback)
+                if (metadata.shouldSkipUnchanged) {
+                    try {
+                        static int64_t lastSrtUs = 0;
+                        if (lastSrtUs != 0) {
+                            // If extremely small delta (< 1000us), likely no new content; skip aggressively
+                            if (metadata.systemRelativeTimeUs - lastSrtUs <= 1000) {
+                                lastSrtUs = metadata.systemRelativeTimeUs;
+                                continue; // Skip this frame entirely
+                            }
+                        }
+                        lastSrtUs = metadata.systemRelativeTimeUs;
+                    } catch (...) {}
+                }
+            }
+
             // Enforce monotonic sequence; count any out-of-order occurrence
             {
                 int prev = g_lastProcessedSeq.load(std::memory_order_relaxed);
@@ -518,6 +554,12 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
         g_ringCapacity = 0;
         g_ringHead.store(0, std::memory_order_relaxed);
         g_ringTail.store(0, std::memory_order_relaxed);
+
+        // Clear metadata ring
+        g_metadataRing.clear();
+        g_metadataCapacity = 0;
+        g_metadataHead.store(0, std::memory_order_relaxed);
+        g_metadataTail.store(0, std::memory_order_relaxed);
     }
     // Removed unused encode queue cleanup
 
