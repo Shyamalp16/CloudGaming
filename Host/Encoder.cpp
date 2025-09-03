@@ -480,80 +480,89 @@ namespace Encoder {
     }
 
     bool VideoProcessorBltToSlot(ID3D11Texture2D* bgraSrcTexture, int slotIndex) {
-        std::lock_guard<std::mutex> lock(g_encoderMutex);
-        if (!codecCtx || !g_videoProcessor || slotIndex < 0 || slotIndex >= (int)g_hwFrames.size()) return false;
-        AVFrame* hw = g_hwFrames[slotIndex];
-        ID3D11Texture2D* nv12 = (ID3D11Texture2D*)hw->data[0];
+        // Core GPU operation under mutex (keep this minimal)
+        HRESULT bltHr = E_FAIL;
+        {
+            std::lock_guard<std::mutex> lock(g_encoderMutex);
+            if (!codecCtx || !g_videoProcessor || slotIndex < 0 || slotIndex >= (int)g_hwFrames.size()) return false;
+            AVFrame* hw = g_hwFrames[slotIndex];
+            ID3D11Texture2D* nv12 = (ID3D11Texture2D*)hw->data[0];
 
-        // Create/reuse views
-        Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
-        if (!g_inputViewLru.get(bgraSrcTexture, inView)) {
-            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc{};
-            inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-            inDesc.Texture2D.MipSlice = 0; inDesc.Texture2D.ArraySlice = 0;
-            if (FAILED(g_videoDevice->CreateVideoProcessorInputView(bgraSrcTexture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf()))) return false;
-            g_inputViewLru.put(bgraSrcTexture, inView);
-        }
-        Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
-        if (!g_outputViewLru.get(nv12, outView)) {
-            D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
-            outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D; outDesc.Texture2D.MipSlice = 0;
-            if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(nv12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) return false;
-            g_outputViewLru.put(nv12, outView);
-        }
-        D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
+            // Create/reuse views (fast LRU operations)
+            Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
+            if (!g_inputViewLru.get(bgraSrcTexture, inView)) {
+                D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc{};
+                inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+                inDesc.Texture2D.MipSlice = 0; inDesc.Texture2D.ArraySlice = 0;
+                if (FAILED(g_videoDevice->CreateVideoProcessorInputView(bgraSrcTexture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf()))) return false;
+                g_inputViewLru.put(bgraSrcTexture, inView);
+            }
+            Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
+            if (!g_outputViewLru.get(nv12, outView)) {
+                D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
+                outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D; outDesc.Texture2D.MipSlice = 0;
+                if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(nv12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) return false;
+                g_outputViewLru.put(nv12, outView);
+            }
+            D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
 
-        // Optional deferred-context flag present, but VideoProcessorBlt is only available via ID3D11VideoContext
-        // which is immediate-context backed. Fall back to immediate video context.
-        if (g_deferredContextEnabled) {
-            return SUCCEEDED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream));
-        }
-
-        if (!g_gpuTimingEnabled) {
-            return SUCCEEDED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream));
-        }
-
-        // Lazy-create timestamp queries on first use
-        if (!g_tsDisjoint) {
-            D3D11_QUERY_DESC qd{}; qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT; qd.MiscFlags = 0;
-            ((ID3D11Device*)GetD3DDevice().get())->CreateQuery(&qd, g_tsDisjoint.GetAddressOf());
-        }
-        if (!g_tsStart) {
-            D3D11_QUERY_DESC q{}; q.Query = D3D11_QUERY_TIMESTAMP; q.MiscFlags = 0;
-            ((ID3D11Device*)GetD3DDevice().get())->CreateQuery(&q, g_tsStart.GetAddressOf());
-        }
-        if (!g_tsEnd) {
-            D3D11_QUERY_DESC q{}; q.Query = D3D11_QUERY_TIMESTAMP; q.MiscFlags = 0;
-            ((ID3D11Device*)GetD3DDevice().get())->CreateQuery(&q, g_tsEnd.GetAddressOf());
+            // Core GPU BLT operation (fast, but keep under mutex to protect shared resources)
+            if (g_deferredContextEnabled) {
+                bltHr = g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream);
+            } else {
+                bltHr = g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream);
+            }
         }
 
-        Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediate;
-        ((ID3D11Device*)GetD3DDevice().get())->GetImmediateContext(immediate.GetAddressOf());
+        // GPU timing queries OUTSIDE mutex (potentially blocking operations)
+        if (g_gpuTimingEnabled && SUCCEEDED(bltHr)) {
+            // Lazy-create timestamp queries on first use (outside mutex)
+            if (!g_tsDisjoint) {
+                std::lock_guard<std::mutex> lock(g_encoderMutex); // Brief lock just for query creation
+                D3D11_QUERY_DESC qd{}; qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT; qd.MiscFlags = 0;
+                ((ID3D11Device*)GetD3DDevice().get())->CreateQuery(&qd, g_tsDisjoint.GetAddressOf());
+            }
+            if (!g_tsStart) {
+                std::lock_guard<std::mutex> lock(g_encoderMutex); // Brief lock just for query creation
+                D3D11_QUERY_DESC q{}; q.Query = D3D11_QUERY_TIMESTAMP; q.MiscFlags = 0;
+                ((ID3D11Device*)GetD3DDevice().get())->CreateQuery(&q, g_tsStart.GetAddressOf());
+            }
+            if (!g_tsEnd) {
+                std::lock_guard<std::mutex> lock(g_encoderMutex); // Brief lock just for query creation
+                D3D11_QUERY_DESC q{}; q.Query = D3D11_QUERY_TIMESTAMP; q.MiscFlags = 0;
+                ((ID3D11Device*)GetD3DDevice().get())->CreateQuery(&q, g_tsEnd.GetAddressOf());
+            }
 
-        immediate->Begin(g_tsDisjoint.Get());
-        immediate->End(g_tsStart.Get());
-        HRESULT bltHr = g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream);
-        immediate->End(g_tsEnd.Get());
-        immediate->End(g_tsDisjoint.Get());
+            // GPU timing operations (outside main mutex)
+            Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediate;
+            ((ID3D11Device*)GetD3DDevice().get())->GetImmediateContext(immediate.GetAddressOf());
 
-        // Readback timing (non-blocking try; if not ready, skip logging)
-        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
-        if (SUCCEEDED(immediate->GetData(g_tsDisjoint.Get(), &disjoint, sizeof(disjoint), 0)) && !disjoint.Disjoint) {
-            UINT64 startTs = 0, endTs = 0;
-            if (SUCCEEDED(immediate->GetData(g_tsStart.Get(), &startTs, sizeof(startTs), 0)) &&
-                SUCCEEDED(immediate->GetData(g_tsEnd.Get(), &endTs, sizeof(endTs), 0)) && endTs > startTs) {
-                double gpuMs = (double)(endTs - startTs) / (double)disjoint.Frequency * 1000.0;
-                VideoMetrics::vpGpuMs().store(gpuMs, std::memory_order_relaxed);
-                // Persist last observed value for external export
-                // Avoid an include cycle by not depending on VideoMetrics here
-                static auto lastLog = std::chrono::steady_clock::now();
-                auto now = std::chrono::steady_clock::now();
-                if (std::chrono::duration_cast<std::chrono::seconds>(now - lastLog).count() >= 1) {
-                    // std::wcout << L"[VP] VideoProcessorBlt GPU time ~" << gpuMs << L" ms" << std::endl;
-                    lastLog = now;
+            immediate->Begin(g_tsDisjoint.Get());
+            immediate->End(g_tsStart.Get());
+            // BLT already done above
+            immediate->End(g_tsEnd.Get());
+            immediate->End(g_tsDisjoint.Get());
+
+            // Readback timing (non-blocking try; if not ready, skip logging) - OUTSIDE MUTEX
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
+            if (SUCCEEDED(immediate->GetData(g_tsDisjoint.Get(), &disjoint, sizeof(disjoint), 0)) && !disjoint.Disjoint) {
+                UINT64 startTs = 0, endTs = 0;
+                if (SUCCEEDED(immediate->GetData(g_tsStart.Get(), &startTs, sizeof(startTs), 0)) &&
+                    SUCCEEDED(immediate->GetData(g_tsEnd.Get(), &endTs, sizeof(endTs), 0)) && endTs > startTs) {
+                    double gpuMs = (double)(endTs - startTs) / (double)disjoint.Frequency * 1000.0;
+                    VideoMetrics::vpGpuMs().store(gpuMs, std::memory_order_relaxed);
+                    // Persist last observed value for external export
+                    // Avoid an include cycle by not depending on VideoMetrics here
+                    static auto lastLog = std::chrono::steady_clock::now();
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::seconds>(now - lastLog).count() >= 1) {
+                        // std::wcout << L"[VP] VideoProcessorBlt GPU time ~" << gpuMs << L" ms" << std::endl;
+                        lastLog = now;
+                    }
                 }
             }
         }
+
         return SUCCEEDED(bltHr);
     }
 
@@ -1268,27 +1277,40 @@ namespace Encoder {
     }
 
     void FlushEncoder() {
-        std::lock_guard<std::mutex> lock(g_encoderMutex);
-        if (!codecCtx) return;
-        // std::wcout << L"[DEBUG] Flushing encoder\n";
-        int ret = avcodec_send_frame(codecCtx, nullptr); // Send flush frame
-        if (ret < 0) {
+        // Core flush operations under mutex (keep this minimal)
+        bool flushFailed = false;
+        bool receiveError = false;
+        {
+            std::lock_guard<std::mutex> lock(g_encoderMutex);
+            if (!codecCtx) return;
+
+            int ret = avcodec_send_frame(codecCtx, nullptr); // Send flush frame
+            if (ret < 0) {
+                flushFailed = true;
+                return;
+            }
+            while (ret >= 0) {
+                ret = avcodec_receive_packet(codecCtx, packet);
+                if (ret == AVERROR_EOF) {
+                    break;
+                }
+                else if (ret < 0) {
+                    receiveError = true;
+                    break;
+                }
+                pushPacketToWebRTC(packet);
+                av_packet_unref(packet);
+            }
+        }
+
+        // Logging OUTSIDE mutex (potentially slow operations)
+        if (flushFailed) {
             std::cerr << "[Encoder] Failed to send flush frame to encoder.\n";
-            return;
+        } else if (receiveError) {
+            std::cerr << "[Encoder] Error while flushing encoder.\n";
+        } else {
+            std::wcout << L"[Encoder] Encoder flush complete\n";
         }
-        while (ret >= 0) {
-            ret = avcodec_receive_packet(codecCtx, packet);
-            if (ret == AVERROR_EOF) {
-                break;
-            }
-            else if (ret < 0) {
-                std::cerr << "[Encoder] Error while flushing encoder.\n";
-                break;
-            }
-            pushPacketToWebRTC(packet);
-            av_packet_unref(packet);
-        }
-        std::wcout << L"[DEBUG] Encoder flush complete\n";
     }
 
     void RequestIDR() {
@@ -1301,54 +1323,68 @@ namespace Encoder {
     }
 
     void FinalizeEncoder() {
-        std::lock_guard<std::mutex> lock(g_encoderMutex);
-        std::wcout << L"[DEBUG] Finalizing encoder...\n";
+        // Core cleanup under mutex (keep this minimal)
+        {
+            std::lock_guard<std::mutex> lock(g_encoderMutex);
+            if (codecCtx) {
+                avcodec_free_context(&codecCtx);
+                codecCtx = nullptr;
+            }
+            if (formatCtx) {
+                avformat_free_context(formatCtx);
+                formatCtx = nullptr;
+            }
+            if (packet) { av_packet_free(&packet); packet = nullptr; }
+            // Free hw frame ring
+            for (AVFrame* f : g_hwFrames) { if (f) av_frame_free(&f); }
+            g_hwFrames.clear();
+            if (hwFramesCtx) {
+                av_buffer_unref(&hwFramesCtx);
+                hwFramesCtx = nullptr;
+            }
+            if (hwDeviceCtx) {
+                av_buffer_unref(&hwDeviceCtx);
+                hwDeviceCtx = nullptr;
+            }
+            // Stop sender thread after encoder teardown
+            StopSenderThread();
+        }
 
-        if (codecCtx) {
-            avcodec_free_context(&codecCtx);
-            codecCtx = nullptr;
-        }
-        if (formatCtx) {
-            avformat_free_context(formatCtx);
-            formatCtx = nullptr;
-        }
-        if (packet) { av_packet_free(&packet); packet = nullptr; }
-        // Free hw frame ring
-        for (AVFrame* f : g_hwFrames) { if (f) av_frame_free(&f); }
-        g_hwFrames.clear();
-        if (hwFramesCtx) {
-            av_buffer_unref(&hwFramesCtx);
-            hwFramesCtx = nullptr;
-        }
-        if (hwDeviceCtx) {
-            av_buffer_unref(&hwDeviceCtx);
-            hwDeviceCtx = nullptr;
-        }
-        // Stop sender thread after encoder teardown
-        StopSenderThread();
+        // Logging OUTSIDE mutex (potentially slow operation)
         std::wcout << L"[Encoder] Encoder finalized.\n";
     }
 
     void AdjustBitrate(int new_bitrate) {
-        std::lock_guard<std::mutex> lock(g_encoderMutex);
+        // Core bitrate adjustment under mutex (keep this minimal)
+        bool codecSupportsRuntimeUpdate = true;
+        {
+            std::lock_guard<std::mutex> lock(g_encoderMutex);
+            if (codecCtx) {
+                codecCtx->bit_rate = new_bitrate;
+                codecCtx->rc_max_rate = new_bitrate;
+                codecCtx->rc_buffer_size = new_bitrate * 2;
+                // Apply encoder-specific runtime controls
+                if (codecCtx->priv_data) {
+                    int r1 = av_opt_set_int(codecCtx->priv_data, "bitrate", new_bitrate, 0);
+                    int r2 = av_opt_set_int(codecCtx->priv_data, "maxrate", new_bitrate, 0);
+                    int r3 = av_opt_set_int(codecCtx->priv_data, "bufsize", new_bitrate * 2, 0);
+                    if (r1 < 0 || r2 < 0 || r3 < 0) {
+                        codecSupportsRuntimeUpdate = false;
+                        g_pendingReopen.store(true);
+                        g_reopenTargetBitrate.store(new_bitrate);
+                    }
+                }
+                // Force an IDR soon so downstream adapts to new rate quickly
+                av_opt_set(codecCtx->priv_data, "force_key_frames", "expr:gte(t,n_forced*1)", 0);
+            }
+        }
+
+        // Logging OUTSIDE mutex (potentially slow operations)
         if (codecCtx) {
             std::wcout << L"[Encoder] Adjusting bitrate to " << new_bitrate << L" bps\n";
-            codecCtx->bit_rate = new_bitrate;
-            codecCtx->rc_max_rate = new_bitrate;
-            codecCtx->rc_buffer_size = new_bitrate * 2;
-            // Apply encoder-specific runtime controls
-            if (codecCtx->priv_data) {
-                int r1 = av_opt_set_int(codecCtx->priv_data, "bitrate", new_bitrate, 0);
-                int r2 = av_opt_set_int(codecCtx->priv_data, "maxrate", new_bitrate, 0);
-                int r3 = av_opt_set_int(codecCtx->priv_data, "bufsize", new_bitrate * 2, 0);
-                if (r1 < 0 || r2 < 0 || r3 < 0) {
-                    std::wcout << L"[Encoder] Runtime bitrate update not fully supported by this codec. Scheduling reopen...\n";
-                    g_pendingReopen.store(true);
-                    g_reopenTargetBitrate.store(new_bitrate);
-                }
+            if (!codecSupportsRuntimeUpdate) {
+                std::wcout << L"[Encoder] Runtime bitrate update not fully supported by this codec. Scheduling reopen...\n";
             }
-            // Force an IDR soon so downstream adapts to new rate quickly
-            av_opt_set(codecCtx->priv_data, "force_key_frames", "expr:gte(t,n_forced*1)", 0);
         }
     }
 
