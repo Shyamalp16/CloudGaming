@@ -491,7 +491,8 @@ void initWebsocket(const std::string& roomId) {
         }
         });
 
-    // Video is sent directly from Encoder::pushPacketToWebRTC -> sendVideoPacket.
+    // Video is sent from Encoder::pushPacketToWebRTC -> EnqueueEncodedSample -> SenderLoop -> sendVideoSample (paced path).
+    // The sendVideoPacket function exists only for debugging/testing and is gated in production builds.
     // Disable legacy queue-based sender threads to avoid duplicate RTP sends.
     // g_frame_thread = std::thread(&sendFrames);
     // g_sender_thread = std::thread(&senderThread);

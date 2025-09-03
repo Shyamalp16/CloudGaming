@@ -145,7 +145,7 @@ winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(
     return texture;
 }
 
-static std::atomic<int> g_framePoolBuffers{6};
+static std::atomic<int> g_framePoolBuffers{kDefaultFramePoolBuffers};
 void SetFramePoolBuffers(int bufferCount) {
     if (bufferCount < 1) bufferCount = 1;
     if (bufferCount > 16) bufferCount = 16;
@@ -189,14 +189,26 @@ GraphicsCaptureSession createCaptureSession(
         session.IsCursorCaptureEnabled(g_cursorCaptureEnabled.load());
         // Best-effort: some OS versions expose IsBorderRequired
         try { session.IsBorderRequired(g_borderRequired.load()); } catch (...) {}
-        // Configure MinUpdateInterval if requested
+        // Configure MinUpdateInterval if requested - ensure it's always set for low latency
         try {
             auto val = g_minUpdateInterval100ns.load();
             if (val > 0) {
                 session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ val });
                 std::wcout << L"[WGC] MinUpdateInterval set to " << val << L" (100ns units)" << std::endl;
+            } else {
+                // Fallback: set conservative default (33ms for ~30fps) to ensure low latency
+                auto fallbackVal = 333333LL; // 33.333ms in 100ns units
+                session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ fallbackVal });
+                std::wcout << L"[WGC] MinUpdateInterval not configured, using conservative fallback: " << fallbackVal << L" (100ns units, ~30fps)" << std::endl;
             }
-        } catch (...) {}
+        } catch (...) {
+            // Exception fallback: set very conservative default to prevent high latency
+            try {
+                auto exceptionFallback = 1000000LL; // 100ms in 100ns units (10fps)
+                session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ exceptionFallback });
+                std::wcout << L"[WGC] Exception in MinUpdateInterval, using exception fallback: " << exceptionFallback << L" (100ns units)" << std::endl;
+            } catch (...) {}
+        }
     }
     catch (const winrt::hresult_error& e)
     {
@@ -384,17 +396,40 @@ void StartCapture() {
             // If encoder is backlogged, skip to latest frame (drop all but last)
             {
                 bool backlogged = Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load());
-                if (backlogged) {
-                    size_t head = g_ringHead.load(std::memory_order_acquire);
-                    size_t tail = g_ringTail.load(std::memory_order_acquire);
-                    size_t sz = (head >= tail) ? (head - tail) : (g_ringCapacity - (tail - head));
-                    if (sz > 1) {
-                        // keep only the newest element
-                        size_t newTail = (head + g_ringCapacity - 1) % g_ringCapacity;
-                        // Count how many we skipped
-                        size_t skipped = (sz - 1);
-                        g_ringTail.store(newTail, std::memory_order_release);
-                        g_backpressureSkips.fetch_add(skipped, std::memory_order_relaxed);
+                size_t head = g_ringHead.load(std::memory_order_acquire);
+                size_t tail = g_ringTail.load(std::memory_order_acquire);
+                size_t sz = (head >= tail) ? (head - tail) : (g_ringCapacity - (tail - head));
+
+                if (backlogged && sz > 1) {
+                    // keep only the newest element
+                    size_t newTail = (head + g_ringCapacity - 1) % g_ringCapacity;
+                    // Count how many we skipped
+                    size_t skipped = (sz - 1);
+                    g_ringTail.store(newTail, std::memory_order_release);
+                    g_backpressureSkips.fetch_add(skipped, std::memory_order_relaxed);
+
+                    // Log backpressure events for latency debugging (throttled)
+                    static auto lastBackpressureLog = std::chrono::steady_clock::now();
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastBackpressureLog);
+                    if (elapsed.count() >= 1000) { // Log at most once per second
+                        std::wcout << L"[Capture] Backpressure: dropped " << skipped << L" frames, queue depth was " << sz << std::endl;
+                        lastBackpressureLog = now;
+                    }
+                }
+                // Additional safety: if queue is critically full (near capacity), be more aggressive
+                else if (sz >= g_maxQueuedFrames.load() - 1 && sz > 2) {
+                    size_t newTail = (head + g_ringCapacity - 1) % g_ringCapacity;
+                    size_t skipped = (sz - 1);
+                    g_ringTail.store(newTail, std::memory_order_release);
+                    g_backpressureSkips.fetch_add(skipped, std::memory_order_relaxed);
+
+                    static auto lastCriticalLog = std::chrono::steady_clock::now();
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCriticalLog);
+                    if (elapsed.count() >= 2000) { // Log critical events less frequently
+                        std::wcout << L"[Capture] CRITICAL: Queue nearly full, dropped " << skipped << L" frames, depth was " << sz << L"/" << g_maxQueuedFrames.load() << std::endl;
+                        lastCriticalLog = now;
                     }
                 }
             }

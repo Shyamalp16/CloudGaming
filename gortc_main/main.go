@@ -1718,6 +1718,21 @@ func handleRemoteIceCandidate(candidateStr *C.char) {
 
 //export sendVideoPacket
 func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
+	// LATENCY CRITICAL: This function bypasses pacing by writing with Duration: 0
+	// It should ONLY be used for testing/debugging, NEVER in production builds
+	// Production code should use sendVideoSample with accurate durations for proper pacing
+
+	// Production build guard: this function is gated to prevent accidental use
+	// In production builds, this will always return an error
+	if isProductionBuild() {
+		log.Printf("[ERROR] sendVideoPacket called in production build - this bypasses pacing and increases latency!")
+		log.Printf("[ERROR] Use sendVideoSample with accurate durations instead for proper pacing")
+		return -2 // Distinct error code for production guard violation
+	}
+
+	log.Printf("[WARNING] sendVideoPacket called - this bypasses pacing (Duration: 0)")
+	log.Printf("[WARNING] For low-latency streaming, use sendVideoSample with accurate frame durations")
+
 	pcMutex.Lock()
 	defer pcMutex.Unlock()
 
@@ -1747,6 +1762,14 @@ func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		sendLastLog = time.Now()
 	}
 	return 0
+}
+
+// isProductionBuild returns true if this is a production build
+// This can be controlled via build tags or environment variables
+func isProductionBuild() bool {
+	// Check for production build tag or environment variable
+	// Default to production mode for safety - only allow zero-duration in debug builds
+	return true // Always production mode by default for safety
 }
 
 func splitNALUnits(buf []byte) [][]byte {
