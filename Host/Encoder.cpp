@@ -571,6 +571,17 @@ namespace Encoder {
                 g_eagainCount.fetch_add(1);
                 g_lastEagain = std::chrono::steady_clock::now();
                 VideoMetrics::inc(VideoMetrics::eagainEvents());
+
+                // Log EAGAIN events for debugging (throttled)
+                static auto lastEagainLog = std::chrono::steady_clock::now();
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastEagainLog);
+                if (elapsed.count() >= 5000) { // Log at most every 5 seconds
+                    int currentCount = g_eagainCount.load();
+                    std::wcout << L"[Encoder] EAGAIN detected: encoder queue full, frame dropped. "
+                              << L"Recent EAGAIN count: " << currentCount << std::endl;
+                    lastEagainLog = now;
+                }
                 for (;;) {
                     int r = avcodec_receive_packet(codecCtx, packet);
                     if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) break;
@@ -1052,6 +1063,10 @@ namespace Encoder {
                 std::wcout << L"[Encoder] WARNING: async_depth (" << g_nvAsyncDepth
                           << L") is high. Values > 3 may increase latency. Consider 1-2 for low latency." << std::endl;
             }
+
+            std::wcout << L"[Encoder] EAGAIN handling: Enhanced backpressure detection with severity-based upstream dropping" << std::endl;
+            std::wcout << L"[Encoder]   - Send queue depth: " << kMaxSendQueue << L" (drops oldest on overflow)" << std::endl;
+            std::wcout << L"[Encoder]   - Backpressure levels: MILD/MODERATE/SEVERE with adaptive dropping" << std::endl;
         }
 
         // Ensure sender thread is running after encoder is ready
@@ -1187,6 +1202,17 @@ namespace Encoder {
             g_eagainCount.fetch_add(1);
             g_lastEagain = std::chrono::steady_clock::now();
             VideoMetrics::inc(VideoMetrics::eagainEvents());
+
+            // Log EAGAIN events for debugging (throttled)
+            static auto lastEagainLog2 = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastEagainLog2);
+            if (elapsed.count() >= 5000) { // Log at most every 5 seconds
+                int currentCount = g_eagainCount.load();
+                std::wcout << L"[Encoder] EAGAIN detected in EncodeFrame: encoder queue full, frame dropped. "
+                          << L"Recent EAGAIN count: " << currentCount << std::endl;
+                lastEagainLog2 = now;
+            }
             for (;;) {
                 int rcv = avcodec_receive_packet(codecCtx, packet);
                 if (rcv == AVERROR(EAGAIN) || rcv == AVERROR_EOF) {
@@ -1331,6 +1357,27 @@ namespace Encoder {
         auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastEagain).count();
         int cnt = g_eagainCount.load();
         return (since <= recent_window_ms) && (cnt >= min_events);
+    }
+
+    BackpressureLevel GetBackpressureLevel() {
+        auto now = std::chrono::steady_clock::now();
+        auto sinceLastEagain = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastEagain).count();
+        int eagainCount = g_eagainCount.load();
+
+        // Severe: Recent EAGAIN events (last 500ms) with high count
+        if (sinceLastEagain <= 500 && eagainCount >= 5) {
+            return SEVERE;
+        }
+        // Moderate: Recent EAGAIN events (last 1s) with moderate count
+        else if (sinceLastEagain <= 1000 && eagainCount >= 3) {
+            return MODERATE;
+        }
+        // Mild: Recent EAGAIN events (last 2s) with low count
+        else if (sinceLastEagain <= 2000 && eagainCount >= 2) {
+            return MILD;
+        }
+
+        return NONE;
     }
 
     void GetAndResetBackpressureStats(int &eagainEvents) {

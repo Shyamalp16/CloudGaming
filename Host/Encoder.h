@@ -69,6 +69,13 @@ namespace Encoder {
 
     // Backpressure visibility for capture loop
     bool IsBacklogged(int recent_window_ms, int min_events);
+    enum BackpressureLevel {
+        NONE = 0,
+        MILD = 1,      // Occasional EAGAIN, minor congestion
+        MODERATE = 2,  // Sustained EAGAIN, moderate congestion
+        SEVERE = 3     // Persistent EAGAIN, severe congestion
+    };
+    BackpressureLevel GetBackpressureLevel();
     void GetAndResetBackpressureStats(int &eagainEvents);
 
     // Enable/disable GPU timing instrumentation around VideoProcessorBlt

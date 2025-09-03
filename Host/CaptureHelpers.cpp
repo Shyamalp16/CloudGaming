@@ -457,43 +457,71 @@ void StartCapture() {
                 if (!isCapturing.load() && RingSize() == 0) break;
             }
 
-            // If encoder is backlogged, skip to latest frame (drop all but last)
+            // Enhanced backpressure handling with severity-based response
             {
-                bool backlogged = Encoder::IsBacklogged(g_dropWindowMs.load(), g_dropMinEvents.load());
+                Encoder::BackpressureLevel bpLevel = Encoder::GetBackpressureLevel();
                 size_t head = g_ringHead.load(std::memory_order_acquire);
                 size_t tail = g_ringTail.load(std::memory_order_acquire);
                 size_t sz = (head >= tail) ? (head - tail) : (g_ringCapacity - (tail - head));
 
-                if (backlogged && sz > 1) {
-                    // keep only the newest element
-                    size_t newTail = (head + g_ringCapacity - 1) % g_ringCapacity;
-                    // Count how many we skipped
-                    size_t skipped = (sz - 1);
-                    g_ringTail.store(newTail, std::memory_order_release);
-                    g_backpressureSkips.fetch_add(skipped, std::memory_order_relaxed);
+                // Determine how aggressively to drop based on backpressure severity
+                size_t framesToKeep = 1; // Default: keep only latest frame
+                bool shouldDrop = false;
 
-                    // Log backpressure events for latency debugging (throttled)
+                if (bpLevel == Encoder::SEVERE) {
+                    // Severe backpressure: drop everything except the absolute latest
+                    framesToKeep = 1;
+                    shouldDrop = (sz > 1);
+                } else if (bpLevel == Encoder::MODERATE) {
+                    // Moderate backpressure: keep last 2 frames
+                    framesToKeep = 2;
+                    shouldDrop = (sz > framesToKeep);
+                } else if (bpLevel == Encoder::MILD) {
+                    // Mild backpressure: keep last 3 frames
+                    framesToKeep = 3;
+                    shouldDrop = (sz > framesToKeep);
+                } else if (sz >= g_maxQueuedFrames - 1 && sz > 2) {
+                    // Fallback: queue is critically full regardless of EAGAIN status
+                    framesToKeep = 1;
+                    shouldDrop = true;
+                }
+
+                if (shouldDrop) {
+                    // Calculate new tail position to keep only the desired number of frames
+                    size_t newTail;
+                    if (sz <= framesToKeep) {
+                        newTail = tail; // No change needed
+                    } else {
+                        newTail = (head + g_ringCapacity - framesToKeep) % g_ringCapacity;
+                    }
+
+                    // Count how many we skipped
+                    size_t skipped = 0;
+                    if (newTail != tail) {
+                        if (newTail > tail) {
+                            skipped = newTail - tail;
+                        } else {
+                            skipped = (g_ringCapacity - tail) + newTail;
+                        }
+                        g_ringTail.store(newTail, std::memory_order_release);
+                        g_backpressureSkips.fetch_add(skipped, std::memory_order_relaxed);
+                    }
+
+                    // Log backpressure events with severity information (throttled)
                     static auto lastBackpressureLog = std::chrono::steady_clock::now();
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastBackpressureLog);
                     if (elapsed.count() >= 1000) { // Log at most once per second
-                        std::wcout << L"[Capture] Backpressure: dropped " << skipped << L" frames, queue depth was " << sz << std::endl;
+                        const wchar_t* severityStr = L"UNKNOWN";
+                        switch (bpLevel) {
+                            case Encoder::NONE: severityStr = L"NONE"; break;
+                            case Encoder::MILD: severityStr = L"MILD"; break;
+                            case Encoder::MODERATE: severityStr = L"MODERATE"; break;
+                            case Encoder::SEVERE: severityStr = L"SEVERE"; break;
+                        }
+                        std::wcout << L"[Capture] Backpressure (" << severityStr << L"): dropped " << skipped
+                                  << L" frames, kept " << framesToKeep << L", queue was " << sz << L"/" << g_maxQueuedFrames << std::endl;
                         lastBackpressureLog = now;
-                    }
-                }
-                // Additional safety: if queue is critically full (near capacity), be more aggressive
-                else if (sz >= g_maxQueuedFrames - 1 && sz > 2) {
-                    size_t newTail = (head + g_ringCapacity - 1) % g_ringCapacity;
-                    size_t skipped = (sz - 1);
-                    g_ringTail.store(newTail, std::memory_order_release);
-                    g_backpressureSkips.fetch_add(skipped, std::memory_order_relaxed);
-
-                    static auto lastCriticalLog = std::chrono::steady_clock::now();
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCriticalLog);
-                    if (elapsed.count() >= 2000) { // Log critical events less frequently
-                        std::wcout << L"[Capture] CRITICAL: Queue nearly full, dropped " << skipped << L" frames, depth was " << sz << L"/" << g_maxQueuedFrames << std::endl;
-                        lastCriticalLog = now;
                     }
                 }
             }
