@@ -107,6 +107,7 @@ private:
 static LruCacheD3D<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView>> g_inputViewLru(64);
 static LruCacheD3D<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView>> g_outputViewLru(8);
 // Optional GPU timestamp queries for VideoProcessorBlt
+// WARNING: Keep disabled in production - adds GPU overhead and can cause stalls
 static bool g_gpuTimingEnabled = false;
 static Microsoft::WRL::ComPtr<ID3D11Query> g_tsDisjoint;
 static Microsoft::WRL::ComPtr<ID3D11Query> g_tsStart;
@@ -114,6 +115,11 @@ static Microsoft::WRL::ComPtr<ID3D11Query> g_tsEnd;
 static bool g_deferredContextEnabled = false;
 static Microsoft::WRL::ComPtr<ID3D11DeviceContext> g_deferredContext;
 static Microsoft::WRL::ComPtr<ID3D11CommandList> g_commandList;
+
+// VideoProcessor format validation cache
+static bool g_skipFormatChecks = false; // Skip format checks after initial validation
+static std::unordered_map<DXGI_FORMAT, bool> g_inputFormatCache;
+static std::unordered_map<DXGI_FORMAT, bool> g_outputFormatCache;
 
 // Hardware frame ring
 static std::vector<AVFrame*> g_hwFrames;
@@ -279,6 +285,95 @@ static inline void EnqueueEncodedSample(std::vector<uint8_t>&& bytes, int64_t du
     g_sendCV.notify_one();
 }
 
+// Pre-validate common texture formats to cache results and avoid per-frame checks
+static void PreValidateFormats() {
+    if (!g_vpEnumerator) return;
+
+    // Common input formats for desktop capture
+    std::vector<DXGI_FORMAT> inputFormats = {
+        DXGI_FORMAT_B8G8R8A8_UNORM,  // BGRA - most common for desktop capture
+        DXGI_FORMAT_B8G8R8X8_UNORM,  // BGRX
+        DXGI_FORMAT_R8G8B8A8_UNORM   // RGBA
+    };
+
+    // Common output formats
+    std::vector<DXGI_FORMAT> outputFormats = {
+        DXGI_FORMAT_NV12,            // NV12 - most common for encoding
+        DXGI_FORMAT_P010             // P010 for HDR (if supported)
+    };
+
+    // Validate and cache input formats
+    for (DXGI_FORMAT format : inputFormats) {
+        UINT support = 0;
+        HRESULT hr = g_vpEnumerator->CheckVideoProcessorFormat(format, &support);
+        bool isSupported = SUCCEEDED(hr) && (support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT);
+        g_inputFormatCache[format] = isSupported;
+    }
+
+    // Validate and cache output formats
+    for (DXGI_FORMAT format : outputFormats) {
+        UINT support = 0;
+        HRESULT hr = g_vpEnumerator->CheckVideoProcessorFormat(format, &support);
+        bool isSupported = SUCCEEDED(hr) && (support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT);
+        g_outputFormatCache[format] = isSupported;
+    }
+
+    // Enable skipping format checks after successful validation
+    g_skipFormatChecks = true;
+
+    std::wcout << L"[Encoder][VP] Pre-validated " << inputFormats.size() << L" input and "
+               << outputFormats.size() << L" output formats for optimized performance" << std::endl;
+}
+
+// Prime common texture views to avoid creation overhead on first frames
+static void PrimeCommonViews(ID3D11Device* device, int width, int height) {
+    if (!g_videoDevice || !g_videoContext || !g_vpEnumerator) return;
+
+    // Create a dummy BGRA texture for input view priming
+    D3D11_TEXTURE2D_DESC texDesc = {};
+    texDesc.Width = width;
+    texDesc.Height = height;
+    texDesc.MipLevels = 1;
+    texDesc.ArraySize = 1;
+    texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Usage = D3D11_USAGE_DEFAULT;
+    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> dummyInputTex;
+    if (SUCCEEDED(device->CreateTexture2D(&texDesc, nullptr, dummyInputTex.GetAddressOf()))) {
+        // Prime input view
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc{};
+        inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        inDesc.Texture2D.MipSlice = 0;
+        inDesc.Texture2D.ArraySlice = 0;
+
+        Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
+        if (SUCCEEDED(g_videoDevice->CreateVideoProcessorInputView(dummyInputTex.Get(), g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf()))) {
+            g_inputViewLru.put(dummyInputTex.Get(), inView);
+        }
+    }
+
+    // Create a dummy NV12 texture for output view priming
+    texDesc.Format = DXGI_FORMAT_NV12;
+    texDesc.BindFlags = D3D11_BIND_RENDER_TARGET;
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> dummyOutputTex;
+    if (SUCCEEDED(device->CreateTexture2D(&texDesc, nullptr, dummyOutputTex.GetAddressOf()))) {
+        // Prime output view
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
+        outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        outDesc.Texture2D.MipSlice = 0;
+
+        Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
+        if (SUCCEEDED(g_videoDevice->CreateVideoProcessorOutputView(dummyOutputTex.Get(), g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) {
+            g_outputViewLru.put(dummyOutputTex.Get(), outView);
+        }
+    }
+
+    std::wcout << L"[Encoder][VP] Primed common texture views for reduced initialization overhead" << std::endl;
+}
+
 static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height)
 {
     g_videoDevice.Reset();
@@ -315,8 +410,50 @@ static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height
         return false;
     }
 
+    // Pre-validate common formats to avoid per-frame checks
+    PreValidateFormats();
+
+    // Prime common texture views to avoid creation overhead on first frames
+    PrimeCommonViews(device, width, height);
+
     std::wcout << L"[Encoder][VP] Initialized VideoProcessor for " << width << L"x" << height << std::endl;
     return true;
+}
+
+
+
+// Check if a format is supported using cached results
+static bool IsInputFormatSupported(DXGI_FORMAT format) {
+    if (g_skipFormatChecks) {
+        auto it = g_inputFormatCache.find(format);
+        if (it != g_inputFormatCache.end()) {
+            return it->second;
+        }
+    }
+
+    // Fallback to live check if not cached
+    UINT support = 0;
+    HRESULT hr = g_vpEnumerator->CheckVideoProcessorFormat(format, &support);
+    bool isSupported = SUCCEEDED(hr) && (support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT);
+    g_inputFormatCache[format] = isSupported; // Cache for future use
+    return isSupported;
+}
+
+// Check if a format is supported using cached results
+static bool IsOutputFormatSupported(DXGI_FORMAT format) {
+    if (g_skipFormatChecks) {
+        auto it = g_outputFormatCache.find(format);
+        if (it != g_outputFormatCache.end()) {
+            return it->second;
+        }
+    }
+
+    // Fallback to live check if not cached
+    UINT support = 0;
+    HRESULT hr = g_vpEnumerator->CheckVideoProcessorFormat(format, &support);
+    bool isSupported = SUCCEEDED(hr) && (support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT);
+    g_outputFormatCache[format] = isSupported; // Cache for future use
+    return isSupported;
 }
 
 namespace Encoder {
@@ -958,14 +1095,12 @@ namespace Encoder {
         // Cached input view for the source texture
         Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
         if (!g_inputViewLru.get(texture, inView)) {
-            // Validate format support for input
+            // Validate format support for input (use cached results to avoid per-frame checks)
             D3D11_TEXTURE2D_DESC inTexDesc{};
             texture->GetDesc(&inTexDesc);
-            UINT support = 0;
-            HRESULT chk = g_vpEnumerator->CheckVideoProcessorFormat(inTexDesc.Format, &support);
-            if (FAILED(chk) || (support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0) {
-                std::wcerr << L"[Encoder][VP] Input format not supported by VideoProcessor. HRESULT=0x"
-                           << std::hex << chk << L" format=" << inTexDesc.Format << std::endl;
+            if (!IsInputFormatSupported(inTexDesc.Format)) {
+                std::wcerr << L"[Encoder][VP] Input format not supported by VideoProcessor. Format="
+                           << std::hex << inTexDesc.Format << std::endl;
                 return;
             }
 
@@ -987,14 +1122,12 @@ namespace Encoder {
         ID3D11Texture2D* ffmpegNV12 = (ID3D11Texture2D*)hwFrameLocal->data[0];
         Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
         if (!g_outputViewLru.get(ffmpegNV12, outView)) {
-            // Validate output format support (NV12)
+            // Validate output format support (use cached results to avoid per-frame checks)
             D3D11_TEXTURE2D_DESC outTexDesc{};
             ffmpegNV12->GetDesc(&outTexDesc);
-            UINT supportOut = 0;
-            HRESULT chkOut = g_vpEnumerator->CheckVideoProcessorFormat(outTexDesc.Format, &supportOut);
-            if (FAILED(chkOut) || (supportOut & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0) {
-                std::wcerr << L"[Encoder][VP] Output format not supported by VideoProcessor. HRESULT=0x"
-                           << std::hex << chkOut << L" format=" << outTexDesc.Format << std::endl;
+            if (!IsOutputFormatSupported(outTexDesc.Format)) {
+                std::wcerr << L"[Encoder][VP] Output format not supported by VideoProcessor. Format="
+                           << std::hex << outTexDesc.Format << std::endl;
                 return;
             }
             D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
