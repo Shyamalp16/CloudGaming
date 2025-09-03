@@ -3,6 +3,7 @@
 #include "Encoder.h"
 #include "CaptureHelpers.h"
 #include "AudioCapturer.h"
+#include "ThreadPriorityManager.h"
 
 #include <fstream>
 
@@ -165,6 +166,63 @@ void ApplyAudioSettings(const nlohmann::json& config)
         std::wcerr << L"[ConfigUtils] Error applying audio settings: " << e.what() << std::endl;
     } catch (...) {
         std::wcerr << L"[ConfigUtils] Unknown error applying audio settings" << std::endl;
+    }
+}
+
+void ApplyThreadPrioritySettings(const nlohmann::json& config)
+{
+    try {
+        if (!(config.contains("host") && config["host"].contains("input") &&
+              config["host"]["input"].contains("threadPriority"))) {
+            std::cout << "[ConfigUtils] No thread priority configuration found, using environment/defaults" << std::endl;
+            return;
+        }
+
+        auto tcfg = config["host"]["input"]["threadPriority"];
+
+        // Configure MMCSS
+        bool enableMMCSS = tcfg.value("enableMMCSS", true);
+        ThreadPriorityManager::enableMMCSS(enableMMCSS);
+
+        // Configure MMCSS class
+        std::string mmcssClassStr = tcfg.value("mmcssClass", std::string("Games"));
+        if (mmcssClassStr == "Games") {
+            ThreadPriorityManager::setMMCSSClass(ThreadPriorityManager::MMCSSClass::Games);
+        } else if (mmcssClassStr == "Display") {
+            ThreadPriorityManager::setMMCSSClass(ThreadPriorityManager::MMCSSClass::Display);
+        } else if (mmcssClassStr == "Audio") {
+            ThreadPriorityManager::setMMCSSClass(ThreadPriorityManager::MMCSSClass::Audio);
+        } else if (mmcssClassStr == "Playback") {
+            ThreadPriorityManager::setMMCSSClass(ThreadPriorityManager::MMCSSClass::Playback);
+        } else if (mmcssClassStr == "Capture") {
+            ThreadPriorityManager::setMMCSSClass(ThreadPriorityManager::MMCSSClass::Capture);
+        } else {
+            ThreadPriorityManager::setMMCSSClass(ThreadPriorityManager::MMCSSClass::Games);
+        }
+
+        // Configure TIME_CRITICAL priority
+        bool enableTimeCritical = tcfg.value("enableTimeCritical", true);
+        ThreadPriorityManager::enableTimeCritical(enableTimeCritical);
+
+        // Configure thread priority level
+        int threadPriority = tcfg.value("threadPriority", THREAD_PRIORITY_TIME_CRITICAL);
+        ThreadPriorityManager::setThreadPriority(threadPriority);
+
+        // Configure task name
+        std::string taskName = tcfg.value("taskName", std::string("InputInjection"));
+        ThreadPriorityManager::setTaskName(taskName);
+
+        std::cout << "[ConfigUtils] Thread priority configuration applied successfully" << std::endl;
+        std::cout << "  MMCSS: " << (enableMMCSS ? "enabled" : "disabled") << std::endl;
+        std::cout << "  MMCSS Class: " << mmcssClassStr << std::endl;
+        std::cout << "  TIME_CRITICAL: " << (enableTimeCritical ? "enabled" : "disabled") << std::endl;
+        std::cout << "  Thread Priority: " << threadPriority << std::endl;
+        std::cout << "  Task Name: " << taskName << std::endl;
+
+    } catch (const std::exception& e) {
+        std::cerr << "[ConfigUtils] Error applying thread priority settings: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "[ConfigUtils] Unknown error applying thread priority settings" << std::endl;
     }
 }
 

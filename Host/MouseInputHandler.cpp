@@ -18,6 +18,7 @@
 #include "MouseCoordinateTransform.h"
 #include "InputSequenceManager.h"
 #include "InputConfig.h"
+#include "ThreadPriorityManager.h"
 
 
 using json = nlohmann::json;
@@ -440,6 +441,14 @@ CoalescedMouseMove globalCoalescedMouseMove;
 	void mouseMessagePollingLoop() {
 		std::cout << "[MouseInputHandler] Starting blocking queue mouse message loop..." << std::endl;
 
+		// Elevate thread priority for input injection
+		ThreadPriorityManager::ScopedPriorityElevation priorityElevation;
+		if (!priorityElevation.isElevated()) {
+			std::cerr << "[MouseInputHandler] Failed to elevate thread priority for input injection" << std::endl;
+		} else {
+			std::cout << "[MouseInputHandler] Successfully elevated thread priority for low-latency input" << std::endl;
+		}
+
 		while (isRunning.load() && !ShutdownManager::IsShutdown()) {
 			std::string message;
 
@@ -710,6 +719,10 @@ CoalescedMouseMove globalCoalescedMouseMove;
 	void initializeMouseChannel() {
 		SetMouseLogLevelFromEnv();
 		SetMouseFeatureFlagsFromEnv();
+
+		// Initialize thread priority manager for low-latency input
+		ThreadPriorityManager::initializeGlobalConfig();
+
 		std::cout << "[MouseInputHandler] DEBUG: initializeMouseChannel called." << std::endl;
 		// DPI awareness note: SendInput absolute uses virtual desktop 0..65535. This is DPI-agnostic
 		// when the process is DPI-aware. Log system DPI for diagnostics.

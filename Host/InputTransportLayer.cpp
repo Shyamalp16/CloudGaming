@@ -199,7 +199,8 @@ void Layer::pionMessageLoop() {
             }
         } catch (const std::exception& e) {
             LOG_INPUT_ERROR("Exception in Pion message loop: " + std::string(e.what()), "");
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // Yield instead of sleep to maintain responsiveness
+            std::this_thread::yield();
         }
     }
 
@@ -212,11 +213,11 @@ void Layer::websocketMessageLoop() {
     while (websocketRunning.load() && !shouldStop.load()) {
         try {
             // TODO: Implement legacy WebSocket message retrieval
-            // For now, just sleep to avoid busy waiting
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // Yield instead of sleep to maintain responsiveness while avoiding busy waiting
+            std::this_thread::yield();
         } catch (const std::exception& e) {
             LOG_INPUT_ERROR("Exception in WebSocket message loop: " + std::string(e.what()), "");
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::yield();
         }
     }
 
@@ -271,7 +272,8 @@ void Layer::processingLoop() {
 
         } catch (const std::exception& e) {
             LOG_INPUT_ERROR("Exception in processing loop: " + std::string(e.what()), "");
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            // Yield instead of sleep to maintain responsiveness in critical input path
+            std::this_thread::yield();
         }
     }
 

@@ -18,6 +18,9 @@ namespace ConfigUtils {
 
     // Apply audio-related settings to AudioCapturer
     void ApplyAudioSettings(const nlohmann::json& config);
+
+    // Apply thread priority settings to ThreadPriorityManager
+    void ApplyThreadPrioritySettings(const nlohmann::json& config);
 }
 
 

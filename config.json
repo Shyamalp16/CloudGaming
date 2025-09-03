@@ -106,12 +106,19 @@
       "enablePerEventLogging": false,
       "enableAggregatedLogging": true,
       "logIntervalMs": 60000,
-      "usePionDataChannels": true, 
+      "usePionDataChannels": true,
       "enableLegacyWebSocket": false,
       "maxPendingMessages": 100,
       "strictErrorHandling": false,
       "logInjectionErrors": true,
-      "maxConsecutiveErrors": 10
+      "maxConsecutiveErrors": 10,
+      "threadPriority": {
+        "enableMMCSS": true,
+        "mmcssClass": "Games",
+        "enableTimeCritical": true,
+        "threadPriority": 15,
+        "taskName": "InputInjection"
+      }
     }
   }
 }

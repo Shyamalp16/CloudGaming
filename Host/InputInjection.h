@@ -62,29 +62,52 @@ inline bool isWindowEnabled(HWND hwnd) {
     return IsWindowEnabled(hwnd);
 }
 
-// Check if window is the foreground window
+// Check if window is the foreground window (optimized for low latency)
 inline bool isWindowForeground(HWND hwnd) {
+    // Fast check: compare handles directly
     return GetForegroundWindow() == hwnd;
 }
 
-// Comprehensive window state check against policy
+// Cached foreground window check to avoid repeated API calls
+inline bool isWindowForegroundCached(HWND hwnd, HWND* cachedForeground = nullptr) {
+    static HWND lastForegroundCheck = nullptr;
+    static DWORD lastCheckTime = 0;
+    const DWORD CACHE_TIMEOUT_MS = 1; // Cache for 1ms to reduce API calls
+
+    DWORD currentTime = GetTickCount();
+    if (currentTime - lastCheckTime > CACHE_TIMEOUT_MS) {
+        lastForegroundCheck = GetForegroundWindow();
+        lastCheckTime = currentTime;
+    }
+
+    if (cachedForeground) {
+        *cachedForeground = lastForegroundCheck;
+    }
+
+    return lastForegroundCheck == hwnd;
+}
+
+// Comprehensive window state check against policy (optimized for low latency)
 inline bool checkWindowState(HWND targetHwnd, const InjectionPolicy& policy, SkipReason* outReason = nullptr) {
     if (!isWindowValid(targetHwnd)) {
         if (outReason) *outReason = SkipReason::WindowNotFound;
         return false;
     }
 
+    // Check visibility (cheap operation)
     if (policy.requireVisible && !isWindowVisible(targetHwnd)) {
         if (outReason) *outReason = SkipReason::WindowNotVisible;
         return false;
     }
 
+    // Check enabled state (cheap operation)
     if (policy.requireEnabled && !isWindowEnabled(targetHwnd)) {
         if (outReason) *outReason = SkipReason::WindowNotEnabled;
         return false;
     }
 
-    if (policy.requireForeground && !isWindowForeground(targetHwnd)) {
+    // Check foreground state (use cached version to reduce API calls)
+    if (policy.requireForeground && !isWindowForegroundCached(targetHwnd)) {
         if (outReason) *outReason = SkipReason::WindowNotForeground;
         return false;
     }

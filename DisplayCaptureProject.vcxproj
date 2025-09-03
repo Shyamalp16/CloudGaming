@@ -143,6 +143,7 @@
     <ClInclude Include="Host\ConfigUtils.h" />
     <ClInclude Include="Host\GraphicsAndCapture.h" />
     <ClInclude Include="Host\Runtime.h" />
+    <ClInclude Include="Host\ThreadPriorityManager.h" />
     <ClInclude Include="Host\WindowUtils.h" />
     <ClInclude Include="Host\AudioCapturer.h" />
     <ClInclude Include="Host\CaptureHelpers.h" />
@@ -179,6 +180,7 @@
     <ClCompile Include="Host\ConfigUtils.cpp" />
     <ClCompile Include="Host\GraphicsAndCapture.cpp" />
     <ClCompile Include="Host\Runtime.cpp" />
+    <ClCompile Include="Host\ThreadPriorityManager.cpp" />
     <ClCompile Include="Host\WindowUtils.cpp" />
     <ClCompile Include="Host\AudioCapturer.cpp" />
     <ClCompile Include="Host\CaptureHelpers.cpp" />
