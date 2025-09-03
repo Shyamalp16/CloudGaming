@@ -64,6 +64,9 @@
     <ClInclude Include="Host\ThreadPriorityManager.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Host\AdaptiveQualityControl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Host\AppInit.cpp">
@@ -169,6 +172,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Host\ThreadPriorityManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\AdaptiveQualityControl.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

@@ -134,6 +134,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="Host\AdaptiveQualityControl.h" />
     <ClInclude Include="Host\AppInit.h" />
     <ClInclude Include="Host\InputStateMachine.h" />
     <ClInclude Include="Host\InputStats.h" />
@@ -171,6 +172,7 @@
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Host\AdaptiveQualityControl.cpp" />
     <ClCompile Include="Host\AppInit.cpp" />
     <ClCompile Include="Host\InputStateMachine.cpp" />
     <ClCompile Include="Host\InputStats.cpp" />

@@ -96,6 +96,7 @@ int main()
     ConfigUtils::ApplyCaptureSettings(config, cfgFps);
     ConfigUtils::ApplyAudioSettings(config);
     ConfigUtils::ApplyThreadPrioritySettings(config);
+    ConfigUtils::ApplyAdaptiveQualityControlSettings(config);
     StartCapture();
     initWebsocket(roomId);
     // Optional metrics export to signaling channel

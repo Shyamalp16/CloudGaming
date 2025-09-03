@@ -892,9 +892,80 @@ return -3 // Duration validation failure
 - **High-Throughput Streaming**: Efficient buffer management under load
 - **Resource-Constrained Environments**: Optimized memory usage patterns
 
-## 🎯 **Zero-Duration Packet Protection Summary**
+## 🎯 **WebRTC Stats Monitoring & Adaptive Quality Control**
 
-This implementation addresses the critical latency issue you identified:
+This comprehensive system provides **real-time network condition assessment** and **adaptive upstream frame dropping** to prevent queue accumulation and maintain low latency under network stress.
+
+### **Comprehensive Stats Monitoring:**
+
+**RTCP Statistics Tracked:**
+- **Packet Loss**: Real-time loss percentage calculation
+- **RTT (Round-Trip Time)**: Network latency measurement
+- **Jitter**: Packet timing variation analysis
+- **NACK Count**: Negative acknowledgment packet tracking
+- **PLI Count**: Picture Loss Indication request counting
+- **TWCC Count**: Transport-Wide Congestion Control feedback
+
+**Pacer Queue Monitoring:**
+- **Queue Length Estimation**: Based on send queue depth and timing
+- **Bitrate Calculation**: Dynamic send bitrate approximation
+- **Congestion Detection**: Early warning of network saturation
+
+### **Adaptive Quality Control System:**
+
+**Network Condition Assessment:**
+```cpp
+enum class NetworkCondition {
+    Excellent,   // < 10ms RTT, < 1% loss, minimal queue
+    Good,        // < 50ms RTT, < 5% loss, small queue
+    Fair,        // < 100ms RTT, < 10% loss, moderate queue
+    Poor,        // < 200ms RTT, < 20% loss, large queue
+    Critical     // > 200ms RTT, > 20% loss, very large queue
+};
+```
+
+**Adaptive Dropping Ratios:**
+```cpp
+// Based on network conditions
+Excellent: 0% drop ratio  // Perfect conditions, no dropping
+Good:      0% drop ratio  // Good conditions, no dropping
+Fair:      25% drop ratio // Drop 1 in 4 frames under moderate stress
+Poor:      50% drop ratio // Drop 1 in 2 frames under high stress
+Critical:  75% drop ratio // Drop 3 in 4 frames under extreme stress
+```
+
+### **Backpressure Propagation:**
+
+**Upstream Frame Dropping:**
+```cpp
+// Integrated into encoder's EnqueueEncodedSample function
+auto qualityDecision = AdaptiveQualityControl::checkFrameDropping();
+
+if (qualityDecision.shouldDropFrame) {
+    // Log dropping decision and increment metrics
+    VideoMetrics::inc(VideoMetrics::sendQueueDrops());
+    return; // Drop frame before it enters the send queue
+}
+
+// Only frames that pass quality control enter the send pipeline
+g_sendQueue.push_back(QueuedSample{ std::move(bytes), durationUs });
+```
+
+### **Zero-Duration Packet Protection:**
+
+**Production Safety Mechanisms:**
+- **Gating Control**: Environment variable and build-time controls
+- **Duration Validation**: Bounds checking for pacing parameters
+- **Lock Scope Optimization**: Minimal mutex holding during I/O
+
+```go
+// Production-safe zero-duration gating
+if !isZeroDurationAllowed() {
+    log.Printf("[ERROR] Zero-duration packets disabled in production")
+    log.Printf("[ERROR] To enable: set WEBRTC_ALLOW_ZERO_DURATION=1")
+    return -2
+}
+```
 
 ### **Problems Solved:**
 1. ✅ **Zero-duration packets gated**: Production builds automatically reject unpaced packets

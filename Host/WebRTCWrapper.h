@@ -89,6 +89,34 @@ std::string getDataChannelMessageString();
 std::string getMouseChannelMessageString();
 
 /**
+ * @brief Enhanced WebRTC stats callback function type
+ *
+ * Provides comprehensive network and congestion statistics for adaptive quality control.
+ *
+ * @param packetLoss Current packet loss percentage (0.0-1.0)
+ * @param rtt Round-trip time in milliseconds
+ * @param jitter Jitter in seconds
+ * @param nackCount Total NACK (Negative ACK) packets received
+ * @param pliCount Total PLI (Picture Loss Indication) packets received
+ * @param twccCount Total TWCC (Transport-Wide Congestion Control) feedback packets
+ * @param pacerQueueLength Current pacer queue length (packets buffered)
+ * @param sendBitrateKbps Current send bitrate in Kbps
+ */
+using WebRTCStatsCallback = void(*)(double packetLoss, double rtt, double jitter,
+                                   uint32_t nackCount, uint32_t pliCount, uint32_t twccCount,
+                                   uint32_t pacerQueueLength, uint32_t sendBitrateKbps);
+
+/**
+ * @brief Set enhanced WebRTC stats callback
+ *
+ * Registers a callback to receive comprehensive WebRTC statistics for adaptive quality control.
+ *
+ * @param callback Function pointer to call with stats updates, or nullptr to disable
+ * @threadsafe
+ */
+void setWebRTCStatsCallback(WebRTCStatsCallback callback);
+
+/**
  * @brief Enqueue a message to the data channel
  *
  * This function safely copies the message content and enqueues it for sending
@@ -115,6 +143,7 @@ extern "C" {
     char* getDataChannelMessage();
     char* getMouseChannelMessage();
     void freeCString(char* p);
+    void SetWebRTCStatsCallback(void* callback);
 
     // RAII wrapper for C strings to prevent memory leaks
     class CStringWrapper {

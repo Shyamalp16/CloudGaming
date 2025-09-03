@@ -20,6 +20,7 @@
 #include <list>
 #include <avrt.h>
 #pragma comment(lib, "Avrt.lib")
+#include "AdaptiveQualityControl.h"
 
 // Removed unused software conversion components
 int Encoder::currentWidth = 0;
@@ -272,6 +273,23 @@ static inline int64_t UpdatePacingFromTimestamp(int64_t currentTsUs) {
 
 static inline void EnqueueEncodedSample(std::vector<uint8_t>&& bytes, int64_t durationUs) {
     if (bytes.empty()) return;
+
+    // Check with adaptive quality controller before queuing
+    auto qualityDecision = AdaptiveQualityControl::checkFrameDropping();
+
+    if (qualityDecision.shouldDropFrame) {
+        // Log the dropping decision for monitoring (temporarily more verbose for debugging)
+        static int dropCounter = 0;
+        if (++dropCounter % 10 == 0) {  // Log every 10th drop for debugging
+            std::cout << "[AdaptiveQC] Frame dropped: " << qualityDecision.reason
+                      << " (condition: " << static_cast<int>(qualityDecision.condition)
+                      << ", ratio: " << qualityDecision.dropRatio
+                      << ", total dropped: " << dropCounter << ")" << std::endl;
+        }
+        VideoMetrics::inc(VideoMetrics::sendQueueDrops());
+        return; // Drop the frame without queuing
+    }
+
     {
         std::lock_guard<std::mutex> lk(g_sendMutex);
         if (g_sendQueue.size() >= kMaxSendQueue) {

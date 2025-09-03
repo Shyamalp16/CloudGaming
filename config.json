@@ -118,6 +118,28 @@
         "enableTimeCritical": true,
         "threadPriority": 15,
         "taskName": "InputInjection"
+      },
+      "adaptiveQualityControl": {
+        "enableAdaptiveDropping": false,
+        "rttExcellentThreshold": 10.0,
+        "rttGoodThreshold": 50.0,
+        "rttFairThreshold": 100.0,
+        "rttPoorThreshold": 200.0,
+        "lossExcellentThreshold": 0.01,
+        "lossGoodThreshold": 0.05,
+        "lossFairThreshold": 0.10,
+        "lossPoorThreshold": 0.20,
+        "queueExcellentThreshold": 1,
+        "queueGoodThreshold": 2,
+        "queueFairThreshold": 5,
+        "queuePoorThreshold": 10,
+        "excellentDropRatio": 0.0,
+        "goodDropRatio": 0.0,
+        "fairDropRatio": 0.25,
+        "poorDropRatio": 0.5,
+        "criticalDropRatio": 0.75,
+        "minFrameIntervalMs": 5,
+        "statsUpdateIntervalMs": 100
       }
     }
   }

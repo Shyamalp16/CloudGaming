@@ -21,6 +21,9 @@ namespace ConfigUtils {
 
     // Apply thread priority settings to ThreadPriorityManager
     void ApplyThreadPrioritySettings(const nlohmann::json& config);
+
+    // Apply adaptive quality control settings to AdaptiveQualityControl
+    void ApplyAdaptiveQualityControlSettings(const nlohmann::json& config);
 }
 
 

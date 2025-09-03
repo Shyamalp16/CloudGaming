@@ -156,4 +156,36 @@ void enqueueMouseChannelMessage(const std::string& message) {
     LOG_TRACE("Enqueued mouse channel message: " + std::to_string(message.size()) + " characters");
 }
 
+// Static storage for the enhanced stats callback
+static WebRTCStatsCallback g_webrtcStatsCallback = nullptr;
+
+// Enhanced WebRTC stats callback implementation
+static void webrtcStatsCallbackImpl(double packetLoss, double rtt, double jitter,
+                                   uint32_t nackCount, uint32_t pliCount, uint32_t twccCount,
+                                   uint32_t pacerQueueLength, uint32_t sendBitrateKbps) {
+    if (g_webrtcStatsCallback) {
+        try {
+            g_webrtcStatsCallback(packetLoss, rtt, jitter, nackCount, pliCount, twccCount,
+                                pacerQueueLength, sendBitrateKbps);
+        } catch (const std::exception& e) {
+            LOG_ERROR("Exception in WebRTC stats callback: " + std::string(e.what()));
+        }
+    }
+}
+
+void setWebRTCStatsCallback(WebRTCStatsCallback callback) {
+    g_webrtcStatsCallback = callback;
+
+    if (callback) {
+        LOG_INFO("Enhanced WebRTC stats callback registered");
+
+        // Register the callback with the Go side
+        // Cast to void* to match the C function signature
+        SetWebRTCStatsCallback(reinterpret_cast<void*>(&webrtcStatsCallbackImpl));
+    } else {
+        LOG_INFO("Enhanced WebRTC stats callback disabled");
+        SetWebRTCStatsCallback(nullptr);
+    }
+}
+
 } // namespace WebRTCWrapper

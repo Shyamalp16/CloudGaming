@@ -4,6 +4,7 @@
 #include "CaptureHelpers.h"
 #include "AudioCapturer.h"
 #include "ThreadPriorityManager.h"
+#include "AdaptiveQualityControl.h"
 
 #include <fstream>
 
@@ -223,6 +224,76 @@ void ApplyThreadPrioritySettings(const nlohmann::json& config)
         std::cerr << "[ConfigUtils] Error applying thread priority settings: " << e.what() << std::endl;
     } catch (...) {
         std::cerr << "[ConfigUtils] Unknown error applying thread priority settings" << std::endl;
+    }
+}
+
+void ApplyAdaptiveQualityControlSettings(const nlohmann::json& config)
+{
+    try {
+        if (!(config.contains("host") && config["host"].contains("input") &&
+              config["host"]["input"].contains("adaptiveQualityControl"))) {
+            std::cout << "[ConfigUtils] No adaptive quality control configuration found, using defaults" << std::endl;
+            return;
+        }
+
+        auto qcfg = config["host"]["input"]["adaptiveQualityControl"];
+
+        AdaptiveQualityControl::DroppingConfig droppingConfig;
+
+        // Network condition thresholds
+        droppingConfig.rttExcellentThreshold = qcfg.value("rttExcellentThreshold", 10.0);
+        droppingConfig.rttGoodThreshold = qcfg.value("rttGoodThreshold", 50.0);
+        droppingConfig.rttFairThreshold = qcfg.value("rttFairThreshold", 100.0);
+        droppingConfig.rttPoorThreshold = qcfg.value("rttPoorThreshold", 200.0);
+
+        droppingConfig.lossExcellentThreshold = qcfg.value("lossExcellentThreshold", 0.01);
+        droppingConfig.lossGoodThreshold = qcfg.value("lossGoodThreshold", 0.05);
+        droppingConfig.lossFairThreshold = qcfg.value("lossFairThreshold", 0.10);
+        droppingConfig.lossPoorThreshold = qcfg.value("lossPoorThreshold", 0.20);
+
+        droppingConfig.queueExcellentThreshold = qcfg.value("queueExcellentThreshold", 1u);
+        droppingConfig.queueGoodThreshold = qcfg.value("queueGoodThreshold", 2u);
+        droppingConfig.queueFairThreshold = qcfg.value("queueFairThreshold", 5u);
+        droppingConfig.queuePoorThreshold = qcfg.value("queuePoorThreshold", 10u);
+
+        // Dropping ratios
+        droppingConfig.excellentDropRatio = qcfg.value("excellentDropRatio", 0.0);
+        droppingConfig.goodDropRatio = qcfg.value("goodDropRatio", 0.0);
+        droppingConfig.fairDropRatio = qcfg.value("fairDropRatio", 0.25);
+        droppingConfig.poorDropRatio = qcfg.value("poorDropRatio", 0.5);
+        droppingConfig.criticalDropRatio = qcfg.value("criticalDropRatio", 0.75);
+
+        // Control settings
+        droppingConfig.enableAdaptiveDropping = qcfg.value("enableAdaptiveDropping", true);
+        droppingConfig.minFrameIntervalMs = qcfg.value("minFrameIntervalMs", 5u);
+        droppingConfig.statsUpdateIntervalMs = qcfg.value("statsUpdateIntervalMs", 100u);
+
+        // Apply configuration
+        AdaptiveQualityControl::globalQualityController.setConfig(droppingConfig);
+
+        // Enable adaptive quality control
+        if (droppingConfig.enableAdaptiveDropping) {
+            AdaptiveQualityControl::enableAdaptiveQualityControl();
+        }
+
+        std::cout << "[ConfigUtils] Adaptive quality control configuration applied successfully" << std::endl;
+        std::cout << "  Adaptive Dropping: " << (droppingConfig.enableAdaptiveDropping ? "enabled" : "disabled") << std::endl;
+        std::cout << "  RTT Thresholds: " << droppingConfig.rttExcellentThreshold << "/"
+                  << droppingConfig.rttGoodThreshold << "/"
+                  << droppingConfig.rttFairThreshold << "/"
+                  << droppingConfig.rttPoorThreshold << "ms" << std::endl;
+        std::cout << "  Loss Thresholds: " << (droppingConfig.lossExcellentThreshold * 100) << "%/"
+                  << (droppingConfig.lossGoodThreshold * 100) << "%/"
+                  << (droppingConfig.lossFairThreshold * 100) << "%/"
+                  << (droppingConfig.lossPoorThreshold * 100) << "%" << std::endl;
+        std::cout << "  Drop Ratios: " << droppingConfig.fairDropRatio << "/"
+                  << droppingConfig.poorDropRatio << "/"
+                  << droppingConfig.criticalDropRatio << std::endl;
+
+    } catch (const std::exception& e) {
+        std::cerr << "[ConfigUtils] Error applying adaptive quality control settings: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "[ConfigUtils] Unknown error applying adaptive quality control settings" << std::endl;
     }
 }
 
