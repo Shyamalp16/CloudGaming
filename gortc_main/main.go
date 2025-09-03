@@ -139,8 +139,13 @@ var (
 	audioSendQueue chan *rtp.Packet // Bounded channel for RTP packets (size ≤ 1)
 	audioSendStop  chan struct{}    // Stop signal for sender goroutine
 
+	// Granular video send path: bounded queue and dedicated sender goroutine
+	videoSendQueue chan media.Sample // Bounded channel for video samples (size ≤ 2)
+	videoSendStop  chan struct{}     // Stop signal for video sender goroutine
+
 	// Buffer completion mechanism to prevent use-after-free
 	audioBufferCompletion chan []byte // Channel to signal buffer completion
+	videoBufferCompletion chan []byte // Channel to signal video buffer completion
 )
 
 // AudioRTPState encapsulates all audio RTP state with atomic operations
@@ -227,30 +232,36 @@ func (s *AudioRTPState) Reset() {
 // - Provides predictable memory usage patterns
 // - Maintains high cache hit rates for common sizes
 type tieredBufferPool struct {
-	pools       [4]sync.Pool // Pools for different size tiers
-	sizes       [4]int       // Size classes: 128, 256, 512, 1500
+	pools       [8]sync.Pool // Pools for different size tiers
+	sizes       [8]int       // Size classes: 128, 256, 512, 1500, 4096, 8192, 16384, 32768
 	sizeCount   int
-	hits        [4]int64     // Cache hits per tier
-	misses      [4]int64     // Cache misses per tier
-	allocations [4]int64     // New allocations per tier
+	hits        [8]int64     // Cache hits per tier
+	misses      [8]int64     // Cache misses per tier
+	allocations [8]int64     // New allocations per tier
 	mutex       sync.RWMutex // Protects statistics
 }
 
 var sampleBufPool = &tieredBufferPool{
-	sizes:     [4]int{128, 256, 512, 1500},
-	sizeCount: 4,
+	sizes:     [8]int{128, 256, 512, 1500, 4096, 8192, 16384, 32768},
+	sizeCount: 8,
 }
 
 // Initialize preallocated buffers for common sizes
 func initBufferPool() {
-	// Preallocate initial buffers for each size tier (5 buffers per tier)
+	// Preallocate buffers for each size tier
+	// Larger tiers (video) get fewer preallocated buffers to save memory
+	// Smaller tiers (audio/metadata) get more for better cache performance
+	preallocCounts := [8]int{10, 10, 8, 6, 4, 3, 2, 2} // Prealloc counts per tier
+
 	for i, size := range sampleBufPool.sizes {
-		for j := 0; j < 5; j++ {
+		count := preallocCounts[i]
+		for j := 0; j < count; j++ {
 			buf := make([]byte, size)
 			sampleBufPool.pools[i].Put(buf)
 		}
+		log.Printf("[Go/Pion] Buffer pool tier %d (%d bytes): preallocated %d buffers", i, size, count)
 	}
-	log.Println("[Go/Pion] Buffer pool initialized with preallocated buffers")
+	log.Println("[Go/Pion] Buffer pool initialized with tiered preallocation")
 
 	// Start periodic buffer pool statistics logging
 	go func() {
@@ -391,8 +402,26 @@ func initAudioSendQueue() {
 
 	// Start the buffer completion handler goroutine
 	go audioBufferCompletionHandler()
+}
+
+// initVideoSendQueue initializes the bounded video send queue and starts the sender goroutine
+func initVideoSendQueue() {
+	// Create bounded channel with capacity 2 (for video: size ≤ 2)
+	// Slightly larger than audio to handle frame reordering and prevent drops
+	videoSendQueue = make(chan media.Sample, 2)
+	videoSendStop = make(chan struct{})
+
+	// Create buffer completion channel for safe buffer pool management
+	videoBufferCompletion = make(chan []byte, 16) // Small buffer for completion signals
+
+	// Start the dedicated video sender goroutine
+	go videoSenderGoroutine()
+
+	// Start the buffer completion handler goroutine
+	go videoBufferCompletionHandler()
 
 	log.Println("[Go/Pion] Audio send queue initialized with bounded channel (capacity: 1)")
+	log.Println("[Go/Pion] Video send queue initialized with bounded channel (capacity: 2)")
 	log.Println("[Go/Pion] Buffer completion mechanism initialized for use-after-free prevention")
 }
 
@@ -480,6 +509,68 @@ func audioSenderGoroutine() {
 	}
 }
 
+// videoSenderGoroutine runs in a separate goroutine to send video samples without holding locks
+// This prevents head-of-line blocking and keeps the video send path lock-granular
+func videoSenderGoroutine() {
+	log.Println("[Go/Pion] Video sender goroutine started")
+
+	for {
+		select {
+		case sample := <-videoSendQueue:
+			// Send video sample without holding any locks
+			// This is the potentially blocking operation, but it doesn't block other operations
+			if videoTrack != nil {
+				if err := videoTrack.WriteSample(sample); err != nil {
+					log.Printf("[Go/Pion] Error in video sender goroutine: %v", err)
+				}
+			}
+
+			// Signal buffer completion to prevent use-after-free
+			// This ensures the buffer is only returned to the pool after WriteSample has finished reading it
+			if len(sample.Data) > 0 {
+				// Try to signal completion with fallback mechanisms
+				select {
+				case videoBufferCompletion <- sample.Data:
+					// Buffer completion signaled successfully - normal path
+				case <-time.After(200 * time.Millisecond):
+					// Completion channel is full or handler is slow
+					// Check if completion handler is still running and try a shorter timeout
+					select {
+					case videoBufferCompletion <- sample.Data:
+						// Retry succeeded
+						log.Printf("[Go/Pion] Video buffer completion retry succeeded (size=%d)",
+							len(sample.Data))
+					case <-time.After(50 * time.Millisecond):
+						// Still failing - force return to pool to prevent memory leaks
+						log.Printf("[Go/Pion] Video buffer completion failed after retry, forcing pool return (size=%d)",
+							len(sample.Data))
+						putSampleBuf(sample.Data)
+					}
+				}
+			}
+
+		case <-videoSendStop:
+			log.Println("[Go/Pion] Video sender goroutine stopped")
+			return
+		}
+	}
+}
+
+// videoBufferCompletionHandler safely manages buffer pool returns to prevent use-after-free
+// This goroutine ensures buffers are only returned to the pool after WriteSample has finished reading them
+func videoBufferCompletionHandler() {
+	for {
+		select {
+		case buf := <-videoBufferCompletion:
+			// Return buffer to pool now that WriteSample has finished reading it
+			putSampleBuf(buf)
+		case <-videoSendStop:
+			log.Println("[Go/Pion] Video buffer completion handler stopped")
+			return
+		}
+	}
+}
+
 // testBufferPool performs a simple test of buffer pool functionality
 // This can be called during development to verify the pool is working correctly
 func testBufferPool() {
@@ -547,6 +638,7 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 	initBufferPool()
 	initAudioSendQueue()
+	initVideoSendQueue()
 }
 
 // validateAudioTimestampStability checks RTP timestamp progression for debugging
@@ -742,12 +834,41 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 	C.memcpy(unsafe.Pointer(&buf[0]), data, C.size_t(n))
 	dur := time.Duration(int64(durationUs)) * time.Microsecond
 
-	if err := videoTrack.WriteSample(media.Sample{Data: buf, Duration: dur}); err != nil {
-		putSampleBuf(buf) // Return buffer on error
-		return -1
+	// Create video sample for queuing
+	sample := media.Sample{Data: buf, Duration: dur}
+
+	// Queue sample for the dedicated sender goroutine (bounded queue, size ≤ 2)
+	// This implements backpressure by dropping oldest samples rather than accumulating
+	// The sender goroutine will handle WriteSample without holding any locks
+	select {
+	case videoSendQueue <- sample:
+		// Sample successfully queued for sending
+		// Buffer will be returned to pool by sender goroutine after WriteSample
+
+		// Optional performance logging (disabled during normal operation to avoid spam)
+		// To enable performance monitoring, uncomment the following block:
+		// if sendCount%100 == 0 {
+		//     log.Printf("[Go/Pion] Video sample queued: size=%d, dur=%v", n, dur)
+		// }
+
+		return 0
+	default:
+		// Queue is full - implement backpressure by dropping oldest sample and queuing new one
+		select {
+		case oldestSample := <-videoSendQueue:
+			// Drop the oldest sample and return its buffer to pool
+			putSampleBuf(oldestSample.Data)
+			// Now queue the new sample
+			videoSendQueue <- sample
+			log.Printf("[Go/Pion] Video queue full, dropped oldest sample (size=%d)", len(oldestSample.Data))
+			return 0
+		default:
+			// This should not happen with proper queue management
+			putSampleBuf(buf) // Return buffer on queue failure
+			log.Printf("[Go/Pion] Video queue failure, dropped sample (size=%d)", n)
+			return -1
+		}
 	}
-	// Return buffer to pool after write
-	putSampleBuf(buf)
 
 	// Debug: log send rate once per second (disabled during streaming)
 	sendCount++
