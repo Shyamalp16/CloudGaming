@@ -709,7 +709,8 @@ bool AudioCapturer::QueueAudioPacket(const uint8_t* buffer, size_t size, int64_t
 void AudioCapturer::CaptureThread(DWORD targetProcessId)
 {
     HRESULT hr;
-    REFERENCE_TIME hnsRequestedDuration = REFTIMES_PER_SEC;
+    // Calculate requested duration based on WASAPI configuration
+    REFERENCE_TIME hnsRequestedDuration = static_cast<REFERENCE_TIME>(s_audioConfig.wasapi.devicePeriodMs * 10000.0); // Convert ms to 100ns units
     UINT32 bufferFrameCount;
     UINT32 numFramesAvailable;
     BYTE* pData;
@@ -904,30 +905,65 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 
                 // Note: We'll resample to 48kHz if needed
 
-                // Try event-driven mode first for ultra-low latency
+                // Try exclusive mode first if preferred, then shared mode with event-driven capture
                 DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+                AUDCLNT_SHAREMODE shareMode = s_audioConfig.wasapi.preferExclusiveMode ?
+                    AUDCLNT_SHAREMODE_EXCLUSIVE : AUDCLNT_SHAREMODE_SHARED;
+
+                // If forcing 48kHz stereo, modify the format before initialization
+                WAVEFORMATEX* targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
+                if (s_audioConfig.wasapi.force48kHzStereo) {
+                    // Create a new format structure with 48kHz stereo
+                    static WAVEFORMATEX forcedFormat = {};
+                    forcedFormat.wFormatTag = WAVE_FORMAT_PCM;
+                    forcedFormat.nChannels = 2; // Force stereo
+                    forcedFormat.nSamplesPerSec = 48000; // Force 48kHz
+                    forcedFormat.nAvgBytesPerSec = 48000 * 2 * 2; // 48kHz * 2 channels * 2 bytes per sample (16-bit)
+                    forcedFormat.nBlockAlign = 2 * 2; // 2 channels * 2 bytes per sample
+                    forcedFormat.wBitsPerSample = 16;
+                    forcedFormat.cbSize = 0;
+                    targetFormat = &forcedFormat;
+                }
+
                 hr = m_pAudioClient->Initialize(
-                    AUDCLNT_SHAREMODE_SHARED,
+                    shareMode,
                     streamFlags,
                     hnsRequestedDuration,
                     0,
-                    const_cast<const WAVEFORMATEX*>(pwfx),
+                    targetFormat,
                     NULL);
+
+                // If exclusive mode failed and we prefer it, try shared mode as fallback
+                if (FAILED(hr) && shareMode == AUDCLNT_SHAREMODE_EXCLUSIVE) {
+                    std::wcerr << L"[AudioCapturer] Exclusive mode failed, falling back to shared mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
+                    hr = m_pAudioClient->Initialize(
+                        AUDCLNT_SHAREMODE_SHARED,
+                        streamFlags,
+                        hnsRequestedDuration,
+                        0,
+                        targetFormat,
+                        NULL);
+                }
 
                 if (FAILED(hr))
                 {
-                    std::wcerr << L"[AudioCapturer] Event-driven init failed; retrying in polling mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
-                    // Retry without EVENTCALLBACK
-                    hr = m_pAudioClient->Initialize(
-                        AUDCLNT_SHAREMODE_SHARED,
-                        AUDCLNT_STREAMFLAGS_LOOPBACK,
-                        hnsRequestedDuration,
-                        0,
-                        const_cast<const WAVEFORMATEX*>(pwfx),
-                        NULL);
-                    if (FAILED(hr)) {
-                        std::wcerr << L"[AudioCapturer] Unable to initialize audio client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
+                    if (s_audioConfig.wasapi.enforceEventDriven) {
+                        std::wcerr << L"[AudioCapturer] Event-driven mode failed and enforcement is enabled. Error: " << _com_error(hr).ErrorMessage() << std::endl;
                         goto Exit;
+                    } else {
+                        std::wcerr << L"[AudioCapturer] Event-driven init failed; retrying in polling mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
+                        // Retry without EVENTCALLBACK
+                        hr = m_pAudioClient->Initialize(
+                            AUDCLNT_SHAREMODE_SHARED,
+                            AUDCLNT_STREAMFLAGS_LOOPBACK,
+                            hnsRequestedDuration,
+                            0,
+                            const_cast<const WAVEFORMATEX*>(pwfx),
+                            NULL);
+                        if (FAILED(hr)) {
+                            std::wcerr << L"[AudioCapturer] Unable to initialize audio client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
+                            goto Exit;
+                        }
                     }
                 }
 
@@ -1028,30 +1064,65 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             << L", wBitsPerSample=" << pwfx->wBitsPerSample
             << L", cbSize=" << pwfx->cbSize << std::endl;
 
-        // Try event-driven mode first for ultra-low latency
+        // Try exclusive mode first if preferred, then shared mode with event-driven capture
         DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        AUDCLNT_SHAREMODE shareMode = s_audioConfig.wasapi.preferExclusiveMode ?
+            AUDCLNT_SHAREMODE_EXCLUSIVE : AUDCLNT_SHAREMODE_SHARED;
+
+        // If forcing 48kHz stereo, modify the format before initialization
+        WAVEFORMATEX* targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
+        if (s_audioConfig.wasapi.force48kHzStereo) {
+            // Create a new format structure with 48kHz stereo
+            static WAVEFORMATEX forcedFormat = {};
+            forcedFormat.wFormatTag = WAVE_FORMAT_PCM;
+            forcedFormat.nChannels = 2; // Force stereo
+            forcedFormat.nSamplesPerSec = 48000; // Force 48kHz
+            forcedFormat.nAvgBytesPerSec = 48000 * 2 * 2; // 48kHz * 2 channels * 2 bytes per sample (16-bit)
+            forcedFormat.nBlockAlign = 2 * 2; // 2 channels * 2 bytes per sample
+            forcedFormat.wBitsPerSample = 16;
+            forcedFormat.cbSize = 0;
+            targetFormat = &forcedFormat;
+        }
+
         hr = m_pAudioClient->Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
+            shareMode,
             streamFlags,
             hnsRequestedDuration,
             0,
-            const_cast<const WAVEFORMATEX*>(pwfx),
+            targetFormat,
             NULL);
+
+        // If exclusive mode failed and we prefer it, try shared mode as fallback
+        if (FAILED(hr) && shareMode == AUDCLNT_SHAREMODE_EXCLUSIVE) {
+            std::wcerr << L"[AudioCapturer] Default device exclusive mode failed, falling back to shared mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
+            hr = m_pAudioClient->Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                streamFlags,
+                hnsRequestedDuration,
+                0,
+                targetFormat,
+                NULL);
+        }
 
         if (FAILED(hr))
         {
-            std::wcerr << L"[AudioCapturer] Event-driven init failed for default device; retrying in polling mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
-            // Retry without EVENTCALLBACK
-            hr = m_pAudioClient->Initialize(
-                AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_LOOPBACK,
-                hnsRequestedDuration,
-                0,
-                const_cast<const WAVEFORMATEX*>(pwfx),
-                NULL);
-            if (FAILED(hr)) {
-                std::wcerr << L"[AudioCapturer] Unable to initialize audio client for default device: " << _com_error(hr).ErrorMessage() << std::endl;
+            if (s_audioConfig.wasapi.enforceEventDriven) {
+                std::wcerr << L"[AudioCapturer] Default device event-driven mode failed and enforcement is enabled. Error: " << _com_error(hr).ErrorMessage() << std::endl;
                 goto Exit;
+            } else {
+                std::wcerr << L"[AudioCapturer] Event-driven init failed for default device; retrying in polling mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
+                // Retry without EVENTCALLBACK
+                hr = m_pAudioClient->Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_LOOPBACK,
+                    hnsRequestedDuration,
+                    0,
+                    const_cast<const WAVEFORMATEX*>(pwfx),
+                    NULL);
+                if (FAILED(hr)) {
+                    std::wcerr << L"[AudioCapturer] Unable to initialize audio client for default device: " << _com_error(hr).ErrorMessage() << std::endl;
+                    goto Exit;
+                }
             }
         }
 
@@ -1696,19 +1767,33 @@ void AudioCapturer::ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFr
         return;
     }
 
-    // Try to use high-quality Windows Audio Resampler DMO first
-    if (InitializeDMOResampler(inRate, channels)) {
-        // Use DMO resampler directly with the buffer
-        if (ProcessResamplerDMOInPlace(buffer)) {
-            // Success - DMO resampler handled the conversion in-place
-            return;
-        } else {
-            std::wcerr << L"[AudioCapturer] DMO in-place resampler failed, falling back to linear interpolation" << std::endl;
+    // Choose resampler priority based on configuration
+    bool preferLinear = s_audioConfig.wasapi.preferLinearResampling;
+    bool useDmoOnlyForHighQuality = s_audioConfig.wasapi.useDmoOnlyForHighQuality;
+
+    if (preferLinear && !useDmoOnlyForHighQuality) {
+        // Prefer linear interpolation - use it directly
+        std::wcout << L"[AudioCapturer] Using linear interpolation resampler (preferred by config)" << std::endl;
+    } else {
+        // Try DMO first (high-quality mode or DMO preferred)
+        if (InitializeDMOResampler(inRate, channels)) {
+            // Use DMO resampler directly with the buffer
+            if (ProcessResamplerDMOInPlace(buffer)) {
+                // Success - DMO resampler handled the conversion in-place
+                std::wcout << L"[AudioCapturer] Using DMO resampler (high-quality)" << std::endl;
+                return;
+            } else {
+                std::wcerr << L"[AudioCapturer] DMO in-place resampler failed, falling back to linear interpolation" << std::endl;
+            }
+        }
+
+        if (useDmoOnlyForHighQuality) {
+            std::wcerr << L"[AudioCapturer] DMO required but unavailable, falling back to linear interpolation" << std::endl;
         }
     }
 
-    // Fallback to linear interpolation method with in-place operation
-    std::wcout << L"[AudioCapturer] Using in-place linear interpolation resampler (DMO unavailable)" << std::endl;
+    // Use linear interpolation method with in-place operation
+    std::wcout << L"[AudioCapturer] Using in-place linear interpolation resampler" << std::endl;
 
     double ratio = 48000.0 / static_cast<double>(inRate);
     size_t outFrames = static_cast<size_t>(std::ceil((inFrames) * ratio));
@@ -2302,18 +2387,32 @@ void AudioCapturer::ResampleTo48k(const float* in, size_t inFrames, uint32_t inR
         return;
     }
 
-    // Try to use high-quality Windows Audio Resampler DMO first
-    if (InitializeDMOResampler(inRate, channels)) {
-        size_t inputSamples = inFrames * channels;
-        if (ProcessResamplerDMO(in, inputSamples, out)) {
-            // Success - DMO resampler handled the conversion
-            return;
-        } else {
-            std::wcerr << L"[AudioCapturer] DMO resampler failed, falling back to linear interpolation" << std::endl;
+    // Choose resampler priority based on configuration
+    bool preferLinear = s_audioConfig.wasapi.preferLinearResampling;
+    bool useDmoOnlyForHighQuality = s_audioConfig.wasapi.useDmoOnlyForHighQuality;
+
+    if (preferLinear && !useDmoOnlyForHighQuality) {
+        // Prefer linear interpolation - skip DMO
+        std::wcout << L"[AudioCapturer] Using linear interpolation resampler (preferred by config)" << std::endl;
+    } else {
+        // Try DMO first (high-quality mode or DMO preferred)
+        if (InitializeDMOResampler(inRate, channels)) {
+            size_t inputSamples = inFrames * channels;
+            if (ProcessResamplerDMO(in, inputSamples, out)) {
+                // Success - DMO resampler handled the conversion
+                std::wcout << L"[AudioCapturer] Using DMO resampler (high-quality)" << std::endl;
+                return;
+            } else {
+                std::wcerr << L"[AudioCapturer] DMO resampler failed, falling back to linear interpolation" << std::endl;
+            }
+        }
+
+        if (useDmoOnlyForHighQuality) {
+            std::wcerr << L"[AudioCapturer] DMO required but unavailable, falling back to linear interpolation" << std::endl;
         }
     }
 
-    // Fallback to linear interpolation method (preserves existing behavior)
+    // Use linear interpolation method
     std::wcout << L"[AudioCapturer] Using linear interpolation resampler (DMO unavailable)" << std::endl;
 
     double ratio = 48000.0 / static_cast<double>(inRate);
@@ -2582,6 +2681,26 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
             } catch (...) {
                 s_audioConfig.encoderThreadAffinityMask = 0;
             }
+        }
+
+        // Read WASAPI-specific configuration
+        if (config.contains("wasapi")) {
+            auto wasapiConfig = config["wasapi"];
+
+            s_audioConfig.wasapi.preferExclusiveMode = wasapiConfig.value("preferExclusiveMode", true);
+            s_audioConfig.wasapi.enforceEventDriven = wasapiConfig.value("enforceEventDriven", true);
+            s_audioConfig.wasapi.devicePeriodMs = wasapiConfig.value("devicePeriodMs", 2.5);
+            s_audioConfig.wasapi.fallbackPeriodMs = wasapiConfig.value("fallbackPeriodMs", 5.0);
+            s_audioConfig.wasapi.force48kHzStereo = wasapiConfig.value("force48kHzStereo", true);
+            s_audioConfig.wasapi.preferLinearResampling = wasapiConfig.value("preferLinearResampling", true);
+            s_audioConfig.wasapi.useDmoOnlyForHighQuality = wasapiConfig.value("useDmoOnlyForHighQuality", false);
+
+            std::wcout << L"[AudioCapturer] WASAPI config: exclusive=" << (s_audioConfig.wasapi.preferExclusiveMode ? L"preferred" : L"disabled")
+                      << L", event-driven=" << (s_audioConfig.wasapi.enforceEventDriven ? L"enforced" : L"fallback-allowed")
+                      << L", device_period=" << s_audioConfig.wasapi.devicePeriodMs << L"ms"
+                      << L", force_48kHz=" << (s_audioConfig.wasapi.force48kHzStereo ? L"enabled" : L"disabled")
+                      << L", linear_resample=" << (s_audioConfig.wasapi.preferLinearResampling ? L"preferred" : L"DMO-first")
+                      << std::endl;
         }
 
         // Read bitrate adaptation settings

@@ -189,6 +189,17 @@ private:
         int channels = 2;              // Number of audio channels
         bool useThreadAffinity = false;     // Use thread affinity for encoder
         DWORD encoderThreadAffinityMask = 0; // CPU affinity mask (0 = no affinity)
+
+        // WASAPI-specific configuration for low-latency audio capture
+        struct WASAPIConfig {
+            bool preferExclusiveMode = true;      // Prefer exclusive mode for smaller device periods
+            bool enforceEventDriven = true;       // Enforce event-driven capture (no polling fallback)
+            double devicePeriodMs = 2.5;          // Preferred device period in milliseconds (2.5-5ms)
+            double fallbackPeriodMs = 5.0;        // Fallback device period if preferred not available
+            bool force48kHzStereo = true;          // Force 48kHz stereo format to avoid resampling
+            bool preferLinearResampling = true;   // Prefer linear interpolation over DMO
+            bool useDmoOnlyForHighQuality = false; // Only use DMO when exact quality required
+        } wasapi;
     };
     static AudioConfig s_audioConfig;
 

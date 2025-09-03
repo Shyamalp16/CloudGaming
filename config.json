@@ -50,6 +50,15 @@
       "channels": 2,
       "useThreadAffinity": false,
       "encoderThreadAffinityMask": 0,
+      "wasapi": {
+        "preferExclusiveMode": true,
+        "enforceEventDriven": true,
+        "devicePeriodMs": 2.5,
+        "fallbackPeriodMs": 5.0,
+        "force48kHzStereo": true,
+        "preferLinearResampling": true,
+        "useDmoOnlyForHighQuality": false
+      },
       "bitrateAdaptation": {
         "enabled": true,
         "minBitrate": 8000,
