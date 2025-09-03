@@ -1465,6 +1465,8 @@ The Host includes a configurable Opus audio encoder optimized for low-latency ga
 | `latency.strictLatencyMode` | boolean | true | Enable strict latency optimizations and validation |
 | `latency.warnOnBuffering` | boolean | true | Warn when buffering exceeds one frame (latency violation) |
 | `latency.targetOneWayLatencyMs` | number | 20 | Target one-way audio latency in milliseconds (<20ms makes system feel snappy) |
+| `latency.ultraLowLatencyProfile` | boolean | false | Enable ultra-low-latency Opus profile (5ms frames, moderate bitrate, optimized settings) |
+| `latency.disableFecInLowLatency` | boolean | true | Disable FEC in low-latency mode unless packet loss exceeds 10% |
 
 **Audio Tuning Recommendations:**
 
@@ -1498,13 +1500,15 @@ The Host includes a configurable Opus audio encoder optimized for low-latency ga
 }
 ```
 
-#### Ultra-Low Latency Gaming Configuration:
+#### Ultra-Low Latency Gaming Configuration (Recommended):
 ```json
 {
   "frameSizeMs": 5,
   "latency": {
     "strictLatencyMode": true,
     "enforceSingleFrameBuffering": true,
+    "ultraLowLatencyProfile": true,
+    "disableFecInLowLatency": true,
     "maxFrameSizeMs": 10,
     "minFrameSizeMs": 5,
     "warnOnBuffering": true,
@@ -1517,6 +1521,20 @@ The Host includes a configurable Opus audio encoder optimized for low-latency ga
     "force48kHzStereo": true,
     "preferLinearResampling": true,
     "useDmoOnlyForHighQuality": false
+  }
+}
+```
+
+#### Ultra-Low Latency Opus Profile:
+```json
+{
+  "frameSizeMs": 5,
+  "bitrate": 48000,
+  "complexity": 4,
+  "enableFec": false,
+  "latency": {
+    "ultraLowLatencyProfile": true,
+    "disableFecInLowLatency": true
   }
 }
 ```
@@ -1549,6 +1567,13 @@ For optimal gaming audio responsiveness, the system implements several latency r
 - **Periodic Reports**: Status updates every 30 seconds in strict mode
 - **Buffer Warnings**: Immediate alerts when single-frame limit exceeded
 - **Estimation**: Real-time latency calculation based on configuration
+
+#### Opus Encoder Optimizations
+- **5ms Frame Support**: Enables ultra-low-latency mode with minimal algorithmic delay
+- **Automatic Profile Selection**: Ultra-low-latency profile automatically optimizes bitrate/complexity
+- **FEC Optimization**: Smart FEC control saves bandwidth in low-latency mode
+- **Immediate Processing**: Encoder thread yields immediately when no frames available
+- **Parameter Validation**: Ensures optimal settings are applied for target latency
 
 #### Buffer Optimization Techniques
 - **Pre-allocated Buffers**: Fixed-size buffers prevent dynamic resizing during runtime
@@ -1611,6 +1636,9 @@ The WASAPI (Windows Audio Session API) configuration options control low-level a
 - **Single Frame Buffering**: Strictly enforced one frame maximum between capture→encode→send
 - **Constrained Resampling**: Resampling respects buffer limits to maintain latency
 - **Format Optimization**: Detects optimal device formats to avoid unnecessary conversions
+- **Ultra-Low Latency Opus Profile**: 5ms frames, optimized bitrate/complexity for minimum algorithmic delay
+- **Smart FEC Control**: Disabled in low-latency mode unless packet loss >10%, preserves bandwidth
+- **Immediate Frame Processing**: Encoder yields immediately when no frames available in ultra-low-latency mode
 - **Opus Frame Validation**: 5-10ms packetization validation for optimal gaming latency
 - **Latency Monitoring**: Real-time latency tracking and violation warnings
 - **WASAPI Exclusive Mode**: Direct hardware access with 2.5-5ms device periods for ultra-low latency

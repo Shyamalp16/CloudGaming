@@ -65,7 +65,9 @@
         "minFrameSizeMs": 5,
         "strictLatencyMode": true,
         "warnOnBuffering": true,
-        "targetOneWayLatencyMs": 20
+        "targetOneWayLatencyMs": 20,
+        "ultraLowLatencyProfile": false,
+        "disableFecInLowLatency": true
       },
       "bitrateAdaptation": {
         "enabled": true,

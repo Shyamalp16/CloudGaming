@@ -215,6 +215,8 @@ private:
             bool strictLatencyMode = true;           // Enable strict latency optimizations
             bool warnOnBuffering = true;             // Warn when buffering exceeds one frame
             int targetOneWayLatencyMs = 20;          // Target one-way audio latency (<20ms)
+            bool ultraLowLatencyProfile = false;     // Enable ultra-low-latency Opus profile (5ms, moderate bitrate)
+            bool disableFecInLowLatency = true;      // Disable FEC in low-latency mode unless needed
         } latency;
     };
     static AudioConfig s_audioConfig;

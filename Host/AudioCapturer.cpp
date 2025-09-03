@@ -107,6 +107,38 @@ bool AudioCapturer::StartCapture(DWORD processId)
     settings.expectedLossPerc = s_audioConfig.expectedLossPerc; // Configurable loss expectation
     settings.enableDtx = s_audioConfig.enableDtx;    // Configurable DTX
     settings.application = s_audioConfig.application; // Configurable application type
+
+    // Apply ultra-low-latency profile optimizations
+    if (s_audioConfig.latency.ultraLowLatencyProfile) {
+        // Force 5ms frames for minimum algorithmic delay
+        if (s_audioConfig.frameSizeMs > 5) {
+            std::wcout << L"[AudioOpus] Ultra-low-latency profile: Forcing 5ms frames (was " << s_audioConfig.frameSizeMs << L"ms)" << std::endl;
+            s_audioConfig.frameSizeMs = 5;
+            settings.frameSize = (5 * 48000) / 1000; // Recalculate frame size
+        }
+
+        // Moderate bitrate for low-latency (balance quality vs delay)
+        if (settings.bitrate > 48000) {
+            std::wcout << L"[AudioOpus] Ultra-low-latency profile: Reducing bitrate to 48kbps for lower delay" << std::endl;
+            settings.bitrate = 48000; // 48kbps for moderate quality with lower delay
+        }
+
+        // Disable FEC in low-latency mode unless explicitly needed
+        if (s_audioConfig.latency.disableFecInLowLatency && s_audioConfig.expectedLossPerc < 5) {
+            std::wcout << L"[AudioOpus] Ultra-low-latency profile: Disabling FEC (low packet loss: " << s_audioConfig.expectedLossPerc << L"%)" << std::endl;
+            settings.enableFec = false;
+        }
+
+        // Lower complexity for faster encoding
+        if (settings.complexity > 4) {
+            std::wcout << L"[AudioOpus] Ultra-low-latency profile: Reducing complexity to 4 for faster encoding" << std::endl;
+            settings.complexity = 4;
+        }
+
+        std::wcout << L"[AudioOpus] Ultra-low-latency profile activated: 5ms frames, "
+                  << settings.bitrate << L" bps, complexity " << settings.complexity
+                  << L", FEC " << (settings.enableFec ? L"enabled" : L"disabled") << std::endl;
+    }
     
     if (!m_opusEncoder->initialize(settings)) {
         std::wcerr << L"[AudioCapturer] Failed to initialize Opus encoder" << std::endl;
@@ -397,7 +429,12 @@ void AudioCapturer::EncoderThread()
             EncodeAndQueueFrame(rawFrame);
         } else {
             // No frames available, sleep briefly to avoid busy waiting
-            Sleep(1);
+            // Use shorter sleep in ultra-low-latency mode for more responsive processing
+            if (s_audioConfig.latency.ultraLowLatencyProfile) {
+                Sleep(0); // Yield to other threads immediately in ultra-low-latency mode
+            } else {
+                Sleep(1); // Standard 1ms sleep for normal operation
+            }
         }
 
         // Check for parameter updates
@@ -2721,6 +2758,21 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
     // Determine if FEC should be enabled/disabled based on packet loss
     bool shouldEnableFec = (packetLoss >= s_fecEnableThreshold);
     bool shouldDisableFec = (packetLoss <= s_fecDisableThreshold);
+
+    // Ultra-low-latency profile: be more conservative with FEC
+    if (s_audioConfig.latency.ultraLowLatencyProfile && s_audioConfig.latency.disableFecInLowLatency) {
+        // Only enable FEC for extremely high loss (>10%) in ultra-low-latency mode
+        shouldEnableFec = (packetLoss >= 0.10);
+        // Keep normal disable threshold for low loss
+        shouldDisableFec = (packetLoss <= s_fecDisableThreshold);
+
+        if (packetLoss > s_fecEnableThreshold && packetLoss < 0.10) {
+            std::wcout << L"[AudioAdapt] Ultra-low-latency profile: Skipping FEC enable (loss: " << (packetLoss * 100.0)
+                      << L"%, threshold: 10.0% for ultra-low-latency)" << std::endl;
+            shouldEnableFec = false;
+        }
+    }
+
     bool fecStateChanged = false;
 
     // FEC Control: Enable when loss is high, disable when loss is very low
@@ -2919,14 +2971,24 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
         if (config.contains("frameSizeMs")) {
             int frameSizeMs = config["frameSizeMs"].get<int>();
 
-            // Check if strict latency mode is enabled
+            // Check if strict latency mode or ultra-low-latency profile is enabled
             bool isStrictMode = false;
+            bool isUltraLowLatency = false;
             if (config.contains("latency")) {
                 auto latencyConfig = config["latency"];
                 isStrictMode = latencyConfig.value("strictLatencyMode", true);
+                isUltraLowLatency = latencyConfig.value("ultraLowLatencyProfile", false);
             }
 
-            if (isStrictMode) {
+            if (isUltraLowLatency) {
+                // Ultra-low-latency profile: enforce 5ms frames
+                if (frameSizeMs == 5) {
+                    s_audioConfig.frameSizeMs = 5;
+                } else {
+                    std::wcout << L"[AudioConfig] Ultra-low-latency profile: Forcing 5ms frames (configured: " << frameSizeMs << L"ms)" << std::endl;
+                    s_audioConfig.frameSizeMs = 5; // Force 5ms for ultra-low-latency
+                }
+            } else if (isStrictMode) {
                 // Strict latency mode: enforce 5-10ms range
                 if (frameSizeMs >= 5 && frameSizeMs <= 10) {
                     s_audioConfig.frameSizeMs = frameSizeMs;
@@ -2994,8 +3056,11 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
             s_audioConfig.latency.strictLatencyMode = latencyConfig.value("strictLatencyMode", true);
             s_audioConfig.latency.warnOnBuffering = latencyConfig.value("warnOnBuffering", true);
             s_audioConfig.latency.targetOneWayLatencyMs = latencyConfig.value("targetOneWayLatencyMs", 20);
+            s_audioConfig.latency.ultraLowLatencyProfile = latencyConfig.value("ultraLowLatencyProfile", false);
+            s_audioConfig.latency.disableFecInLowLatency = latencyConfig.value("disableFecInLowLatency", true);
 
             std::wcout << L"[AudioCapturer] Latency config: strict_mode=" << (s_audioConfig.latency.strictLatencyMode ? L"enabled" : L"disabled")
+                      << L", ultra_low_latency=" << (s_audioConfig.latency.ultraLowLatencyProfile ? L"enabled" : L"disabled")
                       << L", frame_size=" << s_audioConfig.latency.minFrameSizeMs << L"-" << s_audioConfig.latency.maxFrameSizeMs << L"ms"
                       << L", single_frame_buffering=" << (s_audioConfig.latency.enforceSingleFrameBuffering ? L"enforced" : L"flexible")
                       << L", target_latency=" << s_audioConfig.latency.targetOneWayLatencyMs << L"ms"
