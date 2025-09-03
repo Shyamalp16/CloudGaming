@@ -417,7 +417,8 @@ func initVideoSendQueue() {
 	videoSendStop = make(chan struct{})
 
 	// Create buffer completion channel for safe buffer pool management
-	videoBufferCompletion = make(chan []byte, 16) // Small buffer for completion signals
+	// Increased buffer size to prevent blocking at high throughput
+	videoBufferCompletion = make(chan []byte, 64) // Larger buffer for completion signals
 
 	// Start the dedicated video sender goroutine
 	go videoSenderGoroutine()
@@ -519,44 +520,81 @@ func audioSenderGoroutine() {
 func videoSenderGoroutine() {
 	log.Println("[Go/Pion] Video sender goroutine started")
 
+	// Watchdog to detect if we're not consuming samples fast enough
+	lastSampleTime := time.Now()
+	sampleCount := 0
+
+	// Start watchdog goroutine
+	watchdogStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if sampleCount == 0 && time.Since(lastSampleTime) > 2*time.Second {
+					log.Printf("[Go/Pion] Video sender watchdog: no samples processed in 2+ seconds")
+				}
+				sampleCount = 0 // Reset counter
+			case <-watchdogStop:
+				return
+			}
+		}
+	}()
+	defer close(watchdogStop)
+
 	for {
 		select {
 		case sample := <-videoSendQueue:
+			// Update watchdog counters
+			lastSampleTime = time.Now()
+			sampleCount++
+
 			// Send video sample without holding any locks
 			// This is the potentially blocking operation, but it doesn't block other operations
 			if videoTrack != nil {
 				if err := videoTrack.WriteSample(sample); err != nil {
 					log.Printf("[Go/Pion] Error in video sender goroutine: %v", err)
 				}
+			} else {
+				log.Printf("[Go/Pion] Video track is nil, dropping sample")
 			}
 
 			// Signal buffer completion to prevent use-after-free
 			// This ensures the buffer is only returned to the pool after WriteSample has finished reading it
 			if len(sample.Data) > 0 {
-				// Try to signal completion with fallback mechanisms
+				// Try to signal completion with non-blocking approach
 				select {
 				case videoBufferCompletion <- sample.Data:
 					// Buffer completion signaled successfully - normal path
-				case <-time.After(200 * time.Millisecond):
-					// Completion channel is full or handler is slow
-					// Check if completion handler is still running and try a shorter timeout
-					select {
-					case videoBufferCompletion <- sample.Data:
-						// Retry succeeded
-						log.Printf("[Go/Pion] Video buffer completion retry succeeded (size=%d)",
-							len(sample.Data))
-					case <-time.After(50 * time.Millisecond):
-						// Still failing - force return to pool to prevent memory leaks
-						log.Printf("[Go/Pion] Video buffer completion failed after retry, forcing pool return (size=%d)",
-							len(sample.Data))
-						putSampleBuf(sample.Data)
-					}
+				default:
+					// Completion channel is full - use goroutine to avoid blocking
+					go func(buf []byte) {
+						select {
+						case videoBufferCompletion <- buf:
+							// Eventually succeeded
+						case <-time.After(100 * time.Millisecond):
+							// Timeout - force return to prevent leaks
+							log.Printf("[Go/Pion] Video buffer completion timeout, forcing pool return (size=%d)",
+								len(buf))
+							putSampleBuf(buf)
+						}
+					}(sample.Data)
 				}
 			}
 
 		case <-videoSendStop:
 			log.Println("[Go/Pion] Video sender goroutine stopped")
 			return
+
+		case <-time.After(10 * time.Second):
+			// Safety timeout to prevent goroutine from hanging indefinitely
+			log.Printf("[Go/Pion] Video sender timeout - no activity for 10 seconds, checking health...")
+			if videoTrack == nil {
+				log.Printf("[Go/Pion] Video track is nil during timeout")
+			}
+			// Continue processing - this timeout just prevents indefinite blocking
 		}
 	}
 }
@@ -564,11 +602,26 @@ func videoSenderGoroutine() {
 // videoBufferCompletionHandler safely manages buffer pool returns to prevent use-after-free
 // This goroutine ensures buffers are only returned to the pool after WriteSample has finished reading them
 func videoBufferCompletionHandler() {
+	log.Println("[Go/Pion] Video buffer completion handler started")
+
+	bufferCount := 0
+	lastLogTime := time.Now()
+
 	for {
 		select {
 		case buf := <-videoBufferCompletion:
 			// Return buffer to pool now that WriteSample has finished reading it
 			putSampleBuf(buf)
+			bufferCount++
+
+			// Log buffer processing rate occasionally
+			if time.Since(lastLogTime) >= 5*time.Second {
+				log.Printf("[Go/Pion] Video buffer completion: %d buffers processed (%.1f buffers/sec)",
+					bufferCount, float64(bufferCount)/5.0)
+				bufferCount = 0
+				lastLogTime = time.Now()
+			}
+
 		case <-videoSendStop:
 			log.Println("[Go/Pion] Video buffer completion handler stopped")
 			return
@@ -851,32 +904,38 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 	// Queue sample for the dedicated sender goroutine (bounded queue, size ≤ 2)
 	// This implements backpressure by dropping oldest samples rather than accumulating
 	// The sender goroutine will handle WriteSample without holding any locks
+
+	// Try to send sample with timeout to prevent blocking
 	select {
 	case videoSendQueue <- sample:
 		// Sample successfully queued for sending
 		// Buffer will be returned to pool by sender goroutine after WriteSample
-
-		// Optional performance logging (disabled during normal operation to avoid spam)
-		// To enable performance monitoring, uncomment the following block:
-		// if sendCount%100 == 0 {
-		//     log.Printf("[Go/Pion] Video sample queued: size=%d, dur=%v", n, dur)
-		// }
-
 		return 0
-	default:
-		// Queue is full - implement backpressure by dropping oldest sample and queuing new one
+	case <-time.After(10 * time.Millisecond):
+		// Queue is full or sender is slow - implement backpressure
+		// Try to make room by dropping oldest sample
 		select {
 		case oldestSample := <-videoSendQueue:
-			// Drop the oldest sample and return its buffer to pool
+			// Successfully removed oldest sample
 			putSampleBuf(oldestSample.Data)
-			// Now queue the new sample
-			videoSendQueue <- sample
-			log.Printf("[Go/Pion] Video queue full, dropped oldest sample (size=%d)", len(oldestSample.Data))
-			return 0
-		default:
-			// This should not happen with proper queue management
-			putSampleBuf(buf) // Return buffer on queue failure
-			log.Printf("[Go/Pion] Video queue failure, dropped sample (size=%d)", n)
+
+			// Now try to queue the new sample
+			select {
+			case videoSendQueue <- sample:
+				// Success after making room
+				log.Printf("[Go/Pion] Video backpressure: dropped oldest sample (size=%d), queued new (size=%d)",
+					len(oldestSample.Data), n)
+				return 0
+			case <-time.After(5 * time.Millisecond):
+				// Still can't queue - sender might be stuck
+				putSampleBuf(buf)
+				log.Printf("[Go/Pion] Video sender stuck, dropped sample (size=%d)", n)
+				return -1
+			}
+		case <-time.After(5 * time.Millisecond):
+			// Can't even read from queue - sender might be completely stuck
+			putSampleBuf(buf)
+			log.Printf("[Go/Pion] Video queue completely stuck, dropped sample (size=%d)", n)
 			return -1
 		}
 	}
