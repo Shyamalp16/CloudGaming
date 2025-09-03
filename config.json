@@ -59,6 +59,14 @@
         "preferLinearResampling": true,
         "useDmoOnlyForHighQuality": false
       },
+      "latency": {
+        "enforceSingleFrameBuffering": true,
+        "maxFrameSizeMs": 10,
+        "minFrameSizeMs": 5,
+        "strictLatencyMode": true,
+        "warnOnBuffering": true,
+        "targetOneWayLatencyMs": 20
+      },
       "bitrateAdaptation": {
         "enabled": true,
         "minBitrate": 8000,

@@ -1402,18 +1402,18 @@ namespace Encoder {
 
         // Severe: Recent EAGAIN events (last 500ms) with high count
         if (sinceLastEagain <= 500 && eagainCount >= 5) {
-            return SEVERE;
+            return BackpressureLevel::SEVERE;
         }
         // Moderate: Recent EAGAIN events (last 1s) with moderate count
         else if (sinceLastEagain <= 1000 && eagainCount >= 3) {
-            return MODERATE;
+            return BackpressureLevel::MODERATE;
         }
         // Mild: Recent EAGAIN events (last 2s) with low count
         else if (sinceLastEagain <= 2000 && eagainCount >= 2) {
-            return MILD;
+            return BackpressureLevel::MILD;
         }
 
-        return NONE;
+        return BackpressureLevel::NONE;
     }
 
     void GetAndResetBackpressureStats(int &eagainEvents) {

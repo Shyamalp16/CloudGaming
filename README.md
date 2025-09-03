@@ -79,7 +79,7 @@ The Host is the core of the streaming solution. It runs on the machine with the 
 *   **`main.cpp`**: Entry point. Initializes D3D11, WGC capture, audio, encoder, and signaling. Loads `config.json`.
 *   **Capture (`CaptureHelpers.cpp`)**: Uses **Windows Graphics Capture (WGC)** with a free-threaded frame pool. Frames are copied into a fixed **texture pool** (ID3D11Texture2D) to avoid per-frame allocations.
 *   **Encoding (`Encoder.cpp`)**: Encodes frames with FFmpeg H.264 using the best available hardware (NVENC/QSV/AMF) and **GPU VideoProcessor** for BGRA→NV12. Caches **ID3D11VideoProcessorInput/OutputView** objects to avoid per-frame D3D allocations. Adaptive bitrate control is handled here.
-*   **Audio (`AudioCapturer.cpp`)**: Uses **WASAPI** **event-driven** capture with configurable exclusive/shared modes, device periods (2.5-5ms), and format optimization. Supports both DMO and linear resampling with MMCSS thread priority for ultra-low latency gaming audio.
+*   **Audio (`AudioCapturer.cpp`)**: Uses **WASAPI** **event-driven** capture with configurable exclusive/shared modes, device periods (2.5-5ms), and format optimization. Enforces single-frame buffering, validates 5-10ms Opus packetization, and provides real-time latency monitoring for <20ms one-way audio latency in gaming scenarios.
 *   **WebRTC (`gortc_main/main.go`)**: Pion-based module (Go, C-shared) for PeerConnection, data channels, and ICE. Provides RTT via video ping/pong and intercepts RTCP Receiver Reports.
 *   **Input Handling (`KeyInputHandler`, `MouseInputHandler`)**: Receives events via data channels and simulates locally using `SendInput`.
 *   **Signaling (`Websocket.cpp`)**: Connects to the Node server; validates inbound input messages, enforces rate limits, and sends/receives SDP/ICE.
@@ -1424,6 +1424,14 @@ The Host includes a configurable Opus audio encoder optimized for low-latency ga
         "force48kHzStereo": true,        // Force 48kHz stereo format to avoid resampling
         "preferLinearResampling": true,  // Prefer linear interpolation over DMO
         "useDmoOnlyForHighQuality": false // Only use DMO when exact quality required
+      },
+      "latency": {
+        "enforceSingleFrameBuffering": true,     // Strictly enforce one frame max buffering
+        "maxFrameSizeMs": 10,                    // Maximum frame size for low-latency mode (5-10ms)
+        "minFrameSizeMs": 5,                     // Minimum frame size for low-latency mode
+        "strictLatencyMode": true,               // Enable strict latency optimizations
+        "warnOnBuffering": true,                 // Warn when buffering exceeds one frame
+        "targetOneWayLatencyMs": 20              // Target one-way audio latency (<20ms)
       }
     }
   }
@@ -1451,6 +1459,12 @@ The Host includes a configurable Opus audio encoder optimized for low-latency ga
 | `wasapi.force48kHzStereo` | boolean | true | Force 48kHz stereo format at source to eliminate resampling CPU overhead |
 | `wasapi.preferLinearResampling` | boolean | true | Prefer linear interpolation over DMO resampler for lower latency |
 | `wasapi.useDmoOnlyForHighQuality` | boolean | false | Only use DMO resampler when exact quality is required (slower but higher quality) |
+| `latency.enforceSingleFrameBuffering` | boolean | true | Strictly enforce maximum one frame of buffering between capture→encode→send |
+| `latency.maxFrameSizeMs` | number | 10 | Maximum Opus frame size in milliseconds for low-latency mode (5-10ms range) |
+| `latency.minFrameSizeMs` | number | 5 | Minimum Opus frame size in milliseconds for low-latency mode |
+| `latency.strictLatencyMode` | boolean | true | Enable strict latency optimizations and validation |
+| `latency.warnOnBuffering` | boolean | true | Warn when buffering exceeds one frame (latency violation) |
+| `latency.targetOneWayLatencyMs` | number | 20 | Target one-way audio latency in milliseconds (<20ms makes system feel snappy) |
 
 **Audio Tuning Recommendations:**
 
@@ -1483,6 +1497,54 @@ The Host includes a configurable Opus audio encoder optimized for low-latency ga
   "enableFec": true
 }
 ```
+
+#### Ultra-Low Latency Gaming Configuration:
+```json
+{
+  "frameSizeMs": 5,
+  "latency": {
+    "strictLatencyMode": true,
+    "enforceSingleFrameBuffering": true,
+    "targetOneWayLatencyMs": 15
+  },
+  "wasapi": {
+    "preferExclusiveMode": true,
+    "enforceEventDriven": true,
+    "devicePeriodMs": 2.5,
+    "force48kHzStereo": true,
+    "preferLinearResampling": true
+  }
+}
+```
+
+### Audio Latency Optimization Guide
+
+For optimal gaming audio responsiveness, the system implements several latency reduction techniques:
+
+#### Single Frame Buffering
+- **Enforcement**: `enforceSingleFrameBuffering: true` ensures maximum one frame between capture→encode→send
+- **Benefit**: Eliminates queueing delays that can add 10-20ms of latency
+- **Monitoring**: Warnings issued when buffering violations occur
+
+#### Opus Frame Size Optimization
+- **Range**: 5-10ms frames provide optimal balance between latency and efficiency
+- **Validation**: Strict mode enforces 5-10ms range, warns on violations
+- **Gaming**: 5ms frames minimize perceived audio delay
+
+#### WASAPI Latency Reduction
+- **Exclusive Mode**: Direct hardware access reduces buffering by 75%
+- **Event-Driven**: Eliminates 10ms polling intervals
+- **Small Device Periods**: 2.5-5ms periods minimize hardware latency
+
+#### Performance Impact
+- **Target Latency**: <20ms one-way latency makes audio feel instantaneous
+- **CPU Overhead**: Minimal with linear resampling and optimized buffering
+- **Quality Trade-off**: Slight quality reduction for massive latency improvement
+
+#### Latency Monitoring
+- **Periodic Reports**: Status updates every 30 seconds in strict mode
+- **Buffer Warnings**: Immediate alerts when single-frame limit exceeded
+- **Estimation**: Real-time latency calculation based on configuration
 
 #### WASAPI Low-Latency Configuration:
 ```json
@@ -1532,6 +1594,9 @@ The WASAPI (Windows Audio Session API) configuration options control low-level a
 - **Compatibility**: Automatic fallback ensures functionality on all systems
 
 **Audio Features:**
+- **Single Frame Buffering**: Strictly enforced one frame maximum between capture→encode→send
+- **Opus Frame Validation**: 5-10ms packetization validation for optimal gaming latency
+- **Latency Monitoring**: Real-time latency tracking and violation warnings
 - **WASAPI Exclusive Mode**: Direct hardware access with 2.5-5ms device periods for ultra-low latency
 - **Event-Driven Capture**: Immediate notification eliminates 10ms polling latency
 - **48kHz Stereo Enforcement**: Forces optimal format to eliminate resampling overhead

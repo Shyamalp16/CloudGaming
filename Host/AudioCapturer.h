@@ -96,6 +96,10 @@ private:
     // Test and validation methods
     void TestResamplerQuality(uint32_t testSampleRate, uint32_t testChannels);
 
+    // Audio latency optimization methods
+    bool ValidateOpusPacketization(int frameSizeMs);
+    void ReportLatencyStats();
+
     // Error recovery and robustness methods
     bool ReinitializeAudioClient();
     bool ShouldRetryError(HRESULT hr, int retryCount);
@@ -200,6 +204,16 @@ private:
             bool preferLinearResampling = true;   // Prefer linear interpolation over DMO
             bool useDmoOnlyForHighQuality = false; // Only use DMO when exact quality required
         } wasapi;
+
+        // Audio latency optimization configuration
+        struct LatencyConfig {
+            bool enforceSingleFrameBuffering = true; // Strictly enforce one frame max buffering
+            int maxFrameSizeMs = 10;                 // Maximum frame size for low-latency mode (5-10ms)
+            int minFrameSizeMs = 5;                  // Minimum frame size for low-latency mode
+            bool strictLatencyMode = true;           // Enable strict latency optimizations
+            bool warnOnBuffering = true;             // Warn when buffering exceeds one frame
+            int targetOneWayLatencyMs = 20;          // Target one-way audio latency (<20ms)
+        } latency;
     };
     static AudioConfig s_audioConfig;
 

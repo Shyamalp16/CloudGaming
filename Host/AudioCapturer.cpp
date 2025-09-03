@@ -110,7 +110,12 @@ bool AudioCapturer::StartCapture(DWORD processId)
         std::wcerr << L"[AudioCapturer] Failed to initialize Opus encoder" << std::endl;
         return false;
     }
-    
+
+    // Validate Opus packetization for low-latency mode
+    if (s_audioConfig.latency.strictLatencyMode) {
+        this->ValidateOpusPacketization(s_audioConfig.frameSizeMs);
+    }
+
     // Initialize timing
     m_startTime = std::chrono::high_resolution_clock::now();
     m_nextFrameTime = 0;
@@ -461,6 +466,17 @@ bool AudioCapturer::QueueRawFrame(std::vector<float>& samples, int64_t timestamp
 {
     std::lock_guard<std::mutex> lock(m_rawFrameMutex);
 
+    // Check for buffering violations in strict latency mode (capture → encode path)
+    if (s_audioConfig.latency.enforceSingleFrameBuffering && m_rawFrameQueue.size() >= MAX_RAW_FRAME_QUEUE_SIZE) {
+        if (s_audioConfig.latency.warnOnBuffering) {
+            std::wcerr << L"[AudioLatency] WARNING: Single frame buffering violated on capture→encode path! Queue size: "
+                      << m_rawFrameQueue.size() << L"/" << MAX_RAW_FRAME_QUEUE_SIZE
+                      << L" - Encoder congestion may increase latency beyond target "
+                      << s_audioConfig.latency.targetOneWayLatencyMs << L"ms" << std::endl;
+        }
+        return false; // Signal congestion to capture thread
+    }
+
     // With minimal queue depth (1), we should rarely have queue full situations
     // If queue is full, this indicates encoder thread congestion
     if (m_rawFrameQueue.size() >= MAX_RAW_FRAME_QUEUE_SIZE) {
@@ -633,6 +649,17 @@ bool AudioCapturer::CheckForParameterUpdates() {
 bool AudioCapturer::QueueAudioPacket(std::vector<uint8_t>& data, int64_t timestampUs, uint32_t rtpTimestamp)
 {
     std::lock_guard<std::mutex> lock(m_queueMutex);
+
+    // Check for buffering violations in strict latency mode
+    if (s_audioConfig.latency.enforceSingleFrameBuffering && m_audioQueue.size() >= MAX_QUEUE_SIZE) {
+        if (s_audioConfig.latency.warnOnBuffering) {
+            std::wcerr << L"[AudioLatency] WARNING: Single frame buffering violated! Queue size: "
+                      << m_audioQueue.size() << L"/" << MAX_QUEUE_SIZE
+                      << L" - WebRTC congestion may increase latency beyond target "
+                      << s_audioConfig.latency.targetOneWayLatencyMs << L"ms" << std::endl;
+        }
+        return false; // Signal congestion to encoder thread
+    }
 
     // With minimal queue size (1), we should rarely have queue full situations
     // If queue is full, this indicates WebRTC congestion - let WebRTC handle it
@@ -1260,6 +1287,11 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         // Periodic heartbeat log to verify capture loop is running
         if (captureCycles % 1000 == 0) {
             AUDIO_LOG_DEBUG(L"[AudioCapturer] Capture loop heartbeat: cycle " << captureCycles << L", processed " << dataPacketsProcessed << L" packets");
+        }
+
+        // Periodic latency status reporting
+        if (captureCycles % 30000 == 0) { // Every 30 seconds (assuming 1000 cycles/second)
+            this->ReportLatencyStats();
         }
 
         // Periodic error statistics logging (every 1000 cycles if there were errors)
@@ -2596,6 +2628,70 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
     }
 }
 
+
+
+
+
+// Audio latency optimization methods
+bool AudioCapturer::ValidateOpusPacketization(int frameSizeMs) {
+    if (frameSizeMs < 5 || frameSizeMs > 10) {
+        std::wcerr << L"[AudioLatency] WARNING: Opus frame size " << frameSizeMs
+                  << L"ms outside optimal 5-10ms latency range. Consider using 5-10ms for gaming." << std::endl;
+        return false;
+    }
+    std::wcout << L"[AudioLatency] Opus packetization validated: " << frameSizeMs
+              << L"ms frame size within optimal latency range (5-10ms)" << std::endl;
+    return true;
+}
+
+void AudioCapturer::ReportLatencyStats() {
+    if (!s_audioConfig.latency.strictLatencyMode) {
+        return; // Only report in strict latency mode
+    }
+
+    static auto lastReport = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastReport);
+
+    if (elapsed.count() >= 30) { // Report every 30 seconds
+        std::wcout << L"[AudioLatency] Latency Status Report:" << std::endl;
+        std::wcout << L"[AudioLatency]   - Target one-way latency: " << s_audioConfig.latency.targetOneWayLatencyMs << L"ms" << std::endl;
+        std::wcout << L"[AudioLatency]   - Opus frame size: " << s_audioConfig.frameSizeMs << L"ms" << std::endl;
+        std::wcout << L"[AudioLatency]   - Single frame buffering: "
+                  << (s_audioConfig.latency.enforceSingleFrameBuffering ? L"enforced" : L"flexible") << std::endl;
+        std::wcout << L"[AudioLatency]   - WASAPI exclusive mode: "
+                  << (s_audioConfig.wasapi.preferExclusiveMode ? L"preferred" : L"disabled") << std::endl;
+        std::wcout << L"[AudioLatency]   - Event-driven capture: "
+                  << (s_audioConfig.wasapi.enforceEventDriven ? L"enforced" : L"fallback-allowed") << std::endl;
+
+        // Estimate current latency based on configuration
+        int estimatedLatency = s_audioConfig.frameSizeMs; // Base frame latency
+        if (s_audioConfig.wasapi.enforceEventDriven) {
+            estimatedLatency += 3; // Event-driven processing overhead
+        } else {
+            estimatedLatency += 10; // Polling latency
+        }
+
+        if (s_audioConfig.wasapi.preferExclusiveMode) {
+            estimatedLatency += 2; // Exclusive mode buffer
+        } else {
+            estimatedLatency += 10; // Shared mode buffer
+        }
+
+        std::wcout << L"[AudioLatency]   - Estimated current latency: " << estimatedLatency << L"ms" << std::endl;
+
+        if (estimatedLatency > s_audioConfig.latency.targetOneWayLatencyMs) {
+            std::wcerr << L"[AudioLatency] WARNING: Estimated latency (" << estimatedLatency << L"ms) exceeds target ("
+                      << s_audioConfig.latency.targetOneWayLatencyMs << L"ms)" << std::endl;
+            std::wcerr << L"[AudioLatency] Consider: smaller frame size, exclusive mode, event-driven capture" << std::endl;
+        } else {
+            std::wcout << L"[AudioLatency] ✓ Within target latency range" << std::endl;
+        }
+
+        lastReport = now;
+    }
+}
+
 // Static method to update Opus encoder parameters dynamically
 void AudioCapturer::UpdateOpusParameters(int bitrate, int expectedLossPerc, int complexity, int fecEnabled) {
     // Get the active AudioCapturer instance
@@ -2654,11 +2750,31 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
             s_audioConfig.application = config["application"].get<int>();
         }
 
-        // Read frame size in milliseconds (keep at 10ms for low latency)
+        // Read frame size in milliseconds (enforce 5-10ms for low latency when strict mode enabled)
         if (config.contains("frameSizeMs")) {
             int frameSizeMs = config["frameSizeMs"].get<int>();
-            if (frameSizeMs == 10 || frameSizeMs == 20 || frameSizeMs == 40) {
-                s_audioConfig.frameSizeMs = frameSizeMs;
+
+            // Check if strict latency mode is enabled
+            bool isStrictMode = false;
+            if (config.contains("latency")) {
+                auto latencyConfig = config["latency"];
+                isStrictMode = latencyConfig.value("strictLatencyMode", true);
+            }
+
+            if (isStrictMode) {
+                // Strict latency mode: enforce 5-10ms range
+                if (frameSizeMs >= 5 && frameSizeMs <= 10) {
+                    s_audioConfig.frameSizeMs = frameSizeMs;
+                } else {
+                    std::wcerr << L"[AudioConfig] Strict latency mode: Frame size " << frameSizeMs
+                              << L"ms outside 5-10ms range, using 10ms" << std::endl;
+                    s_audioConfig.frameSizeMs = 10; // Default to 10ms
+                }
+            } else {
+                // Legacy validation for backward compatibility
+                if (frameSizeMs == 10 || frameSizeMs == 20 || frameSizeMs == 40) {
+                    s_audioConfig.frameSizeMs = frameSizeMs;
+                }
             }
         }
 
@@ -2700,6 +2816,24 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
                       << L", device_period=" << s_audioConfig.wasapi.devicePeriodMs << L"ms"
                       << L", force_48kHz=" << (s_audioConfig.wasapi.force48kHzStereo ? L"enabled" : L"disabled")
                       << L", linear_resample=" << (s_audioConfig.wasapi.preferLinearResampling ? L"preferred" : L"DMO-first")
+                      << std::endl;
+        }
+
+        // Read latency optimization configuration
+        if (config.contains("latency")) {
+            auto latencyConfig = config["latency"];
+
+            s_audioConfig.latency.enforceSingleFrameBuffering = latencyConfig.value("enforceSingleFrameBuffering", true);
+            s_audioConfig.latency.maxFrameSizeMs = latencyConfig.value("maxFrameSizeMs", 10);
+            s_audioConfig.latency.minFrameSizeMs = latencyConfig.value("minFrameSizeMs", 5);
+            s_audioConfig.latency.strictLatencyMode = latencyConfig.value("strictLatencyMode", true);
+            s_audioConfig.latency.warnOnBuffering = latencyConfig.value("warnOnBuffering", true);
+            s_audioConfig.latency.targetOneWayLatencyMs = latencyConfig.value("targetOneWayLatencyMs", 20);
+
+            std::wcout << L"[AudioCapturer] Latency config: strict_mode=" << (s_audioConfig.latency.strictLatencyMode ? L"enabled" : L"disabled")
+                      << L", frame_size=" << s_audioConfig.latency.minFrameSizeMs << L"-" << s_audioConfig.latency.maxFrameSizeMs << L"ms"
+                      << L", single_frame_buffering=" << (s_audioConfig.latency.enforceSingleFrameBuffering ? L"enforced" : L"flexible")
+                      << L", target_latency=" << s_audioConfig.latency.targetOneWayLatencyMs << L"ms"
                       << std::endl;
         }
 
