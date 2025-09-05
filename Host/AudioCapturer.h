@@ -436,6 +436,7 @@ private:
     void WriteInt16ToFile(std::ofstream& file, int16_t value);
     void WriteInt32ToFile(std::ofstream& file, int32_t value);
     static void FinalizeWAVOnExit();
+    static bool TryParseGuidFromWideString(const wchar_t* str, GUID& outGuid);
 
     // Simple resampler state for linear interpolation between callbacks
     std::vector<float> m_resampleRemainder; // per-channel remainder sample
@@ -448,6 +449,7 @@ private:
     uint16_t m_activeBitsPerSample = 16;
     uint16_t m_activeWavAudioFormat = 1; // 1=PCM, 3=IEEE_FLOAT
     bool m_wavWriteRawMode = false; // write float->PCM16 samples to WAV
+    GUID m_targetSessionGuid = GUID_NULL; // Target render session GUID for per-process loopback
 
     // WAV recording state
     std::ofstream m_wavFile;

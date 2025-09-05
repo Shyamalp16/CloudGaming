@@ -11,6 +11,62 @@
 #include <ks.h>
 #include <ksmedia.h>
 #include <opus/opus.h>
+#include <audioclientactivationparams.h>
+#include <propvarutil.h>
+#include <activation.h>
+// Completion handler for ActivateAudioInterfaceAsync
+class ActivateAudioCompletionHandler : public IActivateAudioInterfaceCompletionHandler {
+public:
+    explicit ActivateAudioCompletionHandler(HANDLE hEvent) : m_ref(1), m_hEvent(hEvent), m_hr(E_FAIL) {}
+
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IActivateAudioInterfaceCompletionHandler)) {
+            *ppv = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_ref); }
+    STDMETHODIMP_(ULONG) Release() override {
+        ULONG ulRef = InterlockedDecrement(&m_ref);
+        if (ulRef == 0) delete this;
+        return ulRef;
+    }
+
+    STDMETHODIMP ActivateCompleted(IActivateAudioInterfaceAsyncOperation* operation) override {
+        if (!operation) { m_hr = E_POINTER; SetEvent(m_hEvent); return S_OK; }
+        HRESULT hrOp = E_FAIL; IUnknown* punk = nullptr;
+        operation->GetActivateResult(&hrOp, &punk);
+        m_hr = hrOp;
+        if (SUCCEEDED(hrOp) && punk) {
+            punk->QueryInterface(__uuidof(IAudioClient), reinterpret_cast<void**>(m_audioClient.ReleaseAndGetAddressOf()));
+            punk->Release();
+        }
+        SetEvent(m_hEvent);
+        return S_OK;
+    }
+
+    HRESULT Result() const { return m_hr; }
+    Microsoft::WRL::ComPtr<IAudioClient> GetClient() const { return m_audioClient; }
+
+private:
+    ~ActivateAudioCompletionHandler() = default;
+    LONG m_ref;
+    HANDLE m_hEvent;
+    HRESULT m_hr;
+    Microsoft::WRL::ComPtr<IAudioClient> m_audioClient;
+};
+#include <rpc.h>
+bool AudioCapturer::TryParseGuidFromWideString(const wchar_t* str, GUID& outGuid)
+{
+    if (!str) return false;
+    RPC_WSTR wstr = (RPC_WSTR)str;
+    RPC_STATUS status = UuidFromStringW(wstr, &outGuid);
+    return status == RPC_S_OK;
+}
 
 #define REFTIMES_PER_SEC  10000000
 #define REFTIMES_PER_MILLISEC  10000
@@ -1322,12 +1378,75 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 m_pSessionControl2 = pSessionControl2; // ComPtr takes ownership (AddRef)
                 if (pSessionControl2) { pSessionControl2->Release(); pSessionControl2 = NULL; }
                 
-                hr = m_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, reinterpret_cast<void**>(m_pAudioClient.ReleaseAndGetAddressOf()));
-                if (FAILED(hr))
-                {
-                    std::wcerr << L"[AudioCapturer] Unable to activate audio client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
-                    goto Exit;
+                // Attempt per-process loopback activation (Windows 10 1703+)
+                std::wstring capturePath = L"UNKNOWN";
+                LPWSTR deviceIdStr = nullptr;
+                HRESULT hrDevId = m_pDevice->GetId(&deviceIdStr);
+                bool loopbackActivated = false;
+                if (SUCCEEDED(hrDevId) && deviceIdStr) {
+                    AUDIOCLIENT_ACTIVATION_PARAMS actParams = {};
+                    actParams.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+                    actParams.ProcessLoopbackParams.TargetProcessId = targetProcessId;
+                    actParams.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+
+                    PROPVARIANT pv; PropVariantInit(&pv);
+                    pv.vt = VT_BLOB;
+                    pv.blob.cbSize = static_cast<ULONG>(sizeof(actParams));
+                    pv.blob.pBlobData = reinterpret_cast<BYTE*>(CoTaskMemAlloc(sizeof(actParams)));
+                    if (pv.blob.pBlobData) {
+                        memcpy(pv.blob.pBlobData, &actParams, sizeof(actParams));
+                    } else {
+                        std::wcerr << L"[AudioCapturer] CoTaskMemAlloc failed for activation params" << std::endl;
+                    }
+
+                    // Use async activation API available on desktop
+                    HANDLE hDone = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+                    if (hDone) {
+                        ActivateAudioCompletionHandler* handler = new ActivateAudioCompletionHandler(hDone);
+                        IActivateAudioInterfaceAsyncOperation* pOp = nullptr;
+                        HRESULT hrAct = ActivateAudioInterfaceAsync(
+                            deviceIdStr,
+                            __uuidof(IAudioClient),
+                            &pv,
+                            static_cast<IActivateAudioInterfaceCompletionHandler*>(handler),
+                            &pOp);
+
+                        if (SUCCEEDED(hrAct) && pOp) {
+                            // Wait for completion
+                            WaitForSingleObject(hDone, 2000);
+                            HRESULT hrRes = handler->Result();
+                            auto client = handler->GetClient();
+                            if (SUCCEEDED(hrRes) && client) {
+                                m_pAudioClient = client;
+                                std::wcout << L"[AudioCapturer] Activated per-process loopback for PID " << targetProcessId << std::endl;
+                                capturePath = L"PROCESS_LOOPBACK";
+                                loopbackActivated = true;
+                            }
+                            pOp->Release();
+                        }
+                        handler->Release();
+                        CloseHandle(hDone);
+                    }
+
+                    PropVariantClear(&pv);
+                    CoTaskMemFree(deviceIdStr);
+
+                    if (!loopbackActivated) {
+                        std::wcerr << L"[AudioCapturer] Per-process loopback activation failed, falling back to device loopback" << std::endl;
+                    }
                 }
+
+                if (!loopbackActivated) {
+                    hr = m_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, reinterpret_cast<void**>(m_pAudioClient.ReleaseAndGetAddressOf()));
+                    if (FAILED(hr))
+                    {
+                        std::wcerr << L"[AudioCapturer] Unable to activate audio client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
+                        goto Exit;
+                    }
+                    capturePath = L"DEVICE_LOOPBACK";
+                }
+
+                std::wcout << L"[AudioCapturer] Capture path selected: " << capturePath << std::endl;
 
                 hr = m_pAudioClient->GetMixFormat(&pwfx);
                 if (FAILED(hr))
@@ -1363,6 +1482,19 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 }
 
                 // Note: We'll resample to 48kHz if needed
+
+                // Query target session grouping GUID for per-process loopback
+                GUID targetSessionGuid = GUID_NULL;
+                if (pSessionControl2) {
+                    HRESULT hrGp = pSessionControl2->GetGroupingParam(&targetSessionGuid);
+                    if (FAILED(hrGp)) {
+                        std::wcerr << L"[AudioCapturer] Failed to get session grouping GUID, capturing full device mix (HRESULT: 0x"
+                                   << std::hex << hrGp << std::dec << L")" << std::endl;
+                        targetSessionGuid = GUID_NULL;
+                    } else {
+                        std::wcout << L"[AudioCapturer] Capturing loopback for target session GUID" << std::endl;
+                    }
+                }
 
                 // Try exclusive mode first if preferred, then shared mode with event-driven capture
                 DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
@@ -1402,7 +1534,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     hnsRequestedDuration,
                     0,
                     targetFormat,
-                    NULL);
+                    (targetSessionGuid == GUID_NULL ? NULL : &targetSessionGuid));
 
                 // If exclusive mode failed and we prefer it, try shared mode as fallback
                 if (FAILED(hr) && shareMode == AUDCLNT_SHAREMODE_EXCLUSIVE) {
@@ -1415,7 +1547,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                         hnsRequestedDuration,
                         0,
                         targetFormat,
-                        NULL);
+                        (targetSessionGuid == GUID_NULL ? NULL : &targetSessionGuid));
                 }
 
                 if (FAILED(hr))
@@ -1432,7 +1564,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                             hnsRequestedDuration,
                             0,
                             const_cast<const WAVEFORMATEX*>(pwfx),
-                            NULL);
+                            (targetSessionGuid == GUID_NULL ? NULL : &targetSessionGuid));
                         if (FAILED(hr)) {
                             std::wcerr << L"[AudioCapturer] Unable to initialize audio client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
                             goto Exit;
@@ -1592,13 +1724,22 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             }
         }
 
+        // Query default device session GUID for per-process loopback only if we found a target session earlier; otherwise fallback
+        GUID defaultSessionGuid = GUID_NULL;
+        if (m_pSessionControl2) {
+            HRESULT hrGp = m_pSessionControl2->GetGroupingParam(&defaultSessionGuid);
+            if (FAILED(hrGp)) {
+                defaultSessionGuid = GUID_NULL;
+            }
+        }
+
         hr = m_pAudioClient->Initialize(
             shareMode,
             streamFlags,
             hnsRequestedDuration,
             0,
             targetFormat,
-            NULL);
+            (defaultSessionGuid == GUID_NULL ? NULL : &defaultSessionGuid));
 
         // If exclusive mode failed and we prefer it, try shared mode as fallback
         if (FAILED(hr) && shareMode == AUDCLNT_SHAREMODE_EXCLUSIVE) {
@@ -1611,7 +1752,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 hnsRequestedDuration,
                 0,
                 targetFormat,
-                NULL);
+                (defaultSessionGuid == GUID_NULL ? NULL : &defaultSessionGuid));
         }
 
         if (FAILED(hr))
@@ -1628,7 +1769,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     hnsRequestedDuration,
                     0,
                     const_cast<const WAVEFORMATEX*>(pwfx),
-                    NULL);
+                    (defaultSessionGuid == GUID_NULL ? NULL : &defaultSessionGuid));
                 if (FAILED(hr)) {
                     std::wcerr << L"[AudioCapturer] Unable to initialize audio client for default device: " << _com_error(hr).ErrorMessage() << std::endl;
                     goto Exit;
