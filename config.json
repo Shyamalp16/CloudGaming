@@ -40,6 +40,10 @@
       "minUpdateInterval100ns": 0
     },
     "audio": {
+      "processLoopback": {
+        "enabled": true,
+        "includeProcessTree": true
+      },
       "bitrate": 64000,
       "complexity": 5,
       "expectedLossPerc": 10,

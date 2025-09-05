@@ -239,6 +239,12 @@ private:
             bool useDmoOnlyForHighQuality = false; // Only use DMO when exact quality required
         } wasapi;
 
+        // Per-process loopback configuration
+        struct ProcessLoopbackConfig {
+            bool enabled = true;                 // Enable per-process loopback activation
+            bool includeProcessTree = true;      // Include child processes of target
+        } processLoopback;
+
         // Audio latency optimization configuration
         struct LatencyConfig {
             bool enforceSingleFrameBuffering = true; // Strictly enforce one frame max buffering

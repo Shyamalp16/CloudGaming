@@ -1225,7 +1225,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     uint64_t timeoutCount = 0;
     uint64_t lastLogTime = GetTickCount64();
 
-    hr = CoInitialize(NULL);
+    hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (FAILED(hr))
     {
         std::wcerr << L"Unable to initialize COM in render thread: " << _com_error(hr).ErrorMessage() << std::endl;
@@ -1378,72 +1378,16 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 m_pSessionControl2 = pSessionControl2; // ComPtr takes ownership (AddRef)
                 if (pSessionControl2) { pSessionControl2->Release(); pSessionControl2 = NULL; }
                 
-                // Attempt per-process loopback activation (Windows 10 1703+)
-                std::wstring capturePath = L"UNKNOWN";
-                LPWSTR deviceIdStr = nullptr;
-                HRESULT hrDevId = m_pDevice->GetId(&deviceIdStr);
+                // Per-process loopback removed: use device loopback only
+                std::wstring capturePath = L"DEVICE_LOOPBACK";
                 bool loopbackActivated = false;
-                if (SUCCEEDED(hrDevId) && deviceIdStr) {
-                    AUDIOCLIENT_ACTIVATION_PARAMS actParams = {};
-                    actParams.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
-                    actParams.ProcessLoopbackParams.TargetProcessId = targetProcessId;
-                    actParams.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
 
-                    PROPVARIANT pv; PropVariantInit(&pv);
-                    pv.vt = VT_BLOB;
-                    pv.blob.cbSize = static_cast<ULONG>(sizeof(actParams));
-                    pv.blob.pBlobData = reinterpret_cast<BYTE*>(CoTaskMemAlloc(sizeof(actParams)));
-                    if (pv.blob.pBlobData) {
-                        memcpy(pv.blob.pBlobData, &actParams, sizeof(actParams));
-                    } else {
-                        std::wcerr << L"[AudioCapturer] CoTaskMemAlloc failed for activation params" << std::endl;
-                    }
-
-                    // Use async activation API available on desktop
-                    HANDLE hDone = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-                    if (hDone) {
-                        ActivateAudioCompletionHandler* handler = new ActivateAudioCompletionHandler(hDone);
-                        IActivateAudioInterfaceAsyncOperation* pOp = nullptr;
-                        HRESULT hrAct = ActivateAudioInterfaceAsync(
-                            deviceIdStr,
-                            __uuidof(IAudioClient),
-                            &pv,
-                            static_cast<IActivateAudioInterfaceCompletionHandler*>(handler),
-                            &pOp);
-
-                        if (SUCCEEDED(hrAct) && pOp) {
-                            // Wait for completion
-                            WaitForSingleObject(hDone, 2000);
-                            HRESULT hrRes = handler->Result();
-                            auto client = handler->GetClient();
-                            if (SUCCEEDED(hrRes) && client) {
-                                m_pAudioClient = client;
-                                std::wcout << L"[AudioCapturer] Activated per-process loopback for PID " << targetProcessId << std::endl;
-                                capturePath = L"PROCESS_LOOPBACK";
-                                loopbackActivated = true;
-                            }
-                            pOp->Release();
-                        }
-                        handler->Release();
-                        CloseHandle(hDone);
-                    }
-
-                    PropVariantClear(&pv);
-                    CoTaskMemFree(deviceIdStr);
-
-                    if (!loopbackActivated) {
-                        std::wcerr << L"[AudioCapturer] Per-process loopback activation failed, falling back to device loopback" << std::endl;
-                    }
-                }
-
-                if (!loopbackActivated) {
-                    hr = m_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, reinterpret_cast<void**>(m_pAudioClient.ReleaseAndGetAddressOf()));
-                    if (FAILED(hr))
-                    {
-                        std::wcerr << L"[AudioCapturer] Unable to activate audio client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
-                        goto Exit;
-                    }
-                    capturePath = L"DEVICE_LOOPBACK";
+                // Always activate device loopback here
+                hr = m_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, reinterpret_cast<void**>(m_pAudioClient.ReleaseAndGetAddressOf()));
+                if (FAILED(hr))
+                {
+                    std::wcerr << L"[AudioCapturer] Unable to activate audio client for target process device: " << _com_error(hr).ErrorMessage() << std::endl;
+                    goto Exit;
                 }
 
                 std::wcout << L"[AudioCapturer] Capture path selected: " << capturePath << std::endl;
@@ -1483,18 +1427,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
                 // Note: We'll resample to 48kHz if needed
 
-                // Query target session grouping GUID for per-process loopback
+                // No per-process session GUID when using pure device loopback
                 GUID targetSessionGuid = GUID_NULL;
-                if (pSessionControl2) {
-                    HRESULT hrGp = pSessionControl2->GetGroupingParam(&targetSessionGuid);
-                    if (FAILED(hrGp)) {
-                        std::wcerr << L"[AudioCapturer] Failed to get session grouping GUID, capturing full device mix (HRESULT: 0x"
-                                   << std::hex << hrGp << std::dec << L")" << std::endl;
-                        targetSessionGuid = GUID_NULL;
-                    } else {
-                        std::wcout << L"[AudioCapturer] Capturing loopback for target session GUID" << std::endl;
-                    }
-                }
 
                 // Try exclusive mode first if preferred, then shared mode with event-driven capture
                 DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
@@ -1592,7 +1526,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 hr = m_pAudioClient->GetBufferSize(&bufferFrameCount);
                 if (FAILED(hr))
                 {
-                    std::wcerr << L"[AudioCapturer] Unable to get buffer size for target process: " << _com_error(hr).ErrorMessage() << std::endl;
+                    std::wcerr << L"[AudioCapturer] Unable to get buffer size for target process device: " << _com_error(hr).ErrorMessage() << std::endl;
                     goto Exit;
                 }
 
@@ -1607,7 +1541,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 hr = m_pAudioClient->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(m_pCaptureClient.ReleaseAndGetAddressOf()));
                 if (FAILED(hr))
                 {
-                    std::wcerr << L"[AudioCapturer] Unable to get capture client for target process: " << _com_error(hr).ErrorMessage() << std::endl;
+                    std::wcerr << L"[AudioCapturer] Unable to get capture client for target process device: " << _com_error(hr).ErrorMessage() << std::endl;
                     goto Exit;
                 }
                 // Query IAudioClock for precise timestamps
@@ -1643,18 +1577,13 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     }
 
     // ============================================================================
-    // FALLBACK: Per-process audio session not found, try default device loopback
+    // Default device loopback (only path)
     // ============================================================================
     if (!m_pAudioClient)
     {
-        std::wcerr << L"[AudioCapturer] Could not find audio session for process ID: " << targetProcessId << std::endl;
-        std::wcerr << L"[AudioCapturer] This may happen if:" << std::endl;
-        std::wcerr << L"[AudioCapturer]   - The target process is not producing audio" << std::endl;
-        std::wcerr << L"[AudioCapturer]   - The process has already exited" << std::endl;
-        std::wcerr << L"[AudioCapturer]   - Audio is being routed through a different device" << std::endl;
-        std::wcout << L"[AudioCapturer] Attempting fallback to default render device with loopback capture..." << std::endl;
+        std::wcout << L"[AudioCapturer] Using default render device with loopback capture..." << std::endl;
 
-        // Fallback: Try to use the default render device with loopback
+        // Use the default render device with loopback
         hr = m_pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &m_pDevice);
         if (FAILED(hr))
         {
@@ -3640,6 +3569,18 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
                       << L", force_48kHz=" << (s_audioConfig.wasapi.force48kHzStereo ? L"enabled" : L"disabled")
                       << L", linear_resample=" << (s_audioConfig.wasapi.preferLinearResampling ? L"preferred" : L"DMO-first")
                       << std::endl;
+        }
+
+        // Per-process loopback config (optional)
+        if (config.contains("processLoopback")) {
+            auto plCfg = config["processLoopback"];
+            s_audioConfig.processLoopback.enabled = plCfg.value("enabled", true);
+            s_audioConfig.processLoopback.includeProcessTree = plCfg.value("includeProcessTree", true);
+            std::wcout << L"[AudioCapturer] Process loopback: enabled="
+                       << (s_audioConfig.processLoopback.enabled ? L"true" : L"false")
+                       << L", includeTree="
+                       << (s_audioConfig.processLoopback.includeProcessTree ? L"true" : L"false")
+                       << std::endl;
         }
 
         // Read latency optimization configuration
