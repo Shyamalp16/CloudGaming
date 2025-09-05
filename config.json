@@ -83,6 +83,10 @@
         "fecDisableThreshold": 0.005
       }
     },
+    "debug": {
+      "enableWAVRecording": true,
+      "wavFilename": "output.wav"
+    },
     "input": {
       "blockWinKeys": true,
       "blockSystemKeys": false,

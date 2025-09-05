@@ -112,6 +112,40 @@ int main()
     } catch (...) {}
     AudioCapturer audioCapturer;
     audioCapturer.StartCapture(pid);
+
+    // Start WAV recording for debugging if enabled in config
+    try {
+        // Simple check for WAV recording
+        bool enableWAV = false;
+        std::string wavFilename = "output.wav";
+
+        // Try to get the WAV recording setting
+        if (config.contains("host") && config["host"].contains("debug")) {
+            auto& debugSection = config["host"]["debug"];
+            if (debugSection.contains("enableWAVRecording") && debugSection["enableWAVRecording"].is_boolean()) {
+                enableWAV = debugSection["enableWAVRecording"];
+            }
+            if (debugSection.contains("wavFilename") && debugSection["wavFilename"].is_string()) {
+                wavFilename = debugSection["wavFilename"];
+            }
+        }
+
+        if (enableWAV) {
+            std::wcout << L"[main] Starting WAV recording to: " << wavFilename.c_str() << std::endl;
+            if (!audioCapturer.StartWAVRecording(wavFilename)) {
+                std::wcerr << L"[main] Failed to start WAV recording to: " << wavFilename.c_str() << std::endl;
+            } else {
+                std::wcout << L"[main] WAV recording started successfully" << std::endl;
+            }
+        } else {
+            std::wcout << L"[main] WAV recording disabled in config" << std::endl;
+        }
+    }
+    catch (const std::exception& e) {
+        std::wcerr << L"[main] Exception in WAV recording setup: " << e.what() << std::endl;
+        std::wcout << L"[main] WAV recording disabled due to error" << std::endl;
+    }
+
     std::wcout << L"[main] Capture started! Press any key to stop.\n";
 
     // Main loop with better monitoring

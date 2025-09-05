@@ -115,8 +115,23 @@ public:
             mmcssHandle = AvSetMmThreadCharacteristicsA(taskClass.c_str(), &taskIndex);
             if (mmcssHandle == nullptr) {
                 DWORD error = GetLastError();
+                std::string errorMsg;
+                switch (error) {
+                    case 1552:
+                        errorMsg = "MMCSS service not available or paging file too small";
+                        break;
+                    case 5:
+                        errorMsg = "Access denied - MMCSS requires admin privileges";
+                        break;
+                    case 2:
+                        errorMsg = "MMCSS service not running";
+                        break;
+                    default:
+                        errorMsg = "Unknown MMCSS error";
+                        break;
+                }
                 std::cerr << "[ThreadPriorityManager] Failed to set MMCSS priority '" << taskClass
-                          << "' (Error: " << error << ")" << std::endl;
+                          << "' (Error: " << error << " - " << errorMsg << ")" << std::endl;
                 success = false;
             } else {
                 // Set MMCSS priority level

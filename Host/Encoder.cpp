@@ -1,6 +1,7 @@
 #include "Encoder.h"
 #include "GlobalTime.h"
 #include "pion_webrtc.h"
+#include <Windows.h>
 #include <functional>
 #include <mutex>
 #include <condition_variable>
@@ -909,10 +910,10 @@ namespace Encoder {
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps) {
         // Set up MMCSS for encoder thread to ensure priority scheduling
         static bool encoderThreadConfigured = false;
+        static ThreadPriorityManager::MMCSSHandle encoderMMCSS; // Make static to persist
         if (!encoderThreadConfigured) {
             encoderThreadConfigured = true;
             // Configure encoder thread with MMCSS "Games" class for consistent timing
-            ThreadPriorityManager::MMCSSHandle encoderMMCSS;
             ThreadPriorityManager::ThreadPriorityConfig encoderConfig;
             encoderConfig.mmcssClass = ThreadPriorityManager::MMCSSClass::Games;
             encoderConfig.taskName = "VideoEncoder";
@@ -922,6 +923,15 @@ namespace Encoder {
 
             if (encoderMMCSS.elevate(encoderConfig)) {
                 std::cout << "[Encoder] MMCSS priority configured for encoder thread (Games class)" << std::endl;
+            } else {
+                std::cout << "[Encoder] MMCSS failed, falling back to thread priority only" << std::endl;
+                // Fall back to just setting thread priority without MMCSS
+                HANDLE threadHandle = GetCurrentThread();
+                if (threadHandle != nullptr && SetThreadPriority(threadHandle, encoderConfig.threadPriority)) {
+                    std::cout << "[Encoder] Thread priority set to HIGH (fallback)" << std::endl;
+                } else {
+                    std::cout << "[Encoder] Warning: Failed to set thread priority fallback" << std::endl;
+                }
             }
         }
 

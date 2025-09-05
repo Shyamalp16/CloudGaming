@@ -20,6 +20,8 @@
 #include <condition_variable>  // For std::condition_variable
 #include <wrl/client.h>
 #include <nlohmann/json.hpp>  // For JSON configuration
+#include <fstream>  // For WAV file writing
+#include <cmath>    // For std::isfinite
 #include "OpusEncoder.h"
 
 // Forward declarations and helper structs
@@ -34,6 +36,31 @@ struct OpusParameterUpdate {
     int expectedLossPerc = -1; // New expected loss percentage (-1 = no change)
     int complexity = -1;       // New complexity (-1 = no change)
     int fecEnabled = -1;       // FEC enable/disable (-1 = no change, 0 = disable, 1 = enable)
+};
+
+// WAV file header structure for debugging output
+struct WAVHeader {
+    char riff[4] = {'R', 'I', 'F', 'F'};
+    uint32_t fileSize = 0;
+    char wave[4] = {'W', 'A', 'V', 'E'};
+    char fmt[4] = {'f', 'm', 't', ' '};
+    uint32_t fmtSize = 16;
+    uint16_t audioFormat = 1;      // PCM
+    uint16_t numChannels = 2;
+    uint32_t sampleRate = 48000;
+    uint32_t byteRate = 0;         // Calculated
+    uint16_t blockAlign = 0;       // Calculated
+    uint16_t bitsPerSample = 16;
+    char data[4] = {'d', 'a', 't', 'a'};
+    uint32_t dataSize = 0;
+
+    void updateSizes(uint32_t totalSamples /* total interleaved samples */) {
+        // totalSamples is total sample count across all channels (interleaved)
+        dataSize = totalSamples * (bitsPerSample / 8);
+        fileSize = 36 + dataSize;
+        byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+        blockAlign = numChannels * (bitsPerSample / 8);
+    }
 };
 
 class AudioCapturer
@@ -53,6 +80,11 @@ public:
 
     // Dynamic Opus parameter updates
     static void UpdateOpusParameters(int bitrate, int expectedLossPerc, int complexity, int fecEnabled = -1);
+
+    // WAV file output for debugging
+    bool StartWAVRecording(const std::string& filename = "output.wav");
+    void StopWAVRecording();
+    bool IsWAVRecording() const { return m_wavFile.is_open(); }
 
     // Shared reference clock for AV synchronization
     static void InitializeSharedReferenceClock();
@@ -396,8 +428,34 @@ private:
     size_t m_currentFrameSamples = 0; // Samples accumulated in current frame
     int64_t m_currentFrameTimestamp = 0; // Timestamp for current frame
 
+    // WAV file output methods for debugging
+    bool InitializeWAVFile(const std::string& filename);
+    bool WriteWAVHeader();
+    bool WriteWAVData(const float* samples, size_t sampleCount);
+    bool FinalizeWAVFile();
+    void WriteInt16ToFile(std::ofstream& file, int16_t value);
+    void WriteInt32ToFile(std::ofstream& file, int32_t value);
+    static void FinalizeWAVOnExit();
+
     // Simple resampler state for linear interpolation between callbacks
     std::vector<float> m_resampleRemainder; // per-channel remainder sample
     double m_resamplePhase = 0.0;
     uint32_t m_lastInputRate = 0;
+
+    // Active audio format used for capture/processing (for WAV header)
+    uint32_t m_activeSampleRate = 48000;
+    uint16_t m_activeChannels = 2;
+    uint16_t m_activeBitsPerSample = 16;
+    uint16_t m_activeWavAudioFormat = 1; // 1=PCM, 3=IEEE_FLOAT
+    bool m_wavWriteRawMode = false; // write float->PCM16 samples to WAV
+
+    // WAV recording state
+    std::ofstream m_wavFile;
+    std::string m_wavFilename;
+    WAVHeader m_wavHeader;
+    uint32_t m_wavTotalSamples = 0; // total interleaved samples written
+    std::mutex m_wavMutex;
+    bool m_wavRecordingEnabled = false;
+    int m_wavConsecutiveErrors = 0;
+    uint64_t m_wavSamplesSinceHeader = 0;
 };

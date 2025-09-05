@@ -51,12 +51,13 @@ static void EnsureAudioBuffersCapacity() {
     }
 }
 
-//-----------------------------------------------------------
-//- AudioCapturer.cpp
-//-----------------------------------------------------------
-
 AudioCapturer::AudioCapturer() :
-    m_stopCapture(false),
+    m_stopCapture(true),
+    m_stopQueueProcessor(true),
+    m_stopEncoder(true),
+    m_wavRecordingEnabled(false),
+    m_wavTotalSamples(0),
+    m_wavSamplesSinceHeader(0),
     m_pEnumerator(nullptr),
     m_pDevice(nullptr),
     m_pAudioClient(nullptr),
@@ -66,8 +67,6 @@ AudioCapturer::AudioCapturer() :
     m_frameSizeSamples(480), // 10ms at 48kHz (will be updated based on config)
     m_samplesPerFrame(960), // 10ms at 48kHz stereo (will be updated based on config)
     m_accumulatedCount(0),   // Initialize accumulation counter
-    m_stopQueueProcessor(false),
-    m_stopEncoder(false),
     m_hCaptureEvent(nullptr),
     m_hStopEvent(nullptr),
     m_hMmcssTask(nullptr),
@@ -99,21 +98,35 @@ AudioCapturer::AudioCapturer() :
                   << m_retryConfig.maxRetries << L" max retries, "
                   << m_retryConfig.baseDelayMs << L"ms base delay, "
                   << m_retryConfig.backoffMultiplier << L"x backoff multiplier");
+
+    // Register process shutdown hook to finalize WAV if needed
+    static bool s_registeredAtExit = false;
+    if (!s_registeredAtExit) {
+        s_registeredAtExit = true;
+        std::atexit(&AudioCapturer::FinalizeWAVOnExit);
+    }
 }
 
 AudioCapturer::~AudioCapturer()
 {
     StopCapture();
+    // Defensive finalization in case StopCapture didn't run or process is terminating
+    {
+        std::lock_guard<std::mutex> lock(m_wavMutex);
+        if (m_wavRecordingEnabled || m_wavFile.is_open()) {
+            FinalizeWAVFile();
+        }
+    }
 }
 
 bool AudioCapturer::StartCapture(DWORD processId)
 {
     // Set up MMCSS for audio capture thread to ensure consistent timing
     static bool audioCaptureThreadConfigured = false;
+    static ThreadPriorityManager::MMCSSHandle audioMMCSS; // Make static to persist
     if (!audioCaptureThreadConfigured) {
         audioCaptureThreadConfigured = true;
         // Configure audio capture thread with MMCSS "Audio" class for real-time audio
-        ThreadPriorityManager::MMCSSHandle audioMMCSS;
         ThreadPriorityManager::ThreadPriorityConfig audioConfig;
         audioConfig.mmcssClass = ThreadPriorityManager::MMCSSClass::Audio;
         audioConfig.taskName = "AudioCapture";
@@ -123,6 +136,15 @@ bool AudioCapturer::StartCapture(DWORD processId)
 
         if (audioMMCSS.elevate(audioConfig)) {
             std::cout << "[Audio] MMCSS priority configured for audio capture thread (Audio class)" << std::endl;
+        } else {
+            std::cout << "[Audio] MMCSS failed, falling back to thread priority only" << std::endl;
+            // Fall back to just setting thread priority without MMCSS
+            HANDLE threadHandle = GetCurrentThread();
+            if (threadHandle != nullptr && SetThreadPriority(threadHandle, audioConfig.threadPriority)) {
+                std::cout << "[Audio] Thread priority set to HIGH (fallback)" << std::endl;
+            } else {
+                std::cout << "[Audio] Warning: Failed to set thread priority fallback" << std::endl;
+            }
         }
     }
 
@@ -264,6 +286,304 @@ void AudioCapturer::StopCapture()
     m_initialAudioClockTime = 0;
     m_nextFrameTime = 0;
     m_rtpTimestamp = 0;
+
+    // Stop WAV recording if active
+    StopWAVRecording();
+}
+
+// ============================================================================
+// WAV FILE OUTPUT IMPLEMENTATION - For debugging purposes
+// ============================================================================
+
+// Maximum consecutive errors before disabling WAV recording
+static const int MAX_WAV_CONSECUTIVE_ERRORS = 5;
+
+bool AudioCapturer::StartWAVRecording(const std::string& filename)
+{
+    std::lock_guard<std::mutex> lock(m_wavMutex);
+
+    if (m_wavRecordingEnabled) {
+        std::wcerr << L"[AudioCapturer] WAV recording already active" << std::endl;
+        return false;
+    }
+
+    std::wcout << L"[AudioCapturer] Initializing WAV recording to: " << filename.c_str() << std::endl;
+
+    if (!InitializeWAVFile(filename)) {
+        std::wcerr << L"[AudioCapturer] Failed to initialize WAV file: " << filename.c_str() << std::endl;
+        return false;
+    }
+
+    m_wavRecordingEnabled = true;
+    std::wcout << L"[AudioCapturer] WAV recording started successfully to: " << filename.c_str() << std::endl;
+    return true;
+}
+
+void AudioCapturer::StopWAVRecording()
+{
+    std::lock_guard<std::mutex> lock(m_wavMutex);
+
+    if (!m_wavRecordingEnabled) {
+        return;
+    }
+
+    m_wavRecordingEnabled = false;
+
+    if (FinalizeWAVFile()) {
+        std::wcout << L"[AudioCapturer] WAV recording stopped. File: " << m_wavFilename.c_str()
+                   << L" (" << m_wavTotalSamples << L" samples)" << std::endl;
+    } else {
+        std::wcerr << L"[AudioCapturer] Failed to finalize WAV file: " << m_wavFilename.c_str() << std::endl;
+    }
+}
+
+bool AudioCapturer::InitializeWAVFile(const std::string& filename)
+{
+    try {
+        // Close any existing file first
+        if (m_wavFile.is_open()) {
+            m_wavFile.close();
+        }
+
+        m_wavFilename = filename;
+        m_wavTotalSamples = 0;
+        m_wavSamplesSinceHeader = 0;
+
+        m_wavFile.open(filename, std::ios::binary | std::ios::out | std::ios::trunc);
+
+        if (!m_wavFile.is_open()) {
+            std::wcerr << L"[AudioCapturer] Failed to open WAV file: " << filename.c_str() << std::endl;
+            return false;
+        }
+
+        // Initialize WAV header format. Force PCM16 to match WriteWAVData conversion path
+        m_wavHeader.numChannels = (m_activeChannels > 0) ? m_activeChannels : s_audioConfig.channels;
+        m_wavHeader.sampleRate = (m_activeSampleRate > 0) ? m_activeSampleRate : 48000;
+        m_wavHeader.bitsPerSample = 16;
+        m_wavHeader.audioFormat = 1; // PCM
+
+        std::wcout << L"[WAV] Creating WAV file: " << filename.c_str() << std::endl;
+        std::wcout << L"[WAV] Config - Channels: " << m_wavHeader.numChannels << L", SampleRate: " << m_wavHeader.sampleRate << L", BitsPerSample: " << m_wavHeader.bitsPerSample << std::endl;
+        std::wcout << L"[WAV] Header - Channels: " << m_wavHeader.numChannels << L", SampleRate: " << m_wavHeader.sampleRate << L", BitsPerSample: " << m_wavHeader.bitsPerSample << std::endl;
+
+        m_wavHeader.updateSizes(0); // Initialize with 0 total interleaved samples
+        std::wcout << L"[WAV] Initial header - fileSize: " << m_wavHeader.fileSize << L", dataSize: " << m_wavHeader.dataSize << L", byteRate: " << m_wavHeader.byteRate << std::endl;
+
+        // Write initial header (will be overwritten with final sizes)
+        if (!WriteWAVHeader()) {
+            std::wcerr << L"[WAV] Failed to write initial WAV header to: " << filename.c_str() << std::endl;
+            m_wavFile.close();
+            return false;
+        }
+
+        std::wcout << L"[WAV] Successfully wrote initial header, file is ready for data" << std::endl;
+        return true;
+    }
+    catch (const std::exception& e) {
+        std::wcerr << L"[AudioCapturer] Exception initializing WAV file: " << e.what() << std::endl;
+        if (m_wavFile.is_open()) {
+            m_wavFile.close();
+        }
+        return false;
+    }
+}
+
+bool AudioCapturer::WriteWAVHeader()
+{
+    if (!m_wavFile.is_open()) {
+        return false;
+    }
+
+    try {
+        std::wcout << L"[WAV] Writing header - RIFF, WAVE, fmt, data" << std::endl;
+
+        // Write RIFF header
+        m_wavFile.write(m_wavHeader.riff, 4);
+        if (m_wavFile.fail()) {
+            std::wcerr << L"[WAV] Failed to write RIFF header" << std::endl;
+            return false;
+        }
+
+        // Write file size (little-endian)
+        WriteInt32ToFile(m_wavFile, m_wavHeader.fileSize);
+
+        // Write WAVE header
+        m_wavFile.write(m_wavHeader.wave, 4);
+        m_wavFile.write(m_wavHeader.fmt, 4);
+
+        // Write format chunk
+        WriteInt32ToFile(m_wavFile, m_wavHeader.fmtSize);
+        WriteInt16ToFile(m_wavFile, m_wavHeader.audioFormat);
+        WriteInt16ToFile(m_wavFile, m_wavHeader.numChannels);
+        WriteInt32ToFile(m_wavFile, m_wavHeader.sampleRate);
+        WriteInt32ToFile(m_wavFile, m_wavHeader.byteRate);
+        WriteInt16ToFile(m_wavFile, m_wavHeader.blockAlign);
+        WriteInt16ToFile(m_wavFile, m_wavHeader.bitsPerSample);
+
+        // Write data chunk header
+        m_wavFile.write(m_wavHeader.data, 4);
+        WriteInt32ToFile(m_wavFile, m_wavHeader.dataSize);
+
+        std::wcout << L"[WAV] Header written successfully" << std::endl;
+        return m_wavFile.good();
+    }
+    catch (const std::exception& e) {
+        std::wcerr << L"[WAV] Exception writing header: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+bool AudioCapturer::WriteWAVData(const float* samples, size_t sampleCount)
+{
+    if (!m_wavFile.is_open() || !m_wavRecordingEnabled) {
+        return false;
+    }
+
+    try {
+        if (m_wavWriteRawMode) {
+            // In raw mode, we expect to be called with the latest captured PCM block.
+            // However this function currently receives float*. For raw writes we will skip if samples is null
+            // and rely on the raw path in CaptureThread to write device bytes directly.
+            return true;
+        }
+
+        if (!samples || sampleCount == 0) {
+            return false;
+        }
+
+        // Convert float samples (interleaved) to 16-bit PCM and write
+        bool hasNonZeroSamples = false;
+        float maxAmplitude = 0.0f;
+        float minAmplitude = 0.0f;
+
+        for (size_t i = 0; i < sampleCount; ++i) {
+            float sampleValue = samples[i];
+            if (std::abs(sampleValue) > maxAmplitude) maxAmplitude = std::abs(sampleValue);
+            if (sampleValue < minAmplitude) minAmplitude = sampleValue;
+            if (!std::isfinite(sampleValue)) sampleValue = 0.0f;
+            if (sampleValue != 0.0f) hasNonZeroSamples = true;
+            if (sampleValue > 1.0f) sampleValue = 1.0f;
+            if (sampleValue < -1.0f) sampleValue = -1.0f;
+            int16_t pcmSample = static_cast<int16_t>(sampleValue * 32767.0f);
+            WriteInt16ToFile(m_wavFile, pcmSample);
+        }
+
+        m_wavFile.flush();
+        m_wavTotalSamples += static_cast<uint32_t>(sampleCount);
+        m_wavSamplesSinceHeader += sampleCount;
+
+        // Periodic header rewrite
+        const uint32_t headerRewriteIntervalSamples = m_wavHeader.sampleRate * m_wavHeader.numChannels; // ~1s
+        if (m_wavSamplesSinceHeader >= headerRewriteIntervalSamples) {
+            m_wavSamplesSinceHeader = 0;
+            std::streampos cur = m_wavFile.tellp();
+            if (cur != std::streampos(-1)) {
+                m_wavHeader.updateSizes(m_wavTotalSamples);
+                m_wavFile.seekp(0, std::ios::beg);
+                if (!m_wavFile.fail()) {
+                    if (WriteWAVHeader()) m_wavFile.flush();
+                } else {
+                    m_wavFile.clear();
+                }
+                m_wavFile.seekp(cur);
+            }
+        }
+
+        return m_wavFile.good();
+    }
+    catch (const std::exception& e) {
+        m_wavConsecutiveErrors++;
+        try { std::wcerr << L"[AudioCapturer] WAV write error (" << m_wavConsecutiveErrors << L"): " << e.what() << std::endl; } catch (...) {}
+        if (m_wavConsecutiveErrors >= MAX_WAV_CONSECUTIVE_ERRORS) {
+            std::wcerr << L"[AudioCapturer] Too many consecutive WAV write errors, disabling recording" << std::endl;
+            m_wavRecordingEnabled = false;
+            try { if (m_wavFile.is_open()) { m_wavFile.close(); } } catch (...) {}
+        }
+        return false;
+    }
+}
+
+bool AudioCapturer::FinalizeWAVFile()
+{
+    if (!m_wavFile.is_open()) {
+        std::wcout << L"[WAV] File already closed, nothing to finalize" << std::endl;
+        return true; // Already closed, consider it successful
+    }
+
+    try {
+        std::wcout << L"[WAV] Finalizing WAV file with " << m_wavTotalSamples << L" total samples" << std::endl;
+
+        // Update header with final sample count
+        m_wavHeader.updateSizes(m_wavTotalSamples);
+        std::wcout << L"[WAV] Updated header - fileSize: " << m_wavHeader.fileSize << L", dataSize: " << m_wavHeader.dataSize << std::endl;
+
+        // Flush any pending writes
+        m_wavFile.flush();
+        if (m_wavFile.fail()) {
+            std::wcerr << L"[WAV] Flush failed before seeking" << std::endl;
+        }
+
+        // Seek back to beginning and rewrite header
+        m_wavFile.seekp(0, std::ios::beg);
+        if (m_wavFile.fail()) {
+            std::wcerr << L"[WAV] Failed to seek to beginning of WAV file (failbit set)" << std::endl;
+            m_wavFile.clear(); // Clear error flags
+            m_wavFile.seekp(0, std::ios::beg);
+            if (m_wavFile.fail()) {
+                std::wcerr << L"[WAV] Still failed to seek even after clearing flags" << std::endl;
+                m_wavFile.close();
+                return false;
+            }
+        }
+
+        std::wcout << L"[WAV] Successfully seeked to file beginning" << std::endl;
+
+        bool headerWritten = WriteWAVHeader();
+        if (!headerWritten) {
+            std::wcerr << L"[WAV] Failed to write final WAV header" << std::endl;
+        } else {
+            std::wcout << L"[WAV] Successfully wrote final WAV header" << std::endl;
+        }
+
+        // Flush the header write
+        m_wavFile.flush();
+        if (m_wavFile.fail()) {
+            std::wcerr << L"[WAV] Flush failed after writing header" << std::endl;
+        }
+
+        // Close file
+        m_wavFile.close();
+        std::wcout << L"[WAV] File closed successfully" << std::endl;
+
+        // Reset state
+        m_wavTotalSamples = 0;
+        m_wavFilename.clear();
+
+        return headerWritten;
+    }
+    catch (const std::exception& e) {
+        std::wcerr << L"[WAV] Exception finalizing WAV file: " << e.what() << std::endl;
+        try {
+            m_wavFile.close();
+        } catch (...) {
+            // Ignore close errors
+        }
+        return false;
+    }
+}
+
+void AudioCapturer::WriteInt16ToFile(std::ofstream& file, int16_t value)
+{
+    file.put(static_cast<char>(value & 0xFF));
+    file.put(static_cast<char>((value >> 8) & 0xFF));
+}
+
+void AudioCapturer::WriteInt32ToFile(std::ofstream& file, int32_t value)
+{
+    file.put(static_cast<char>(value & 0xFF));
+    file.put(static_cast<char>((value >> 8) & 0xFF));
+    file.put(static_cast<char>((value >> 16) & 0xFF));
+    file.put(static_cast<char>((value >> 24) & 0xFF));
 }
 
 // ============================================================================
@@ -1024,6 +1344,24 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     << L", wBitsPerSample=" << pwfx->wBitsPerSample
                     << L", cbSize=" << pwfx->cbSize << std::endl;
                 
+                // Track active format for WAV header
+                m_activeChannels = static_cast<uint16_t>(pwfx->nChannels);
+                m_activeSampleRate = static_cast<uint32_t>(pwfx->nSamplesPerSec);
+                m_activeBitsPerSample = pwfx->wBitsPerSample;
+                // Determine WAV audio format tag: 1 = PCM, 3 = IEEE float
+                if (pwfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+                    WAVEFORMATEXTENSIBLE* pEx = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(pwfx);
+                    if (pEx->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) {
+                        m_activeWavAudioFormat = 3;
+                    } else {
+                        m_activeWavAudioFormat = 1;
+                    }
+                } else if (pwfx->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+                    m_activeWavAudioFormat = 3;
+                } else {
+                    m_activeWavAudioFormat = 1;
+                }
+
                 // Note: We'll resample to 48kHz if needed
 
                 // Try exclusive mode first if preferred, then shared mode with event-driven capture
@@ -1069,6 +1407,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 // If exclusive mode failed and we prefer it, try shared mode as fallback
                 if (FAILED(hr) && shareMode == AUDCLNT_SHAREMODE_EXCLUSIVE) {
                     std::wcerr << L"[AudioCapturer] Exclusive mode failed, falling back to shared mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
+                    // In shared mode, use the device mix format (pwfx) rather than forcing PCM16
+                    targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
                     hr = m_pAudioClient->Initialize(
                         AUDCLNT_SHAREMODE_SHARED,
                         streamFlags,
@@ -1100,6 +1440,23 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     }
                 }
 
+                // Use the actual format that was requested for capture path
+                if (targetFormat) {
+                    pwfx = targetFormat;
+                    // Update active format fields to match actual capture format
+                    m_activeChannels = static_cast<uint16_t>(pwfx->nChannels);
+                    m_activeSampleRate = static_cast<uint32_t>(pwfx->nSamplesPerSec);
+                    m_activeBitsPerSample = pwfx->wBitsPerSample;
+                    if (pwfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+                        WAVEFORMATEXTENSIBLE* pEx = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(pwfx);
+                        m_activeWavAudioFormat = (pEx->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) ? 3 : 1;
+                    } else if (pwfx->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+                        m_activeWavAudioFormat = 3;
+                    } else {
+                        m_activeWavAudioFormat = 1;
+                    }
+                }
+
                 hr = m_pAudioClient->GetBufferSize(&bufferFrameCount);
                 if (FAILED(hr))
                 {
@@ -1108,6 +1465,12 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 }
 
                 std::wcout << L"[AudioCapturer] Buffer Frame Count: " << bufferFrameCount << std::endl;
+
+                // Ensure working buffers can hold the device buffer size (avoid dropping frames)
+                size_t requiredSamples = static_cast<size_t>(bufferFrameCount) * static_cast<size_t>(pwfx->nChannels);
+                if (m_floatBuffer.size() < requiredSamples) {
+                    m_floatBuffer.resize(requiredSamples);
+                }
 
                 hr = m_pAudioClient->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(m_pCaptureClient.ReleaseAndGetAddressOf()));
                 if (FAILED(hr))
@@ -1240,6 +1603,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         // If exclusive mode failed and we prefer it, try shared mode as fallback
         if (FAILED(hr) && shareMode == AUDCLNT_SHAREMODE_EXCLUSIVE) {
             std::wcerr << L"[AudioCapturer] Default device exclusive mode failed, falling back to shared mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
+            // In shared mode, use the device mix format (pwfx) rather than forcing PCM16
+            targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
             hr = m_pAudioClient->Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 streamFlags,
@@ -1271,6 +1636,23 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             }
         }
 
+        // Use the actual format that was requested for capture path
+        if (targetFormat) {
+            pwfx = targetFormat;
+            // Update active format fields to match actual capture format
+            m_activeChannels = static_cast<uint16_t>(pwfx->nChannels);
+            m_activeSampleRate = static_cast<uint32_t>(pwfx->nSamplesPerSec);
+            m_activeBitsPerSample = pwfx->wBitsPerSample;
+            if (pwfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+                WAVEFORMATEXTENSIBLE* pEx = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(pwfx);
+                m_activeWavAudioFormat = (pEx->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) ? 3 : 1;
+            } else if (pwfx->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+                m_activeWavAudioFormat = 3;
+            } else {
+                m_activeWavAudioFormat = 1;
+            }
+        }
+
         hr = m_pAudioClient->GetBufferSize(&bufferFrameCount);
         if (FAILED(hr))
         {
@@ -1279,6 +1661,12 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         }
 
         std::wcout << L"[AudioCapturer] Default device buffer frame count: " << bufferFrameCount << std::endl;
+
+        // Ensure working buffers can hold the device buffer size (avoid dropping frames)
+        size_t requiredSamplesDefault = static_cast<size_t>(bufferFrameCount) * static_cast<size_t>(pwfx->nChannels);
+        if (m_floatBuffer.size() < requiredSamplesDefault) {
+            m_floatBuffer.resize(requiredSamplesDefault);
+        }
 
         hr = m_pAudioClient->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(m_pCaptureClient.ReleaseAndGetAddressOf()));
         if (FAILED(hr))
@@ -1935,7 +2323,14 @@ bool AudioCapturer::ConvertPCMToFloatInPlace(const BYTE* pcmData, UINT32 numFram
 void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs)
 {
     if (!samples || sampleCount == 0) return;
-    
+
+    // Write to WAV file for debugging if recording is enabled
+    if (m_wavRecordingEnabled) {
+        std::lock_guard<std::mutex> lock(m_wavMutex);
+        // Use float->PCM writer here (raw device bytes are written in CaptureThread where device buffer is available)
+        WriteWAVData(samples, sampleCount);
+    }
+
     // Zero-copy audio processing pipeline - direct frame processing without accumulation
 
     // If this is the first sample of a new frame, store the timestamp
@@ -1965,7 +2360,7 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
         if (PushFrameToRingBuffer(m_currentFrameBuffer, m_currentFrameTimestamp)) {
             // Frame successfully queued to ring buffer
             // Encoder thread polls continuously, so no explicit wake-up needed
-            } else {
+        } else {
             std::wcerr << L"[AudioCapturer] Failed to push frame to ring buffer - encoder congestion" << std::endl;
         }
 
@@ -1988,66 +2383,54 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
 bool AudioCapturer::ResampleTo48kInPlaceConstrained(std::vector<float>& buffer, size_t inFrames, uint32_t inRate, uint32_t channels, size_t maxBufferSize)
 {
     // ============================================================================
-    // CONSTRAINED ZERO-ALLOCATION IN-PLACE RESAMPLING
+    // CONSTRAINED RESAMPLING (LINEAR INTERPOLATION, BUFFER-BOUNDED)
     // ============================================================================
-    // This function resamples directly in the provided buffer without exceeding
-    // the maximum buffer size, prioritizing latency over quality when needed.
+    // Performs linear interpolation into a temporary buffer sized to the
+    // expected output. Ensures we never exceed maxBufferSize.
 
     if (inRate == 48000) {
-        // No resampling needed - buffer is already at target rate
-        return true;
+        return true; // No resampling needed
     }
 
-    double ratio = 48000.0 / static_cast<double>(inRate);
-    size_t outFrames = static_cast<size_t>(std::ceil((inFrames) * ratio));
-    size_t inputSamples = inFrames * channels;
-    size_t outputSamples = outFrames * channels;
+    const double ratio = 48000.0 / static_cast<double>(inRate);
+    const size_t outFrames = static_cast<size_t>(std::ceil(static_cast<double>(inFrames) * ratio));
+    const size_t outputSamples = outFrames * static_cast<size_t>(channels);
 
-    // Check if output will fit in the buffer
     if (outputSamples > maxBufferSize) {
         std::wcerr << L"[AudioResample] Output size (" << outputSamples << ") exceeds buffer limit (" << maxBufferSize << ")" << std::endl;
         return false;
     }
 
-    // For continuity across calls when rates remain the same
-    if (m_lastInputRate != inRate) {
-        m_resamplePhase = 0.0;
-        m_resampleRemainder.assign(channels, 0.0f);
-        m_lastInputRate = inRate;
-    }
+    // Prepare temp buffer
+    EnsureAudioBuffersCapacity();
+    g_audioTempBuffer.resize(outputSamples);
+    std::vector<float>& temp = g_audioTempBuffer;
 
-    // Perform in-place resampling using a memory-efficient approach
-    // We work backwards from the end to avoid overwriting input data
-    size_t writePos = outputSamples - 1;
-
-    for (size_t o = outFrames; o > 0; --o) {
-        double srcPos = ((o - 1) / ratio);
+    // Linear interpolation
+    for (size_t o = 0; o < outFrames; ++o) {
+        const double srcPos = static_cast<double>(o) / ratio;
         size_t srcFrame = static_cast<size_t>(srcPos);
-        double frac = srcPos - srcFrame;
+        double frac = srcPos - static_cast<double>(srcFrame);
+        if (srcFrame >= inFrames) {
+            srcFrame = inFrames - 1;
+            frac = 0.0;
+        }
 
         for (uint32_t ch = 0; ch < channels; ++ch) {
-            if (writePos >= outputSamples) break; // Safety check
+            const size_t dstIdx = o * channels + ch;
+            const size_t srcIdx1 = srcFrame * channels + ch;
+            const size_t srcIdx2 = (srcFrame + 1 < inFrames ? (srcFrame + 1) : srcFrame) * channels + ch;
 
-            float sample = 0.0f;
-            if (srcFrame < inFrames) {
-                size_t srcIdx = srcFrame * channels + ch;
-                if (srcIdx < buffer.size()) {
-                    // Simple nearest neighbor for now - can be optimized to linear interpolation
-                    sample = buffer[srcIdx];
-                }
-            }
-
-            buffer[writePos--] = sample;
+            const float s1 = (srcIdx1 < buffer.size()) ? buffer[srcIdx1] : 0.0f;
+            const float s2 = (srcIdx2 < buffer.size()) ? buffer[srcIdx2] : s1;
+            temp[dstIdx] = s1 + static_cast<float>(frac) * (s2 - s1);
         }
     }
 
-    // Resize buffer to actual output size (should not exceed maxBufferSize)
-    if (outputSamples <= maxBufferSize) {
-        buffer.resize(outputSamples);
-    } else {
-        std::wcerr << L"[AudioResample] Unexpected buffer size after constrained resampling" << std::endl;
-        return false;
-    }
+    // Copy back into original buffer and resize
+    if (buffer.size() < outputSamples) buffer.resize(outputSamples);
+    std::copy(temp.begin(), temp.begin() + outputSamples, buffer.begin());
+    buffer.resize(outputSamples);
 
     return true;
 }
@@ -3598,5 +3981,12 @@ void AudioCapturer::TestResamplerQuality(uint32_t testSampleRate, uint32_t testC
     CleanupDMOResampler();
 
     std::wcout << L"[AudioCapturer] Resampler quality test completed" << std::endl;
+}
+
+void AudioCapturer::FinalizeWAVOnExit()
+{
+    // Best effort: this static hook cannot access instance members reliably
+    // but if a file is left open (rare), it is safer to leave OS to close it.
+    // Instance-level destructor already finalizes per-instance files.
 }
 

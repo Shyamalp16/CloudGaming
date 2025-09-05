@@ -216,10 +216,10 @@ GraphicsCaptureSession createCaptureSession(
                 session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ val });
                 std::wcout << L"[WGC] MinUpdateInterval set to " << val << L" (100ns units)" << std::endl;
             } else {
-                // Fallback: set high-performance default (8.33ms for 120fps) for debugging
-                auto fallbackVal = 83333LL; // 8.333ms in 100ns units (120fps)
+                // Fallback: set uncapped/lowest latency (0.1ms) when not configured
+                auto fallbackVal = 1000LL; // 0.1ms in 100ns units (effectively uncapped)
                 session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ fallbackVal });
-                std::wcout << L"[WGC] MinUpdateInterval not configured, using high-performance fallback: " << fallbackVal << L" (100ns units, ~120fps)" << std::endl;
+                std::wcout << L"[WGC] MinUpdateInterval not configured, using uncapped fallback: " << fallbackVal << L" (100ns units, ~1000fps)" << std::endl;
             }
         } catch (...) {
             // Exception fallback: set very conservative default to prevent high latency
@@ -394,10 +394,10 @@ static inline size_t RingSize() {
 void StartCapture() {
     // Set up MMCSS for capture thread to ensure consistent frame timing
     static bool captureThreadConfigured = false;
+    static ThreadPriorityManager::MMCSSHandle captureMMCSS; // Make static to persist
     if (!captureThreadConfigured) {
         captureThreadConfigured = true;
         // Configure capture thread with MMCSS "Capture" class for real-time capture
-        ThreadPriorityManager::MMCSSHandle captureMMCSS;
         ThreadPriorityManager::ThreadPriorityConfig captureConfig;
         captureConfig.mmcssClass = ThreadPriorityManager::MMCSSClass::Capture;
         captureConfig.taskName = "VideoCapture";
@@ -407,6 +407,15 @@ void StartCapture() {
 
         if (captureMMCSS.elevate(captureConfig)) {
             std::cout << "[Capture] MMCSS priority configured for capture thread (Capture class)" << std::endl;
+        } else {
+            std::cout << "[Capture] MMCSS failed, falling back to thread priority only" << std::endl;
+            // Fall back to just setting thread priority without MMCSS
+            HANDLE threadHandle = GetCurrentThread();
+            if (threadHandle != nullptr && SetThreadPriority(threadHandle, captureConfig.threadPriority)) {
+                std::cout << "[Capture] Thread priority set to HIGH (fallback)" << std::endl;
+            } else {
+                std::cout << "[Capture] Warning: Failed to set thread priority fallback" << std::endl;
+            }
         }
     }
 

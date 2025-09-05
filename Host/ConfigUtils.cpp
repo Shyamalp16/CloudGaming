@@ -7,17 +7,43 @@
 #include "AdaptiveQualityControl.h"
 
 #include <fstream>
+#include <Windows.h>
 
 namespace ConfigUtils {
 
 bool LoadConfig(nlohmann::json& outConfig)
 {
     try {
-        std::ifstream configFile("config.json");
+        // Get current working directory for debugging
+        char cwd[1024];
+        if (GetCurrentDirectoryA(sizeof(cwd), cwd)) {
+            std::wcout << L"[config] Current working directory: " << cwd << std::endl;
+        }
+
+        std::string configPath = "config.json";
+        std::ifstream configFile(configPath);
+
+        // If config.json not found in current directory, try the executable directory
         if (!configFile.is_open()) {
-            std::wcerr << L"[config] Error opening config.json" << std::endl;
+            char exePath[MAX_PATH];
+            if (GetModuleFileNameA(NULL, exePath, MAX_PATH)) {
+                std::string exeDir = exePath;
+                size_t lastSlash = exeDir.find_last_of("\\/");
+                if (lastSlash != std::string::npos) {
+                    exeDir = exeDir.substr(0, lastSlash);
+                    configPath = exeDir + "\\config.json";
+                    configFile.open(configPath);
+                    std::wcout << L"[config] Trying config path: " << configPath.c_str() << std::endl;
+                }
+            }
+        }
+
+        if (!configFile.is_open()) {
+            std::wcerr << L"[config] Error opening config.json from any location" << std::endl;
+            std::wcerr << L"[config] Make sure config.json exists in the working directory or executable directory" << std::endl;
             return false;
         }
+
         configFile >> outConfig;
         return true;
     } catch (const std::exception& e) {
