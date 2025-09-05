@@ -2038,6 +2038,12 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                           << L" us (shared clock synchronized)" << std::endl;
             }
             
+            // Write to WAV (once per captured block) if enabled
+            if (m_wavRecordingEnabled) {
+                std::lock_guard<std::mutex> wavLock(m_wavMutex);
+                WriteWAVData(m_floatBuffer.data(), totalSamples);
+            }
+
             // Process audio frame for Opus encoding and WebRTC transmission
             // Use the persistent buffer directly (zero-copy optimization)
             AUDIO_LOG_DEBUG(L"[AudioCapturer] Processing audio frame: " << totalSamples << L" samples");
@@ -2323,13 +2329,6 @@ bool AudioCapturer::ConvertPCMToFloatInPlace(const BYTE* pcmData, UINT32 numFram
 void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs)
 {
     if (!samples || sampleCount == 0) return;
-
-    // Write to WAV file for debugging if recording is enabled
-    if (m_wavRecordingEnabled) {
-        std::lock_guard<std::mutex> lock(m_wavMutex);
-        // Use float->PCM writer here (raw device bytes are written in CaptureThread where device buffer is available)
-        WriteWAVData(samples, sampleCount);
-    }
 
     // Zero-copy audio processing pipeline - direct frame processing without accumulation
 
