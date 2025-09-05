@@ -70,7 +70,7 @@
         "strictLatencyMode": true,
         "warnOnBuffering": true,
         "targetOneWayLatencyMs": 20,
-        "ultraLowLatencyProfile": false,
+        "ultraLowLatencyProfile": true,
         "disableFecInLowLatency": true
       },
       "bitrateAdaptation": {

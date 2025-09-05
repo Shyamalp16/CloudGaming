@@ -14,6 +14,9 @@
 #include <audioclientactivationparams.h>
 #include <propvarutil.h>
 #include <activation.h>
+#pragma comment(lib, "Propsys.lib")
+#include <versionhelpers.h>  // For Windows version checking
+#include <tlhelp32.h>         // For process enumeration
 // Completion handler for ActivateAudioInterfaceAsync
 class ActivateAudioCompletionHandler : public IActivateAudioInterfaceCompletionHandler {
 public:
@@ -173,6 +176,32 @@ AudioCapturer::~AudioCapturer()
             FinalizeWAVFile();
         }
     }
+}
+
+// Helper function to find process ID by executable name
+DWORD FindProcessIdByName(const std::wstring& processName)
+{
+    DWORD processId = 0;
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot != INVALID_HANDLE_VALUE)
+    {
+        PROCESSENTRY32 pe32;
+        pe32.dwSize = sizeof(PROCESSENTRY32);
+
+        if (Process32First(hSnapshot, &pe32))
+        {
+            do
+            {
+                if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0)
+                {
+                    processId = pe32.th32ProcessID;
+                    break;
+                }
+            } while (Process32Next(hSnapshot, &pe32));
+        }
+        CloseHandle(hSnapshot);
+    }
+    return processId;
 }
 
 bool AudioCapturer::StartCapture(DWORD processId)
@@ -928,9 +957,10 @@ void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
             // The encoder thread will continue processing new frames
         }
     } else {
-                    AUDIO_LOG_ERROR(L"[AudioEncoder] Failed to encode audio frame");
+        AUDIO_LOG_ERROR(L"[AudioEncoder] Failed to encode audio frame");
     }
 }
+
 
 bool AudioCapturer::QueueRawFrame(std::vector<float>& samples, int64_t timestampUs)
 {
@@ -1216,6 +1246,11 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     DWORD sleepMs = 10; // polling interval (fallback when event mode is unavailable)
     bool eventMode = false; // declared early to avoid goto skipping initialization
 
+    // Debug state for process loopback attempt/fallback
+    bool processLoopbackAttempted = false;
+    bool processLoopbackSucceeded = false;
+    std::wstring processLoopbackFallbackReason;
+
     // Opus frame timing constant (declared early to avoid goto skip issues)
     const DWORD OPUS_FRAME_MS = 10; // 10ms Opus frame duration
 
@@ -1259,6 +1294,360 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     IAudioSessionEnumerator* pSessionEnumerator = NULL;
     IAudioSessionControl* pSessionControl = NULL;
     IAudioSessionControl2* pSessionControl2 = NULL;
+
+    // ============================================================================
+    // Application-specific audio capture via ActivateAudioInterfaceAsync
+    // ============================================================================
+    if (s_audioConfig.processLoopback.enabled && targetProcessId != 0)
+    {
+        std::wcout << L"[AudioCapturer] Attempting process loopback capture via ActivateAudioInterfaceAsync for PID="
+                   << targetProcessId << std::endl;
+
+        // Initialize fallback reason
+        processLoopbackFallbackReason = L"Process loopback initialization started";
+        processLoopbackAttempted = true;
+
+        // ============================================================================
+        // Enhanced Process Loopback Implementation with Diagnostics
+        // ============================================================================
+
+        // Step 1: Validate target process exists and is accessible
+        std::wcout << L"[AudioCapturer] Step 1: Checking process access for PID=" << targetProcessId << std::endl;
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, targetProcessId);
+        if (!hProcess)
+        {
+            DWORD lastError = GetLastError();
+            std::wcerr << L"[AudioCapturer] Cannot access target process " << targetProcessId
+                       << L": " << _com_error(HRESULT_FROM_WIN32(lastError)).ErrorMessage() << std::endl;
+            std::wcerr << L"[AudioCapturer] This may be due to UAC restrictions, process isolation, or the process not existing." << std::endl;
+            processLoopbackFallbackReason = L"Cannot access target process";
+        }
+        else
+        {
+            std::wcout << L"[AudioCapturer] Step 1: Process access successful" << std::endl;
+            CloseHandle(hProcess);
+
+            // Step 2: Check Windows version compatibility (requires Windows 10 1903+)
+            // Use a simpler approach - try to load the required function
+            std::wcout << L"[AudioCapturer] Step 2: Checking Windows version compatibility" << std::endl;
+            HMODULE hModule = LoadLibraryW(L"mmdevapi.dll");
+            if (!hModule)
+            {
+                std::wcerr << L"[AudioCapturer] Failed to load mmdevapi.dll - Windows version may be too old." << std::endl;
+                processLoopbackFallbackReason = L"mmdevapi.dll not available";
+            }
+            else
+            {
+                std::wcout << L"[AudioCapturer] Step 2: mmdevapi.dll loaded successfully" << std::endl;
+
+                // Try to get the function pointer for ActivateAudioInterfaceAsync
+                typedef HRESULT(WINAPI* ActivateAudioInterfaceAsyncFn)(
+                    LPCWSTR deviceInterface,
+                    REFIID iid,
+                    PROPVARIANT* activationParams,
+                    IActivateAudioInterfaceCompletionHandler* completionHandler,
+                    IActivateAudioInterfaceAsyncOperation** asyncOp
+                    );
+
+                std::wcout << L"[AudioCapturer] Step 3: Checking for ActivateAudioInterfaceAsync function" << std::endl;
+                ActivateAudioInterfaceAsyncFn pActivateAudioInterfaceAsync =
+                    (ActivateAudioInterfaceAsyncFn)GetProcAddress(hModule, "ActivateAudioInterfaceAsync");
+
+                if (!pActivateAudioInterfaceAsync)
+                {
+                    std::wcerr << L"[AudioCapturer] ActivateAudioInterfaceAsync function not available - Windows version too old for process loopback." << std::endl;
+                    processLoopbackFallbackReason = L"ActivateAudioInterfaceAsync not available";
+                    FreeLibrary(hModule);
+                }
+                else
+                {
+                    std::wcout << L"[AudioCapturer] Step 3: ActivateAudioInterfaceAsync function found" << std::endl;
+                    FreeLibrary(hModule);
+
+                    // Windows version check passed - proceed with ActivateAudioInterfaceAsync
+                    AUDIOCLIENT_ACTIVATION_PARAMS activationParams = {};
+                    activationParams.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+                    activationParams.ProcessLoopbackParams.TargetProcessId = targetProcessId;
+                    activationParams.ProcessLoopbackParams.ProcessLoopbackMode =
+                        (s_audioConfig.processLoopback.includeProcessTree
+                            ? PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+                            : PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE);
+
+                    PROPVARIANT pv; PropVariantInit(&pv);
+                    hr = InitPropVariantFromBuffer(&activationParams, sizeof(activationParams), &pv);
+                    if (SUCCEEDED(hr))
+                    {
+                        processLoopbackAttempted = true;
+                        HANDLE hActivate = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+                        if (!hActivate)
+                        {
+                            std::wcerr << L"[AudioCapturer] Failed to create activation event: " << GetLastError() << std::endl;
+                            processLoopbackFallbackReason = L"CreateEvent failed for activation";
+                        }
+                        else
+                        {
+                            IActivateAudioInterfaceCompletionHandler* handler = new (std::nothrow) ActivateAudioCompletionHandler(hActivate);
+                            if (!handler)
+                            {
+                                std::wcerr << L"[AudioCapturer] Failed to allocate activation handler" << std::endl;
+                                processLoopbackFallbackReason = L"Allocation failure for completion handler";
+                            }
+                            else
+                            {
+                                // Step 4: Try ActivateAudioInterfaceAsync with enhanced error diagnostics
+                                Microsoft::WRL::ComPtr<IActivateAudioInterfaceAsyncOperation> op;
+                                std::wcout << L"[AudioCapturer] Step 4: Attempting ActivateAudioInterfaceAsync call..." << std::endl;
+
+                                std::wcout << L"[AudioCapturer] About to call ActivateAudioInterfaceAsync..." << std::endl;
+
+                                hr = ActivateAudioInterfaceAsync(
+                                    L"VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK",
+                                    __uuidof(IAudioClient),
+                                    &pv,
+                                    handler,
+                                    op.ReleaseAndGetAddressOf());
+
+                                std::wcout << L"[AudioCapturer] ActivateAudioInterfaceAsync returned: 0x" << std::hex << hr << std::dec << std::endl;
+
+                                if (SUCCEEDED(hr))
+                                {
+                                    std::wcout << L"[AudioCapturer] ActivateAudioInterfaceAsync call succeeded, waiting for completion..." << std::endl;
+                                    DWORD waitResult = WaitForSingleObject(hActivate, 5000); // 5 second timeout
+
+                                    std::wcout << L"[AudioCapturer] WaitForSingleObject returned: " << waitResult << std::endl;
+
+                                    if (waitResult == WAIT_TIMEOUT)
+                                    {
+                                        std::wcerr << L"[AudioCapturer] ActivateAudioInterfaceAsync timed out after 5 seconds" << std::endl;
+                                        processLoopbackFallbackReason = L"ActivateAudioInterfaceAsync timeout";
+                                    }
+                                    else if (waitResult == WAIT_OBJECT_0)
+                                    {
+                                        // Retrieve result and IAudioClient from handler
+                                        HRESULT hrActivate = static_cast<ActivateAudioCompletionHandler*>(handler)->Result();
+                                        auto client = static_cast<ActivateAudioCompletionHandler*>(handler)->GetClient();
+
+                                        std::wcout << L"[AudioCapturer] Async operation completed. Result: " << std::hex << hrActivate << std::dec
+                                                   << L", Client: " << (client ? L"Valid" : L"NULL") << std::endl;
+
+                                        if (SUCCEEDED(hrActivate) && client)
+                                        {
+                                            m_pAudioClient = client; // Use process-specific IAudioClient
+                                            std::wcout << L"[AudioCapturer] Process loopback activation succeeded for PID=" << targetProcessId << std::endl;
+                                            processLoopbackSucceeded = true;
+                                            processLoopbackFallbackReason = L"Success - Process loopback activated";
+
+                                            // Initialize client for capture
+                                            hr = m_pAudioClient->GetMixFormat(&pwfx);
+                                            if (FAILED(hr))
+                                            {
+                                                std::wcerr << L"[AudioCapturer] Unable to get mix format for process loopback: "
+                                                    << _com_error(hr).ErrorMessage() << std::endl;
+                                                processLoopbackFallbackReason = L"GetMixFormat failed (process loopback)";
+                                            }
+                                            else
+                                            {
+                                                std::wcout << L"[AudioCapturer] Process mix format retrieved successfully" << std::endl;
+
+                                                // Track active format for WAV header
+                                                m_activeChannels = static_cast<uint16_t>(pwfx->nChannels);
+                                                m_activeSampleRate = static_cast<uint32_t>(pwfx->nSamplesPerSec);
+                                                m_activeBitsPerSample = pwfx->wBitsPerSample;
+                                                if (pwfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+                                                    WAVEFORMATEXTENSIBLE* pEx = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(pwfx);
+                                                    m_activeWavAudioFormat = (pEx->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) ? 3 : 1;
+                                                }
+                                                else if (pwfx->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+                                                    m_activeWavAudioFormat = 3;
+                                                }
+                                                else {
+                                                    m_activeWavAudioFormat = 1;
+                                                }
+
+                                                // For process loopback, use shared mode for broad compatibility
+                                                DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+                                                WAVEFORMATEX* targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
+
+                                                if (s_audioConfig.wasapi.force48kHzStereo) {
+                                                    bool isAlreadyOptimal = (pwfx->nSamplesPerSec == 48000 &&
+                                                        pwfx->nChannels == 2 &&
+                                                        pwfx->wBitsPerSample == 16 &&
+                                                        pwfx->wFormatTag == WAVE_FORMAT_PCM);
+                                                    if (!isAlreadyOptimal) {
+                                                        static WAVEFORMATEX forcedFormat = {};
+                                                        forcedFormat.wFormatTag = WAVE_FORMAT_PCM;
+                                                        forcedFormat.nChannels = 2;
+                                                        forcedFormat.nSamplesPerSec = 48000;
+                                                        forcedFormat.nAvgBytesPerSec = 48000 * 2 * 2;
+                                                        forcedFormat.nBlockAlign = 2 * 2;
+                                                        forcedFormat.wBitsPerSample = 16;
+                                                        forcedFormat.cbSize = 0;
+                                                        targetFormat = &forcedFormat;
+                                                        std::wcout << L"[AudioCapturer] Forcing 48kHz stereo PCM format for process loopback" << std::endl;
+                                                    }
+                                                }
+
+                                                hr = m_pAudioClient->Initialize(
+                                                    AUDCLNT_SHAREMODE_SHARED,
+                                                    streamFlags,
+                                                    hnsRequestedDuration,
+                                                    0,
+                                                    targetFormat,
+                                                    NULL);
+
+                                                if (FAILED(hr))
+                                                {
+                                                    if (s_audioConfig.wasapi.enforceEventDriven) {
+                                                        std::wcerr << L"[AudioCapturer] Process loopback event-driven init failed and enforcement is enabled. Error: "
+                                                            << _com_error(hr).ErrorMessage() << std::endl;
+                                                        processLoopbackFallbackReason = L"IAudioClient Initialize failed (event-driven, enforced)";
+                                                    }
+                                                    else {
+                                                        std::wcerr << L"[AudioCapturer] Process loopback event-driven init failed; retrying in polling mode. Error: "
+                                                            << _com_error(hr).ErrorMessage() << std::endl;
+                                                        hr = m_pAudioClient->Initialize(
+                                                            AUDCLNT_SHAREMODE_SHARED,
+                                                            AUDCLNT_STREAMFLAGS_LOOPBACK,
+                                                            hnsRequestedDuration,
+                                                            0,
+                                                            const_cast<const WAVEFORMATEX*>(pwfx),
+                                                            NULL);
+                                                        if (FAILED(hr)) {
+                                                            processLoopbackFallbackReason = L"IAudioClient Initialize failed (polling fallback)";
+                                                        }
+                                                    }
+                                                }
+
+                                                if (SUCCEEDED(hr))
+                                                {
+                                                    hr = m_pAudioClient->GetBufferSize(&bufferFrameCount);
+                                                    if (FAILED(hr)) {
+                                                        std::wcerr << L"[AudioCapturer] Unable to get buffer size for process loopback: "
+                                                            << _com_error(hr).ErrorMessage() << std::endl;
+                                                        processLoopbackFallbackReason = L"GetBufferSize failed (process loopback)";
+                                                    }
+                                                    else {
+                                                        size_t requiredSamples = static_cast<size_t>(bufferFrameCount) * static_cast<size_t>(pwfx->nChannels);
+                                                        if (m_floatBuffer.size() < requiredSamples) {
+                                                            m_floatBuffer.resize(requiredSamples);
+                                                        }
+
+                                                        hr = m_pAudioClient->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(m_pCaptureClient.ReleaseAndGetAddressOf()));
+                                                        if (FAILED(hr)) {
+                                                            std::wcerr << L"[AudioCapturer] Unable to get capture client for process loopback: "
+                                                                << _com_error(hr).ErrorMessage() << std::endl;
+                                                            processLoopbackFallbackReason = L"GetService(IAudioCaptureClient) failed (process loopback)";
+                                                        }
+                                                        else {
+                                                            // Query IAudioClock for precise timestamps
+                                                            hr = m_pAudioClient->GetService(__uuidof(IAudioClock), reinterpret_cast<void**>(m_pAudioClock.ReleaseAndGetAddressOf()));
+                                                            if (SUCCEEDED(hr) && m_pAudioClock) {
+                                                                UINT64 freq = 0;
+                                                                if (SUCCEEDED(m_pAudioClock->GetFrequency(&freq))) {
+                                                                    m_audioClockFreq = freq;
+                                                                    std::wcout << L"[AudioCapturer] Process loopback AudioClock frequency: " << freq << std::endl;
+                                                                }
+                                                            }
+
+                                                            std::wcout << L"[AudioCapturer] Successfully initialized process loopback capture." << std::endl;
+                                                            std::wcout << L"[AudioCapturer] Capture path selected: PROCESS_LOOPBACK (PID="
+                                                                << targetProcessId << L", includeTree="
+                                                                << (s_audioConfig.processLoopback.includeProcessTree ? L"true" : L"false")
+                                                                << L")" << std::endl;
+                                                            // Skip endpoint enumeration and default fallback
+                                                            goto AfterDeviceSelection;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        else
+                                        {
+                                            std::wcerr << L"[AudioCapturer] Process loopback activation failed: "
+                                                       << _com_error(SUCCEEDED(hr) ? hrActivate : hr).ErrorMessage()
+                                                       << std::endl;
+                                            if (SUCCEEDED(hr)) {
+                                                std::wcerr << L"[AudioCapturer] Activation completed but returned failure code" << std::endl;
+                                            }
+                                            processLoopbackFallbackReason = L"ActivateAudioInterfaceAsync completion failed";
+                                        }
+                                    }
+                                    else
+                                    {
+                                        std::wcerr << L"[AudioCapturer] WaitForSingleObject failed: " << GetLastError() << std::endl;
+                                        processLoopbackFallbackReason = L"WaitForSingleObject failed";
+                                    }
+                                }
+                                else
+                                {
+                                    std::wcerr << L"[AudioCapturer] ActivateAudioInterfaceAsync call failed: " << _com_error(hr).ErrorMessage()
+                                               << L" (HRESULT: 0x" << std::hex << hr << std::dec << L")" << std::endl;
+
+                                    // Provide specific guidance for common errors
+                                    if (hr == 0x80000010) // RPC_E_WRONG_THREAD
+                                    {
+                                        std::wcerr << L"[AudioCapturer] RPC_E_WRONG_THREAD error - this may be due to:" << std::endl;
+                                        std::wcerr << L"[AudioCapturer]   1. COM apartment threading issue" << std::endl;
+                                        std::wcerr << L"[AudioCapturer]   2. Process loopback not supported on this system" << std::endl;
+                                        std::wcerr << L"[AudioCapturer]   3. Target process permissions or state issue" << std::endl;
+                                        processLoopbackFallbackReason = L"RPC_E_WRONG_THREAD - Process loopback not supported";
+                                    }
+                                    else if (hr == E_ACCESSDENIED)
+                                    {
+                                        std::wcerr << L"[AudioCapturer] Access denied - check process permissions" << std::endl;
+                                        processLoopbackFallbackReason = L"Access denied to target process";
+                                    }
+                                    else if (hr == E_INVALIDARG)
+                                    {
+                                        std::wcerr << L"[AudioCapturer] Invalid arguments - process may not exist or be accessible" << std::endl;
+                                        processLoopbackFallbackReason = L"Invalid process arguments";
+                                    }
+                                    else
+                                    {
+                                        processLoopbackFallbackReason = L"ActivateAudioInterfaceAsync API call failed";
+                                    }
+                                }
+
+                                handler->Release();
+                            }
+
+                            CloseHandle(hActivate);
+                        }
+
+                        PropVariantClear(&pv);
+                    }
+                    else
+                    {
+                        std::wcerr << L"[AudioCapturer] InitPropVariantFromBuffer failed: " << _com_error(hr).ErrorMessage() << std::endl;
+                        processLoopbackAttempted = true;
+                        processLoopbackFallbackReason = L"InitPropVariantFromBuffer failed";
+                    }
+                }
+            }
+        }
+    if (processLoopbackFallbackReason == L"Process loopback initialization started")
+    {
+        processLoopbackFallbackReason = L"Process loopback logic completed without setting success flag";
+    }
+
+    // Log final diagnostic summary
+    if (processLoopbackAttempted && !processLoopbackSucceeded)
+    {
+        std::wcout << L"[AudioCapturer] Process loopback diagnostic summary:" << std::endl;
+        std::wcout << L"[AudioCapturer]   - Process access: SUCCESS" << std::endl;
+        std::wcout << L"[AudioCapturer]   - Windows version: SUCCESS" << std::endl;
+        std::wcout << L"[AudioCapturer]   - API availability: SUCCESS" << std::endl;
+        std::wcout << L"[AudioCapturer]   - API call result: FAILED (" << processLoopbackFallbackReason << L")" << std::endl;
+        std::wcout << L"[AudioCapturer]   - System may not support process loopback for this configuration" << std::endl;
+    }
+    else
+    {
+        if (!s_audioConfig.processLoopback.enabled) {
+            std::wcout << L"[AudioCapturer] Process loopback disabled by config; using device loopback fallback." << std::endl;
+        } else if (targetProcessId == 0) {
+            std::wcout << L"[AudioCapturer] No target PID provided; using device loopback fallback." << std::endl;
+        }
+    }
 
     AUDIO_LOG_INFO(L"[AudioCapturer] Target Process ID: " << targetProcessId);
 
@@ -1378,8 +1767,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 m_pSessionControl2 = pSessionControl2; // ComPtr takes ownership (AddRef)
                 if (pSessionControl2) { pSessionControl2->Release(); pSessionControl2 = NULL; }
                 
-                // Per-process loopback removed: use device loopback only
-                std::wstring capturePath = L"DEVICE_LOOPBACK";
+                // Fallback to device loopback
+                std::wstring capturePath = L"FALLBACK_DEVICE_LOOPBACK";
                 bool loopbackActivated = false;
 
                 // Always activate device loopback here
@@ -1390,6 +1779,10 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     goto Exit;
                 }
 
+                if (processLoopbackAttempted && !processLoopbackSucceeded) {
+                    std::wcout << L"[AudioCapturer] Fallback to device loopback. Reason: "
+                               << (processLoopbackFallbackReason.empty() ? L"Unknown" : processLoopbackFallbackReason) << std::endl;
+                }
                 std::wcout << L"[AudioCapturer] Capture path selected: " << capturePath << std::endl;
 
                 hr = m_pAudioClient->GetMixFormat(&pwfx);
@@ -1550,7 +1943,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     UINT64 freq = 0;
                     if (SUCCEEDED(m_pAudioClock->GetFrequency(&freq))) {
                         m_audioClockFreq = freq;
-                        std::wcout << L"[AudioCapturer] AudioClock frequency: " << freq << std::endl;
+                        std::wcout << L"[AudioCapturer] Process loopback AudioClock frequency: " << freq << std::endl;
                     }
                 }
                 
@@ -1575,13 +1968,21 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             pDevice = NULL;
         }
     }
+}
 
     // ============================================================================
-    // Default device loopback (only path)
+    // Default device loopback (fallback path)
     // ============================================================================
     if (!m_pAudioClient)
     {
-        std::wcout << L"[AudioCapturer] Using default render device with loopback capture..." << std::endl;
+        if (processLoopbackAttempted) {
+            std::wcout << L"[AudioCapturer] Using default render device with loopback capture (fallback)." << std::endl;
+            if (!processLoopbackSucceeded && !processLoopbackFallbackReason.empty()) {
+                std::wcout << L"[AudioCapturer] reason: " << processLoopbackFallbackReason << std::endl;
+            }
+        } else {
+            std::wcout << L"[AudioCapturer] Using default render device with loopback capture..." << std::endl;
+        }
 
         // Use the default render device with loopback
         hr = m_pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &m_pDevice);
@@ -1597,7 +1998,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         goto Exit;
         }
 
-        std::wcout << L"[AudioCapturer] Using default render device with loopback capture." << std::endl;
+        std::wcout << L"[AudioCapturer] Capture path selected: DEVICE_LOOPBACK (default device)" << std::endl;
 
         hr = m_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, reinterpret_cast<void**>(m_pAudioClient.ReleaseAndGetAddressOf()));
         if (FAILED(hr))
@@ -1758,6 +2159,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         std::wcout << L"[AudioCapturer] Successfully initialized default device with loopback capture." << std::endl;
     }
 
+AfterDeviceSelection:
     // Release local COM objects that are no longer needed
     if (pSessionEnumerator) pSessionEnumerator->Release();
     if (pSessionManager) pSessionManager->Release();
@@ -1891,11 +2293,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 // This shouldn't happen with INFINITE timeout, but handle it
                 std::wcerr << L"[AudioCapturer] WaitForMultipleObjects timeout (unexpected)" << std::endl;
                 continue;
-        } else {
-                // Wait failed - log error and continue
-                std::wcerr << L"[AudioCapturer] WaitForMultipleObjects failed: " << GetLastError() << std::endl;
-                continue;
             }
+
         } else {
             // Fallback polling mode with stop signal check
             // Use shorter sleep intervals to remain responsive to stop signals
@@ -2256,15 +2655,13 @@ Exit:
     CoUninitialize();
 }
 
-
-
-bool AudioCapturer::ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, void* formatPtr, std::vector<float>& floatData)
+bool AudioCapturer::ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, void* format, std::vector<float>& floatData)
 {
-    if (!pcmData || !formatPtr || numFrames == 0) return false;
+    if (!pcmData || !format || numFrames == 0) return false;
 
     // Cast to WAVEFORMATEX - this is safe since we know the type from the caller
-    const WAVEFORMATEX* format = static_cast<const WAVEFORMATEX*>(formatPtr);
-    const size_t totalSamples = static_cast<size_t>(numFrames) * static_cast<size_t>(format->nChannels);
+    const WAVEFORMATEX* formatStruct = static_cast<const WAVEFORMATEX*>(format);
+    const size_t totalSamples = static_cast<size_t>(numFrames) * static_cast<size_t>(formatStruct->nChannels);
 
     // Use pre-allocated buffer if possible to avoid reallocations
     if (totalSamples <= MAX_AUDIO_FRAME_SAMPLES * MAX_AUDIO_CHANNELS) {
@@ -2276,12 +2673,12 @@ bool AudioCapturer::ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, voi
         floatData.resize(totalSamples);
     }
 
-    WORD tag = format->wFormatTag;
-    WORD bitsPerSample = format->wBitsPerSample;
+    WORD tag = formatStruct->wFormatTag;
+    WORD bitsPerSample = formatStruct->wBitsPerSample;
 
     // Handle WAVE_FORMAT_EXTENSIBLE by inspecting SubFormat
-    if (tag == WAVE_FORMAT_EXTENSIBLE && format->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
-        const WAVEFORMATEXTENSIBLE* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
+    if (tag == WAVE_FORMAT_EXTENSIBLE && formatStruct->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+        const WAVEFORMATEXTENSIBLE* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(formatStruct);
         // Prefer valid bits if set
         if (ext->Samples.wValidBitsPerSample) {
             bitsPerSample = ext->Samples.wValidBitsPerSample;
@@ -2333,8 +2730,6 @@ bool AudioCapturer::ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, voi
     }
 
     return false;
-
-    return true;
 }
 
 bool AudioCapturer::ConvertPCMToFloatInPlace(const BYTE* pcmData, UINT32 numFrames, void* formatPtr, float* outputBuffer, size_t outputBufferSize)
