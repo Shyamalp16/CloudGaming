@@ -513,6 +513,21 @@
     const ctx = canvas.getContext('2d');
     const debugLog = document.getElementById('debugLog');
     const streamViewport = document.getElementById('streamViewport');
+
+    // Create a hidden audio element as fallback for audio-only scenarios
+    let hiddenAudioElement = null;
+    function createHiddenAudioElement() {
+      if (!hiddenAudioElement) {
+        hiddenAudioElement = document.createElement('audio');
+        hiddenAudioElement.style.display = 'none';
+        hiddenAudioElement.autoplay = true;
+        hiddenAudioElement.muted = false;
+        hiddenAudioElement.volume = 1.0;
+        document.body.appendChild(hiddenAudioElement);
+        log('Created hidden audio element for fallback audio playback');
+      }
+      return hiddenAudioElement;
+    }
     let dataChannel;
     let mouseChannel;
     let latencyChannel;
@@ -637,28 +652,60 @@
 
     function checkAudioStatus() {
       const video = document.getElementById('hiddenVideo');
+      const audio = hiddenAudioElement;
       log('=== AUDIO STATUS CHECK ===');
 
+      // Check video element
       if (video.srcObject) {
         const audioTracks = video.srcObject.getAudioTracks();
-        log(`Audio tracks in stream: ${audioTracks.length}`);
+        log(`Video element audio tracks: ${audioTracks.length}`);
         audioTracks.forEach((track, index) => {
-          log(`Track ${index}: enabled=${track.enabled}, muted=${track.muted}, readyState=${track.readyState}`);
+          log(`Video Track ${index}: enabled=${track.enabled}, muted=${track.muted}, readyState=${track.readyState}`);
         });
       } else {
         log('No media stream attached to video element');
       }
 
+      // Check dedicated audio element
+      if (audio && audio.srcObject) {
+        const audioTracks = audio.srcObject.getAudioTracks();
+        log(`Dedicated audio element tracks: ${audioTracks.length}`);
+        audioTracks.forEach((track, index) => {
+          log(`Audio Track ${index}: enabled=${track.enabled}, muted=${track.muted}, readyState=${track.readyState}`);
+        });
+        log(`Audio element - paused: ${audio.paused}, ended: ${audio.ended}, readyState: ${audio.readyState}`);
+      } else {
+        log('No dedicated audio element or no stream attached');
+      }
+
       log(`Video element - muted: ${video.muted}, volume: ${video.volume}, paused: ${video.paused}`);
       log(`Video element - readyState: ${video.readyState}, networkState: ${video.networkState}`);
 
-      // Try to force audio playback
-      if (video.paused) {
-        video.play().then(() => {
-          log('Forced audio playback after status check');
-        }).catch(e => {
-          log(`Failed to force audio playback: ${e}`, 'error');
-        });
+      // Try to force audio playback on both elements
+      const playPromises = [];
+
+      if (video.srcObject && video.paused) {
+        playPromises.push(
+          video.play().then(() => {
+            log('Forced video element playback');
+          }).catch(e => {
+            log(`Failed to force video playback: ${e}`, 'error');
+          })
+        );
+      }
+
+      if (audio && audio.srcObject && audio.paused) {
+        playPromises.push(
+          audio.play().then(() => {
+            log('Forced dedicated audio playback');
+          }).catch(e => {
+            log(`Failed to force audio playback: ${e}`, 'error');
+          })
+        );
+      }
+
+      if (playPromises.length === 0) {
+        log('Both elements already playing or no streams attached');
       }
 
       log('========================');
@@ -999,76 +1046,107 @@
             });
           }
         } else if (event.track.kind === 'audio') {
-          log('Received audio track, attaching to video stream for playback');
+          log('Received audio track, setting up dedicated audio playback');
 
           // Ensure audio track is enabled
           event.track.enabled = true;
-          log(`Audio track enabled: ${event.track.enabled}`);
+          log(`Audio track enabled: ${event.track.enabled}, muted: ${event.track.muted}, readyState: ${event.track.readyState}`);
 
-          // Add audio track to the existing video stream, or create new stream if needed
+          // Create dedicated audio element for reliable audio playback
+          const audioElement = createHiddenAudioElement();
+          const audioStream = new MediaStream([event.track]);
+
+          // Set up audio element
+          audioElement.srcObject = audioStream;
+          audioElement.muted = false;
+          audioElement.volume = 1.0;
+
+          // Also add to video stream if it exists (for combined playback)
           if (hiddenVideoElement.srcObject) {
-            // Add audio track to existing stream
-            const existingStream = hiddenVideoElement.srcObject;
-            existingStream.addTrack(event.track);
-            log('Audio track added to existing video stream');
-          } else {
-            // Create new stream with audio track
-            const audioStream = new MediaStream([event.track]);
-            hiddenVideoElement.srcObject = audioStream;
-            log('New audio-only stream created');
+            hiddenVideoElement.srcObject.addTrack(event.track);
+            hiddenVideoElement.muted = false;
+            hiddenVideoElement.volume = 1.0;
+            log('Audio track added to both video and dedicated audio elements');
           }
 
-          // Ensure video element is not muted and volume is up
-          hiddenVideoElement.muted = false;
-          hiddenVideoElement.volume = 1.0;
-          log(`Audio settings - muted: ${hiddenVideoElement.muted}, volume: ${hiddenVideoElement.volume}`);
+          log(`Audio element - muted: ${audioElement.muted}, volume: ${audioElement.volume}`);
+          log(`Video element - muted: ${hiddenVideoElement.muted}, volume: ${hiddenVideoElement.volume}`);
 
-          // Monitor audio levels to verify audio is working
+          // Monitor audio levels (reduced frequency)
           let audioLevelCheck = setInterval(() => {
             try {
-              if (hiddenVideoElement.srcObject) {
-                const audioTracks = hiddenVideoElement.srcObject.getAudioTracks();
-                if (audioTracks.length > 0) {
-                  const audioTrack = audioTracks[0];
-                  log(`Audio track status - enabled: ${audioTrack.enabled}, muted: ${audioTrack.muted}, readyState: ${audioTrack.readyState}`);
-                  // Check if we can get audio levels (some browsers support this)
-                  if (hiddenVideoElement.audioTracks && hiddenVideoElement.audioTracks.length > 0) {
-                    log(`Video element audio tracks: ${hiddenVideoElement.audioTracks.length}`);
-                  }
+              const audioTracks = audioElement.srcObject ? audioElement.srcObject.getAudioTracks() : [];
+              if (audioTracks.length > 0) {
+                const audioTrack = audioTracks[0];
+                log(`Audio status - enabled: ${audioTrack.enabled}, readyState: ${audioTrack.readyState}`);
+              }
+            } catch (e) {
+              // Silent error for monitoring
+            }
+          }, 15000);
+
+          // Try to play audio
+          const playAudio = async () => {
+            try {
+              await audioElement.play();
+              log('Audio playback started successfully');
+              updateConnectionStatus('connected', 'Audio Streaming');
+
+              // Also try video element if it has content
+              if (hiddenVideoElement.srcObject && hiddenVideoElement.paused) {
+                try {
+                  await hiddenVideoElement.play();
+                  log('Video element with audio also started');
+                } catch (e) {
+                  log(`Video play failed, but audio is working: ${e}`, 'warn');
                 }
               }
             } catch (e) {
-              log(`Audio monitoring error: ${e.message}`, 'warn');
-            }
-          }, 5000); // Check every 5 seconds
-
-          // Ensure audio plays (video element will handle both video and audio)
-          if (hiddenVideoElement.paused) {
-            hiddenVideoElement.play().then(() => {
-              log('Audio playback started');
-              updateConnectionStatus('connected', 'Streaming with Audio');
-            }).catch(e => {
               log(`Audio play failed: ${e}. This may be due to browser autoplay policy.`, 'error');
-              log('Try clicking anywhere on the page to enable audio playback.', 'warn');
               updateConnectionStatus('connected', 'Click to Enable Audio');
 
-              // Add click handler to enable audio on user interaction
-              const enableAudio = () => {
-                hiddenVideoElement.play().then(() => {
+              // Add click handler for user interaction
+              const enableAudioOnClick = async () => {
+                try {
+                  await audioElement.play();
                   log('Audio enabled after user interaction');
-                  updateConnectionStatus('connected', 'Streaming with Audio');
-                  document.removeEventListener('click', enableAudio);
-                }).catch(e => {
-                  log(`Still failed to enable audio: ${e}`, 'error');
-                });
+                  updateConnectionStatus('connected', 'Audio Streaming');
+
+                  if (hiddenVideoElement.srcObject && hiddenVideoElement.paused) {
+                    try {
+                      await hiddenVideoElement.play();
+                    } catch (e) {
+                      log(`Video play failed: ${e}`, 'warn');
+                    }
+                  }
+                } catch (e) {
+                  log(`Audio still failed after click: ${e}`, 'error');
+                }
+                document.removeEventListener('click', enableAudioOnClick);
               };
-              document.addEventListener('click', enableAudio, { once: true });
-            });
-          } else {
-            // If already playing, ensure audio is working
-            log('Video already playing, audio should be active');
-            updateConnectionStatus('connected', 'Streaming with Audio');
+              document.addEventListener('click', enableAudioOnClick, { once: true });
+            }
+          };
+
+          // Resume audio context if suspended (required by some browsers)
+          if (window.AudioContext || window.webkitAudioContext) {
+            try {
+              const AudioContext = window.AudioContext || window.webkitAudioContext;
+              const audioContext = new AudioContext();
+              if (audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                  log('Audio context resumed');
+                }).catch(e => {
+                  log(`Failed to resume audio context: ${e}`, 'warn');
+                });
+              }
+            } catch (e) {
+              log(`Audio context setup failed: ${e}`, 'warn');
+            }
           }
+
+          // Start audio playback
+          playAudio();
 
           // Clean up monitoring after 30 seconds
           setTimeout(() => {

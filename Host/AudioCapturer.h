@@ -426,6 +426,7 @@ private:
     // Ring buffer for encoder frames (zero-copy audio pipeline)
     static const size_t RING_BUFFER_SIZE = 16; // 16 frames of buffering
     std::vector<std::vector<float>> m_frameRingBuffer; // Preallocated frame buffers
+    std::vector<int64_t> m_frameTimestamps; // Separate timestamp storage
     size_t m_ringBufferWriteIndex = 0;
     size_t m_ringBufferReadIndex = 0;
     size_t m_ringBufferCount = 0;

@@ -44,13 +44,13 @@
         "enabled": true,
         "includeProcessTree": true
       },
-      "bitrate": 64000,
-      "complexity": 5,
-      "expectedLossPerc": 10,
+      "bitrate": 96000,
+      "complexity": 8,
+      "expectedLossPerc": 5,
       "enableFec": true,
       "enableDtx": false,
       "application": 2049,
-      "frameSizeMs": 10,
+      "frameSizeMs": 20,
       "channels": 2,
       "useThreadAffinity": false,
       "encoderThreadAffinityMask": 0,
@@ -65,13 +65,13 @@
       },
       "latency": {
         "enforceSingleFrameBuffering": true,
-        "maxFrameSizeMs": 10,
-        "minFrameSizeMs": 5,
-        "strictLatencyMode": true,
+        "maxFrameSizeMs": 20,
+        "minFrameSizeMs": 10,
+        "strictLatencyMode": false,
         "warnOnBuffering": true,
-        "targetOneWayLatencyMs": 20,
-        "ultraLowLatencyProfile": true,
-        "disableFecInLowLatency": true
+        "targetOneWayLatencyMs": 40,
+        "ultraLowLatencyProfile": false,
+        "disableFecInLowLatency": false
       },
       "bitrateAdaptation": {
         "enabled": true,

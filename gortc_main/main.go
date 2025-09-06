@@ -1052,14 +1052,27 @@ func audioSenderGoroutine() {
 			// Send RTP packet without holding any locks
 			// This is the potentially blocking operation, but it doesn't block other operations
 			if audioTrack != nil {
+				// Debug: Check payload data occasionally (5-second intervals)
+				if pkt.Header.SequenceNumber%2500 == 0 {
+					hasData := false
+					for i := 0; i < len(pkt.Payload) && i < 10; i++ {
+						if pkt.Payload[i] != 0 {
+							hasData = true
+							break
+						}
+					}
+					log.Printf("[Go/Pion] AUDIO DEBUG: Frame %d, size=%d bytes, has_data=%v",
+						pkt.Header.SequenceNumber, len(pkt.Payload), hasData)
+				}
+
 				if err := audioTrack.WriteRTP(pkt); err != nil {
 					log.Printf("[Go/Pion] AUDIO ERROR: Failed to write RTP packet to audio track: %v", err)
 					// Return buffer immediately on error
 					putSampleBuf(pkt.Payload)
 				} else {
-					// Log successful transmission occasionally (every 100 packets)
-					if pkt.Header.SequenceNumber%100 == 0 {
-						log.Printf("[Go/Pion] AUDIO SUCCESS: RTP packet sent successfully (seq=%d)", pkt.Header.SequenceNumber)
+					// Log successful transmission occasionally (5-second intervals)
+					if pkt.Header.SequenceNumber%2500 == 0 {
+						log.Printf("[Go/Pion] AUDIO SUCCESS: RTP packet sent (seq=%d)", pkt.Header.SequenceNumber)
 					}
 					// Return buffer immediately after successful write
 					// This ensures minimal latency between write completion and buffer reuse
@@ -1280,8 +1293,27 @@ func validateAudioTimestampStability() {
 	}
 }
 
+// Global counter for audio packet debugging
+var audioPacketCounter int64
+
 //export sendAudioPacket
 func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
+	// Debug: Check incoming audio data (5-second intervals)
+	counter := atomic.AddInt64(&audioPacketCounter, 1)
+	if counter%2500 == 0 { // 2500 frames at 500fps = 5 seconds
+		// Check first few bytes of audio data
+		dataSlice := (*[1 << 30]byte)(data)[:size:size]
+		hasData := false
+		for i := 0; i < len(dataSlice) && i < 10; i++ {
+			if dataSlice[i] != 0 {
+				hasData = true
+				break
+			}
+		}
+		log.Printf("[Go/Pion] AUDIO RECEIVE: Frame %d, size=%d bytes, has_data=%v",
+			counter, size, hasData)
+	}
+
 	// Non-blocking audio RTP write implementation
 	// Uses granular locking to reduce contention:
 	// 1. Minimal global lock (pcMutex) for connection state checks only
@@ -1330,10 +1362,7 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		audioBufferMutex.Lock()
 		if len(audioConnectionBuffer) < maxAudioBufferSize {
 			audioConnectionBuffer = append(audioConnectionBuffer, pkt)
-			log.Printf("[Go/Pion] AUDIO BUFFER: Connection not ready (state: %s) - buffered packet (seq=%d), buffer size: %d/%d",
-				connectionState.String(), pkt.Header.SequenceNumber, len(audioConnectionBuffer), maxAudioBufferSize)
 		} else {
-			log.Printf("[Go/Pion] AUDIO WARNING: Connection buffer full (state: %s) - dropping oldest buffered packet", connectionState.String())
 			// Remove oldest packet and add new one
 			if len(audioConnectionBuffer) > 0 {
 				oldestPkt := audioConnectionBuffer[0]
@@ -2300,9 +2329,14 @@ func createPeerConnectionGo() C.int {
 	// Enumerate codecs and select H264 payload type specifically
 	// Removed: previous code queried RTPSender params, which is unnecessary for TrackLocalStaticSample pacing.
 
-	// Create and add Opus audio track
+	// Create and add Opus audio track with explicit parameters
 	audio, err := webrtc.NewTrackLocalStaticRTP(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
+		webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   48000,
+			Channels:    2,
+			SDPFmtpLine: "minptime=10;useinbandfec=1",
+		},
 		"audio",
 		"game-audio",
 	)
