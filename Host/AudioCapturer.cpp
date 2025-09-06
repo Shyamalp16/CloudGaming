@@ -321,9 +321,13 @@ bool AudioCapturer::StartCapture(DWORD processId)
     m_startTime = std::chrono::high_resolution_clock::now();
     m_nextFrameTime = 0;
     m_rtpTimestamp = 0;
-    m_frameSizeSamples = settings.frameSize / settings.channels;  // Samples per frame per channel (for RTP timestamps)
-    m_samplesPerFrame = settings.frameSize;  // Total samples per frame (already includes channels)
+    // settings.frameSize is samples per channel (e.g., 960 at 20ms, 48kHz)
+    m_frameSizeSamples = settings.frameSize;                  // per-channel samples
+    m_samplesPerFrame = settings.frameSize * settings.channels; // total interleaved samples
     m_frameBuffer.resize(m_samplesPerFrame);
+
+    // Re-initialize ring buffer now that final frame sizes are known
+    InitializeRingBuffer();
     
     AUDIO_LOG_INFO(L"[AudioCapturer] Initialized Opus encoder: " << settings.sampleRate << L"Hz, "
                   << settings.channels << L" channels, " << settings.frameSize << L" total samples/frame ("

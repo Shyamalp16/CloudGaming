@@ -1771,7 +1771,7 @@ func createPeerConnectionGo() C.int {
 		return 0
 	}
 
-	// Ensure Opus audio is available
+	// Ensure Opus audio is available (register baseline; we set fmtp on the sending track)
 	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:  webrtc.MimeTypeOpus,
@@ -2329,13 +2329,13 @@ func createPeerConnectionGo() C.int {
 	// Enumerate codecs and select H264 payload type specifically
 	// Removed: previous code queried RTPSender params, which is unnecessary for TrackLocalStaticSample pacing.
 
-	// Create and add Opus audio track with explicit parameters
+	// Create and add Opus audio track with explicit parameters (20ms)
 	audio, err := webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypeOpus,
 			ClockRate:   48000,
 			Channels:    2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1",
+			SDPFmtpLine: "minptime=20;useinbandfec=1",
 		},
 		"audio",
 		"game-audio",
