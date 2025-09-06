@@ -105,11 +105,37 @@ int OpusEncoderWrapper::encodeFrameToBuffer(const float* pcmInterleaved, uint8_t
     }
 
     int numSamplesPerChannel = m_frameSize;
-    int ret = opus_encode_float(reinterpret_cast<OpusEncoder*>(m_encoder),
+
+    // Validate input range; if any samples are outside [-1,1] or non-finite, clamp into a scratch buffer
+    bool needsClamp = false;
+    int total = m_frameSize * m_channels;
+    for (int i = 0; i < total; ++i) {
+        float s = pcmInterleaved[i];
+        if (!std::isfinite(s) || s > 1.0f || s < -1.0f) { needsClamp = true; break; }
+    }
+
+    int ret = 0;
+    if (needsClamp) {
+        static thread_local std::vector<float> scratch;
+        scratch.resize(static_cast<size_t>(total));
+        for (int i = 0; i < total; ++i) {
+            float s = pcmInterleaved[i];
+            if (!std::isfinite(s)) s = 0.0f;
+            if (s > 1.0f) s = 1.0f; else if (s < -1.0f) s = -1.0f;
+            scratch[static_cast<size_t>(i)] = s;
+        }
+        ret = opus_encode_float(reinterpret_cast<OpusEncoder*>(m_encoder),
+                                scratch.data(),
+                                numSamplesPerChannel,
+                                buffer,
+                                static_cast<opus_int32>(bufferSize));
+    } else {
+        ret = opus_encode_float(reinterpret_cast<OpusEncoder*>(m_encoder),
                                 pcmInterleaved,
                                 numSamplesPerChannel,
                                 buffer,
                                 static_cast<opus_int32>(bufferSize));
+    }
     if (ret < 0) {
         std::cout << "[OpusEncoder] Encoding error: " << ret << std::endl;
         return -1; // Error

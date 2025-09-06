@@ -492,7 +492,7 @@ var (
 	audioRTPBaseline     uint32       // Initial RTP timestamp established from first PTS
 	audioPTSBaseline     int64        // Initial PTS value for reference
 	audioBaselineSet     bool         // Whether baseline has been established
-	audioFrameDuration   uint32 = 480 // RTP timestamp increment per frame (10ms at 48kHz)
+	audioFrameDuration   uint32 = 960 // RTP timestamp increment per frame (20ms at 48kHz)
 	videoFrameCounter    uint64
 	dataChannel          *webrtc.DataChannel
 	messageQueue         []string

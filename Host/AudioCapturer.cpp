@@ -13,6 +13,7 @@
 #include <opus/opus.h>
 #include <cmath>
 #include <chrono>
+#include <cmath>
 #include <audioclientactivationparams.h>
 #include <propvarutil.h>
 #include <activation.h>
@@ -1052,6 +1053,17 @@ void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
                       << ", RMS after DC: " << rmsAfterDc << " (no boost needed)" << std::endl;
             lastAudioLog = now;
         }
+    }
+
+    // Final safety: sanitize samples to ensure finite values and range [-1, 1]
+    for (size_t i = 0; i < frame.samples.size(); ++i) {
+        float s = frame.samples[i];
+        if (!std::isfinite(s)) {
+            frame.samples[i] = 0.0f;
+            continue;
+        }
+        if (s > 1.0f) frame.samples[i] = 1.0f;
+        else if (s < -1.0f) frame.samples[i] = -1.0f;
     }
 
     if (shouldLog) {

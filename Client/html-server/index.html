@@ -486,7 +486,7 @@
 
   <div class="debug-log" id="debugLog"></div>
 
-  <video id="hiddenVideo" autoplay playsinline muted></video>
+  <video id="hiddenVideo" autoplay playsinline></video>
 
   <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
   <script>
@@ -495,6 +495,18 @@
         if (!roomId) {
             alert('Please enter a Room ID.');
             return;
+        }
+
+        // Create and arm audio element under user gesture (non-blocking)
+        const audioEl = createHiddenAudioElement();
+        try {
+          const p = audioEl.play();
+          if (p && typeof p.then === 'function') {
+            p.then(() => log('Primed dedicated audio element on user gesture'))
+             .catch(e => log(`Audio priming failed (will retry when track arrives): ${e}`, 'warn'));
+          }
+        } catch (e) {
+          log(`Audio priming threw (will retry when track arrives): ${e}`, 'warn');
         }
 
         document.getElementById('roomSetup').classList.add('hidden');
@@ -1052,109 +1064,65 @@
           event.track.enabled = true;
           log(`Audio track enabled: ${event.track.enabled}, muted: ${event.track.muted}, readyState: ${event.track.readyState}`);
 
-          // Create dedicated audio element for reliable audio playback
+          // Use ONLY a dedicated audio element
           const audioElement = createHiddenAudioElement();
           const audioStream = new MediaStream([event.track]);
-
-          // Set up audio element
           audioElement.srcObject = audioStream;
           audioElement.muted = false;
           audioElement.volume = 1.0;
 
-          // Also add to video stream if it exists (for combined playback)
-          if (hiddenVideoElement.srcObject) {
-            hiddenVideoElement.srcObject.addTrack(event.track);
-            hiddenVideoElement.muted = false;
-            hiddenVideoElement.volume = 1.0;
-            log('Audio track added to both video and dedicated audio elements');
-          }
-
-          log(`Audio element - muted: ${audioElement.muted}, volume: ${audioElement.volume}`);
-          log(`Video element - muted: ${hiddenVideoElement.muted}, volume: ${hiddenVideoElement.volume}`);
-
-          // Monitor audio levels (reduced frequency)
-          let audioLevelCheck = setInterval(() => {
-            try {
-              const audioTracks = audioElement.srcObject ? audioElement.srcObject.getAudioTracks() : [];
-              if (audioTracks.length > 0) {
-                const audioTrack = audioTracks[0];
-                log(`Audio status - enabled: ${audioTrack.enabled}, readyState: ${audioTrack.readyState}`);
-              }
-            } catch (e) {
-              // Silent error for monitoring
+          // Route to default output device when supported
+          try {
+            if (typeof audioElement.setSinkId === 'function') {
+              audioElement.setSinkId('default')
+                .then(() => log('Audio sink set to default device'))
+                .catch(e => log(`setSinkId failed: ${e}`, 'warn'));
             }
-          }, 15000);
+          } catch (e) { /* ignore */ }
 
-          // Try to play audio
-          const playAudio = async () => {
-            try {
-              await audioElement.play();
-              log('Audio playback started successfully');
-              updateConnectionStatus('connected', 'Audio Streaming');
+          // Add playback state hooks
+          audioElement.onplaying = () => log('Audio element onplaying');
+          audioElement.onpause = () => log('Audio element onpause');
+          audioElement.onvolumechange = () => log(`Audio volume change: ${audioElement.volume}`);
+          audioElement.onerror = (e) => log(`Audio element error: ${audioElement.error?.message || e.type}`, 'error');
 
-              // Also try video element if it has content
-              if (hiddenVideoElement.srcObject && hiddenVideoElement.paused) {
-                try {
-                  await hiddenVideoElement.play();
-                  log('Video element with audio also started');
-                } catch (e) {
-                  log(`Video play failed, but audio is working: ${e}`, 'warn');
+          // Lightweight audio-level meter (logs every 2s)
+          try {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            if (AC) {
+              const ac = new AC();
+              const src = ac.createMediaStreamSource(audioStream);
+              const analyser = ac.createAnalyser();
+              analyser.fftSize = 256;
+              src.connect(analyser);
+              const data = new Uint8Array(analyser.frequencyBinCount);
+              setInterval(() => {
+                analyser.getByteTimeDomainData(data);
+                let sum = 0;
+                for (let i = 0; i < data.length; i++) {
+                  const v = (data[i] - 128) / 128;
+                  sum += v * v;
                 }
-              }
-            } catch (e) {
-              log(`Audio play failed: ${e}. This may be due to browser autoplay policy.`, 'error');
-              updateConnectionStatus('connected', 'Click to Enable Audio');
-
-              // Add click handler for user interaction
-              const enableAudioOnClick = async () => {
-                try {
-                  await audioElement.play();
-                  log('Audio enabled after user interaction');
-                  updateConnectionStatus('connected', 'Audio Streaming');
-
-                  if (hiddenVideoElement.srcObject && hiddenVideoElement.paused) {
-                    try {
-                      await hiddenVideoElement.play();
-                    } catch (e) {
-                      log(`Video play failed: ${e}`, 'warn');
-                    }
-                  }
-                } catch (e) {
-                  log(`Audio still failed after click: ${e}`, 'error');
-                }
-                document.removeEventListener('click', enableAudioOnClick);
-              };
-              document.addEventListener('click', enableAudioOnClick, { once: true });
+                const rms = Math.sqrt(sum / data.length);
+                log(`[AUDIO METER] RMS=${rms.toFixed(3)}`);
+              }, 2000);
             }
-          };
+          } catch (e) { /* ignore meter errors */ }
 
-          // Resume audio context if suspended (required by some browsers)
-          if (window.AudioContext || window.webkitAudioContext) {
-            try {
-              const AudioContext = window.AudioContext || window.webkitAudioContext;
-              const audioContext = new AudioContext();
-              if (audioContext.state === 'suspended') {
-                audioContext.resume().then(() => {
-                  log('Audio context resumed');
-                }).catch(e => {
-                  log(`Failed to resume audio context: ${e}`, 'warn');
-                });
-              }
-            } catch (e) {
-              log(`Audio context setup failed: ${e}`, 'warn');
+          // Start or resume playback (should be already primed by Join click)
+          try {
+            const p = audioElement.play();
+            if (p && typeof p.then === 'function') {
+              p.then(() => {
+                log('Audio playback confirmed after track attach');
+                updateConnectionStatus('connected', 'Audio Streaming');
+              }).catch(e => {
+                log(`Audio play() after track attach failed: ${e}`, 'warn');
+              });
             }
+          } catch (e) {
+            log(`Audio play() threw after attach: ${e}`, 'warn');
           }
-
-          // Start audio playback
-          playAudio();
-
-          // Clean up monitoring after 30 seconds
-          setTimeout(() => {
-            if (audioLevelCheck) {
-              clearInterval(audioLevelCheck);
-              audioLevelCheck = null;
-            }
-          }, 30000);
         }
           // Auto-resize canvas to remote frame size on first frames
           hiddenVideoElement.onresize = () => {
