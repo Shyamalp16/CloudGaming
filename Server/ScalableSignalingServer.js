@@ -281,11 +281,17 @@ async function handleNewConnection(ws, request) {
 				try { ws.terminate(); } catch (_) {}
 				return;
 			}
+			log('debug', 'Sending ping to client', { clientId: ws.clientId, wasAlive: ws.isAlive });
 			ws.isAlive = false;
-			try { ws.ping(); } catch (_) {}
+			try { ws.ping(); } catch (e) {
+				log('warn', 'Failed to send ping', { clientId: ws.clientId, error: String(e.message) });
+			}
 		}, config.heartbeatIntervalMs);
 		ws._heartbeat = heartbeat;
-		ws.on('pong', () => { ws.isAlive = true; });
+		ws.on('pong', () => {
+			ws.isAlive = true;
+			log('debug', 'Received pong from client', { clientId: ws.clientId });
+		});
 
 		// Wire message / close / error handlers
 		ws.on('message', (message) => handleMessage(ws, roomKey, message));

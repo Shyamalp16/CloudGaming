@@ -832,6 +832,9 @@
         startConnection();
       };
 
+      // Browser WebSocket automatically handles ping/pong at protocol level
+      // No need for manual ping handling
+
       ws.onmessage = async (event) => {
         try {
           const msg = JSON.parse(event.data);
@@ -965,6 +968,30 @@
               log(`Video play() failed: ${e}. User interaction might be required.`, 'error');
             });
           }
+        } else if (event.track.kind === 'audio') {
+          log('Received audio track, attaching to video stream for playback');
+          // Add audio track to the existing video stream, or create new stream if needed
+          if (hiddenVideoElement.srcObject) {
+            // Add audio track to existing stream
+            const existingStream = hiddenVideoElement.srcObject;
+            existingStream.addTrack(event.track);
+            log('Audio track added to existing video stream');
+          } else {
+            // Create new stream with audio track
+            const audioStream = new MediaStream([event.track]);
+            hiddenVideoElement.srcObject = audioStream;
+            log('New audio-only stream created');
+          }
+          // Ensure audio plays (video element will handle both video and audio)
+          if (hiddenVideoElement.paused) {
+            hiddenVideoElement.play().then(() => {
+              log('Audio playback started');
+              updateConnectionStatus('connected', 'Audio Connected');
+            }).catch(e => {
+              log(`Audio play failed: ${e}. User interaction might be required.`, 'error');
+            });
+          }
+        }
           // Auto-resize canvas to remote frame size on first frames
           hiddenVideoElement.onresize = () => {
             // Keep canvas matched to viewport (not raw video size) to avoid double scaling
@@ -1138,7 +1165,6 @@
       videoFeedbackChannel.onerror = (event) => {
         // Handle error
       };
-    }
 
     async function handleAnswer(answerMsg) {
       if (!peerConnection || peerConnection.signalingState !== 'have-local-offer') {
@@ -1285,6 +1311,13 @@
         log("Added video transceiver.");
       } else {
         log("Video transceiver already exists.");
+      }
+
+      if (!peerConnection.getTransceivers().some(t => t.receiver?.track?.kind === 'audio')) {
+        peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+        log("Added audio transceiver.");
+      } else {
+        log("Audio transceiver already exists.");
       }
 
       try {

@@ -207,8 +207,9 @@ private:
     };
     
     std::thread m_captureThread;
+    std::thread m_audioHealthCheckThread;
     std::atomic<bool> m_stopCapture;
-    
+
     // Opus encoder
     std::unique_ptr<OpusEncoderWrapper> m_opusEncoder;
     std::vector<float> m_frameBuffer;

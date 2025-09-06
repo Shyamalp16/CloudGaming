@@ -188,6 +188,18 @@ extern "C" {
     int getPeerConnectionState();
 
     /**
+     * @brief Checks if the audio queue is experiencing congestion that may require bitrate adaptation.
+     * @return 1 if congested (queue depth > 2.5 packets average), 0 if not congested.
+     */
+    int checkAudioQueueCongestionGo();
+
+    /**
+     * @brief Runs comprehensive diagnostics for audio streaming pipeline.
+     * Logs detailed status of PeerConnection, audio track, queue state, and identifies issues.
+     */
+    void diagnoseAudioStreamingGo();
+
+    /**
      * @brief Closes the PeerConnection and cleans up resources.
      */
     void closePeerConnection();

@@ -391,3 +391,5 @@ opencode.exe
 
 output.wav
 dump.rdb
+dump.rdb
+*.rdb

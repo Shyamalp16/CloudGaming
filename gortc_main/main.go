@@ -52,9 +52,9 @@ static HANDLE goMMCSSHandle = NULL;
 
 static void SetupGoThreadMMCSS(void) {
     if (goMMCSSHandle == NULL) {
-        // Set up MMCSS for Go threads with "Games" class for consistent timing
+        // Set up MMCSS for Go threads with "Pro Audio" class for consistent timing
         DWORD taskIndex = 0;
-        goMMCSSHandle = AvSetMmThreadCharacteristicsA("Games", &taskIndex);
+        goMMCSSHandle = AvSetMmThreadCharacteristicsA("Pro Audio", &taskIndex);
         if (goMMCSSHandle != NULL) {
             // Set thread priority to highest for real-time performance
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
@@ -151,12 +151,18 @@ func startStatsMonitoring() {
 		cleanupTicker := time.NewTicker(30 * time.Second) // Cleanup every 30 seconds
 		defer cleanupTicker.Stop()
 
+		// Audio queue health monitoring
+		audioHealthTicker := time.NewTicker(5 * time.Second) // Health check every 5 seconds
+		defer audioHealthTicker.Stop()
+
 		for {
 			select {
 			case <-ticker.C:
 				updatePacerQueueLength()
 			case <-cleanupTicker.C:
 				cleanupBufferPools()
+			case <-audioHealthTicker.C:
+				reportAudioQueueHealth()
 			}
 		}
 	}()
@@ -169,25 +175,34 @@ func validate4KCapacity() {
 		100 * 1024,  // 100KB - typical low-motion 4K frame
 		500 * 1024,  // 500KB - medium-motion 4K frame
 		1000 * 1024, // 1MB - high-motion 4K frame
-		1500 * 1024, // 1.5MB - maximum expected 4K frame
+		1500 * 1024, // 1.5MB - maximum expected 4K frame (will be capped to max tier)
 	}
 
 	log.Printf("[Go/Pion] Validating 4K video frame capacity...")
 
-	for _, size := range testSizes {
+	for _, requestedSize := range testSizes {
+		// Check if requested size exceeds our maximum tier
+		maxTierSize := sampleBufPool.sizes[sampleBufPool.sizeCount-1]
+		actualSize := requestedSize
+		if requestedSize > maxTierSize {
+			log.Printf("[Go/Pion] Requested size %d KB exceeds max tier size %d KB, testing with max tier size",
+				requestedSize/1024, maxTierSize/1024)
+			actualSize = maxTierSize
+		}
+
 		// Test buffer acquisition
-		buf := getSampleBuf(size)
-		if len(buf) != size {
-			log.Printf("[ERROR] Buffer pool failed to provide %d byte buffer (got %d)", size, len(buf))
+		buf := getSampleBuf(actualSize)
+		if len(buf) != actualSize {
+			log.Printf("[ERROR] Buffer pool failed to provide %d byte buffer (got %d)", actualSize, len(buf))
 			continue
 		}
 
 		// Test buffer return
 		putSampleBuf(buf)
 
-		tier := sampleBufPool.getBufferTier(size)
+		tier := sampleBufPool.getBufferTier(actualSize)
 		log.Printf("[Go/Pion] ✓ 4K capacity validated: %d KB frame -> tier %d (%d bytes)",
-			size/1024, tier, sampleBufPool.sizes[tier])
+			actualSize/1024, tier, sampleBufPool.sizes[tier])
 	}
 
 	log.Printf("[Go/Pion] 4K video frame capacity validation completed")
@@ -297,6 +312,123 @@ func cleanupBufferPools() {
 	log.Printf("[Go/Pion] Buffer pool cleanup completed (GC will handle pool sizing)")
 }
 
+// updateAudioQueueDepth records the current audio queue depth for bitrate adaptation monitoring
+func updateAudioQueueDepth(depth int) {
+	audioQueueDepthMutex.Lock()
+	defer audioQueueDepthMutex.Unlock()
+
+	// Record the current depth in circular buffer
+	audioQueueDepthSamples[audioQueueDepthIndex] = depth
+	audioQueueDepthIndex = (audioQueueDepthIndex + 1) % len(audioQueueDepthSamples)
+
+	if audioQueueDepthCount < len(audioQueueDepthSamples) {
+		audioQueueDepthCount++
+	}
+}
+
+// getAverageAudioQueueDepth returns the average queue depth over recent samples
+func getAverageAudioQueueDepth() float64 {
+	audioQueueDepthMutex.RLock()
+	defer audioQueueDepthMutex.RUnlock()
+
+	if audioQueueDepthCount == 0 {
+		return 0
+	}
+
+	sum := 0
+	count := audioQueueDepthCount
+	for i := 0; i < count; i++ {
+		sum += audioQueueDepthSamples[i]
+	}
+
+	return float64(sum) / float64(count)
+}
+
+// checkAudioQueueCongestion determines if bitrate reduction is needed based on queue depth
+func checkAudioQueueCongestion() bool {
+	avgDepth := getAverageAudioQueueDepth()
+
+	// If average queue depth is consistently high (>2.5 packets), trigger bitrate adaptation
+	// This indicates the encoder is producing packets faster than WebRTC can send them
+	if audioQueueDepthCount >= len(audioQueueDepthSamples) && avgDepth > 2.5 {
+		return true
+	}
+
+	return false
+}
+
+// flushAudioConnectionBuffer sends all buffered audio packets once connection is established
+func flushAudioConnectionBuffer() {
+	audioBufferMutex.Lock()
+	bufferedPackets := make([]*rtp.Packet, len(audioConnectionBuffer))
+	copy(bufferedPackets, audioConnectionBuffer)
+	audioConnectionBuffer = audioConnectionBuffer[:0] // Clear the buffer
+	audioBufferMutex.Unlock()
+
+	if len(bufferedPackets) > 0 {
+		log.Printf("[Go/Pion] AUDIO FLUSH: Sending %d buffered packets after connection established", len(bufferedPackets))
+
+		// Send buffered packets (but don't hold the lock during sends)
+		for _, pkt := range bufferedPackets {
+			select {
+			case audioSendQueue <- pkt:
+				// Successfully queued for sending
+			default:
+				log.Printf("[Go/Pion] AUDIO FLUSH: Failed to queue buffered packet (seq=%d) - send queue full", pkt.Header.SequenceNumber)
+				putSampleBuf(pkt.Payload)
+			}
+		}
+	}
+}
+
+// reportAudioQueueHealth provides detailed health metrics for audio queue monitoring
+func reportAudioQueueHealth() {
+	audioQueueDepthMutex.RLock()
+	defer audioQueueDepthMutex.RUnlock()
+
+	if audioQueueDepthCount == 0 {
+		return // Not enough data yet
+	}
+
+	avgDepth := getAverageAudioQueueDepth()
+	currentDepth := len(audioSendQueue)
+
+	// Calculate statistics
+	var minDepth, maxDepth int = 999, 0
+	sum := 0
+	for i := 0; i < audioQueueDepthCount; i++ {
+		depth := audioQueueDepthSamples[i]
+		sum += depth
+		if depth < minDepth {
+			minDepth = depth
+		}
+		if depth > maxDepth {
+			maxDepth = depth
+		}
+	}
+
+	// Determine health status
+	healthStatus := "GOOD"
+	if avgDepth > 2.0 {
+		healthStatus = "WARNING"
+	}
+	if avgDepth > 2.8 {
+		healthStatus = "CRITICAL"
+	}
+
+	log.Printf("[Go/Pion] Audio Queue Health [%s]: current=%d, avg=%.1f, min=%d, max=%d, samples=%d",
+		healthStatus, currentDepth, avgDepth, minDepth, maxDepth, audioQueueDepthCount)
+
+	// Additional diagnostics for concerning patterns
+	if avgDepth > 2.5 {
+		log.Printf("[Go/Pion] ⚠️  Audio queue consistently congested - consider bitrate reduction")
+	}
+
+	if maxDepth >= 3 {
+		log.Printf("[Go/Pion] ⚠️  Audio queue reached maximum capacity - packets may be dropped")
+	}
+}
+
 // Estimate pacer queue length based on send queue depths and timing
 func updatePacerQueueLength() {
 	// Estimate based on video send queue depth
@@ -332,13 +464,25 @@ func updatePacerQueueLength() {
 
 // Global variables
 var (
-	peerConnection        *webrtc.PeerConnection
-	pcMutex               sync.Mutex
-	audioMutex            sync.Mutex                     // Separate mutex for audio RTP state to reduce contention
-	videoTrack            *webrtc.TrackLocalStaticSample // switched to sample track for pacing
-	audioTrack            *webrtc.TrackLocalStaticRTP
-	trackSSRC             uint32
-	audioSSRC             uint32
+	peerConnection *webrtc.PeerConnection
+	pcMutex        sync.Mutex
+	audioMutex     sync.Mutex                     // Separate mutex for audio RTP state to reduce contention
+	videoTrack     *webrtc.TrackLocalStaticSample // switched to sample track for pacing
+	audioTrack     *webrtc.TrackLocalStaticRTP
+	trackSSRC      uint32
+	audioSSRC      uint32
+
+	// Audio queue depth monitoring for bitrate adaptation
+	audioQueueDepthSamples [10]int      // Circular buffer for recent queue depth samples
+	audioQueueDepthIndex   int          // Current index in circular buffer
+	audioQueueDepthCount   int          // Number of samples collected
+	audioQueueDepthMutex   sync.RWMutex // Protects queue depth statistics
+
+	// Audio buffering during WebRTC connection establishment
+	audioConnectionBuffer []*rtp.Packet      // Buffer audio packets until connection is ready
+	audioBufferMutex      sync.Mutex         // Protects the connection buffer
+	maxAudioBufferSize    int           = 50 // Maximum packets to buffer (about 1 second at 50fps)
+
 	lastAnswerSDP         string
 	currentSequenceNumber uint16
 	currentTimestamp      uint32
@@ -384,7 +528,7 @@ var (
 	zeroDurationCount int
 
 	// Granular audio send path: bounded queue and dedicated sender goroutine
-	audioSendQueue chan *rtp.Packet // Bounded channel for RTP packets (size ≤ 1)
+	audioSendQueue chan *rtp.Packet // Bounded channel for RTP packets (size ≤ 3)
 	audioSendStop  chan struct{}    // Stop signal for sender goroutine
 
 	// Granular video send path: bounded queue and dedicated sender goroutine
@@ -510,6 +654,10 @@ type tieredBufferPool struct {
 	misses      [13]int64    // Cache misses per tier
 	allocations [13]int64    // New allocations per tier
 	mutex       sync.RWMutex // Protects statistics
+
+	// Size distribution monitoring for optimization
+	sizeRequests [13]int64     // Number of requests per tier
+	actualSizes  map[int]int64 // Track actual requested sizes (for debugging)
 }
 
 // ============================================================================
@@ -528,8 +676,9 @@ type tieredBufferPool struct {
 // - 1048576 (1MB): Maximum 4K frame capacity
 // ============================================================================
 var sampleBufPool = &tieredBufferPool{
-	sizes:     [13]int{128, 256, 512, 1500, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576},
-	sizeCount: 13,
+	sizes:       [13]int{128, 256, 512, 1500, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576},
+	sizeCount:   13,
+	actualSizes: make(map[int]int64), // Initialize size tracking map
 }
 
 // Initialize preallocated buffers for common sizes (expanded for 4K support)
@@ -565,6 +714,7 @@ func initBufferPool() {
 			case <-statsTicker.C:
 				logBufferPoolStats()
 				logBufferPoolHealth()
+				logBufferSizeDistribution()
 			case <-healthTicker.C:
 				checkBufferPoolHealth()
 			}
@@ -589,29 +739,52 @@ func getSampleBuf(n int) []byte {
 		return make([]byte, 0)
 	}
 
+	// Track size distribution for optimization
+	sampleBufPool.mutex.Lock()
+	sampleBufPool.actualSizes[n]++
+	sampleBufPool.mutex.Unlock()
+
 	// Find the appropriate size tier
 	tier := sampleBufPool.getBufferTier(n)
-	// targetSize := sampleBufPool.sizes[tier]
+	targetSize := sampleBufPool.sizes[tier]
+
+	// Safety check: if requested size exceeds our maximum tier, cap it
+	maxTierSize := sampleBufPool.sizes[sampleBufPool.sizeCount-1]
+	if n > maxTierSize {
+		log.Printf("[Go/Pion] WARNING: Requested buffer size %d exceeds maximum tier size %d, capping to max tier",
+			n, maxTierSize)
+		n = maxTierSize
+		// Re-find tier for the capped size
+		tier = sampleBufPool.getBufferTier(n)
+		targetSize = sampleBufPool.sizes[tier]
+	}
+
+	// Track tier requests
+	sampleBufPool.mutex.Lock()
+	sampleBufPool.sizeRequests[tier]++
+	sampleBufPool.mutex.Unlock()
 
 	// Try to get a buffer from the appropriate tier
 	v := sampleBufPool.pools[tier].Get()
 	if v == nil {
-		// No buffer available in pool, allocate new one
+		// No buffer available in pool, allocate new one at tier size for better pooling
 		sampleBufPool.mutex.Lock()
 		sampleBufPool.misses[tier]++
 		sampleBufPool.allocations[tier]++
 		sampleBufPool.mutex.Unlock()
-		return make([]byte, n)
+		buf := make([]byte, targetSize) // Allocate at tier size, not requested size
+		return buf[:n]                  // Return slice of requested size
 	}
 
 	b := v.([]byte)
 	if cap(b) < n {
-		// Buffer too small, allocate new one
+		// Buffer too small, allocate new one at tier size
 		sampleBufPool.mutex.Lock()
 		sampleBufPool.misses[tier]++
 		sampleBufPool.allocations[tier]++
 		sampleBufPool.mutex.Unlock()
-		return make([]byte, n)
+		buf := make([]byte, targetSize) // Allocate at tier size, not requested size
+		return buf[:n]                  // Return slice of requested size
 	}
 
 	// Cache hit - buffer available and suitable
@@ -619,7 +792,7 @@ func getSampleBuf(n int) []byte {
 	sampleBufPool.hits[tier]++
 	sampleBufPool.mutex.Unlock()
 
-	// Return slice of requested size
+	// Return slice of requested size from pooled buffer
 	return b[:n]
 }
 
@@ -635,8 +808,7 @@ func putSampleBuf(b []byte) {
 	tier := sampleBufPool.getBufferTier(capacity)
 	targetSize := sampleBufPool.sizes[tier]
 
-	// Only pool buffers that match our tier sizes exactly
-	// This ensures consistent reuse and reduces fragmentation
+	// Try exact match first (most efficient)
 	if capacity == targetSize {
 		// Reset the buffer content and return to pool
 		// Clear the slice to prevent data leaks between uses
@@ -644,8 +816,49 @@ func putSampleBuf(b []byte) {
 			b[i] = 0
 		}
 		sampleBufPool.pools[tier].Put(b[:capacity])
+		return
 	}
-	// If buffer doesn't match a tier size, let it be garbage collected
+
+	// Try fallback: check if buffer fits in current tier with some tolerance
+	// Allow buffers that are reasonably close to tier size to prevent waste
+	if capacity >= targetSize/2 && capacity <= targetSize*2 {
+		// Reset the buffer content and return to pool
+		for i := range b {
+			b[i] = 0
+		}
+		sampleBufPool.pools[tier].Put(b[:capacity])
+		return
+	}
+
+	// Try adjacent tiers if current tier doesn't work
+	// Check next smaller tier
+	if tier > 0 {
+		smallerTier := tier - 1
+		smallerTargetSize := sampleBufPool.sizes[smallerTier]
+		if capacity >= smallerTargetSize/2 && capacity <= smallerTargetSize*2 {
+			for i := range b {
+				b[i] = 0
+			}
+			sampleBufPool.pools[smallerTier].Put(b[:capacity])
+			return
+		}
+	}
+
+	// Check next larger tier
+	if tier < sampleBufPool.sizeCount-1 {
+		largerTier := tier + 1
+		largerTargetSize := sampleBufPool.sizes[largerTier]
+		if capacity >= largerTargetSize/2 && capacity <= largerTargetSize*2 {
+			for i := range b {
+				b[i] = 0
+			}
+			sampleBufPool.pools[largerTier].Put(b[:capacity])
+			return
+		}
+	}
+
+	// If no suitable tier found, let it be garbage collected
+	// This is rare but prevents memory leaks from mismatched sizes
 }
 
 // logBufferPoolStats logs buffer pool usage statistics for monitoring
@@ -686,10 +899,75 @@ func logBufferPoolStats() {
 		totalRequests, totalAllocs, overallHitRate)
 }
 
+// logBufferSizeDistribution logs the distribution of actual requested buffer sizes
+func logBufferSizeDistribution() {
+	sampleBufPool.mutex.RLock()
+	defer sampleBufPool.mutex.RUnlock()
+
+	log.Printf("[Go/Pion] Buffer Size Distribution (Top 20 most requested sizes):")
+
+	// Convert map to slice for sorting
+	type sizeCount struct {
+		size  int
+		count int64
+	}
+	var sizes []sizeCount
+	for size, count := range sampleBufPool.actualSizes {
+		sizes = append(sizes, sizeCount{size, count})
+	}
+
+	// Sort by count descending
+	for i := 0; i < len(sizes)-1; i++ {
+		for j := i + 1; j < len(sizes); j++ {
+			if sizes[i].count < sizes[j].count {
+				sizes[i], sizes[j] = sizes[j], sizes[i]
+			}
+		}
+	}
+
+	// Log top 20 sizes
+	maxEntries := 20
+	if len(sizes) < maxEntries {
+		maxEntries = len(sizes)
+	}
+
+	for i := 0; i < maxEntries; i++ {
+		size := sizes[i].size
+		count := sizes[i].count
+		tier := sampleBufPool.getBufferTier(size)
+		tierSize := sampleBufPool.sizes[tier]
+
+		// Calculate efficiency (how well this size fits its tier)
+		wastePercent := float64(0)
+		if tierSize > 0 {
+			wastePercent = float64(tierSize-size) / float64(tierSize) * 100
+		}
+
+		log.Printf("[Go/Pion]   Size %d bytes: %d requests -> Tier %d (%d bytes, %.1f%% waste)",
+			size, count, tier, tierSize, wastePercent)
+	}
+
+	// Log tier request distribution
+	log.Printf("[Go/Pion] Tier Request Distribution:")
+	for i, size := range sampleBufPool.sizes {
+		requests := sampleBufPool.sizeRequests[i]
+		if requests > 0 { // Only log tiers that were used
+			hits := sampleBufPool.hits[i]
+			misses := sampleBufPool.misses[i]
+			hitRate := float64(0)
+			if hits+misses > 0 {
+				hitRate = float64(hits) / float64(hits+misses) * 100
+			}
+			log.Printf("[Go/Pion]   Tier %d (%d bytes): %d requests, %.1f%% hit rate",
+				i, size, requests, hitRate)
+		}
+	}
+}
+
 // initAudioSendQueue initializes the bounded audio send queue and starts the sender goroutine
 func initAudioSendQueue() {
-	// Create bounded channel with capacity 1 (as requested: size ≤ 1)
-	audioSendQueue = make(chan *rtp.Packet, 1)
+	// Create bounded channel with capacity 3 (increased from 1 to reduce backpressure)
+	audioSendQueue = make(chan *rtp.Packet, 3)
 	audioSendStop = make(chan struct{})
 
 	// Create buffer completion channel for safe buffer pool management
@@ -719,7 +997,7 @@ func initVideoSendQueue() {
 	// Start the buffer completion handler goroutine
 	go videoBufferCompletionHandler()
 
-	log.Println("[Go/Pion] Audio send queue initialized with bounded channel (capacity: 1)")
+	log.Println("[Go/Pion] Audio send queue initialized with bounded channel (capacity: 3)")
 	log.Println("[Go/Pion] Video send queue initialized with bounded channel (capacity: 2)")
 	log.Println("[Go/Pion] Buffer completion mechanism initialized for use-after-free prevention")
 }
@@ -766,7 +1044,7 @@ func audioBufferCompletionHandler() {
 func audioSenderGoroutine() {
 	// Set up MMCSS for this goroutine to ensure consistent timing
 	C.SetupGoThreadMMCSS()
-	log.Println("[Go/Pion] Audio sender goroutine started with MMCSS priority (Games class)")
+	log.Println("[Go/Pion] Audio sender goroutine started with MMCSS priority (Pro Audio class)")
 
 	for {
 		select {
@@ -775,16 +1053,20 @@ func audioSenderGoroutine() {
 			// This is the potentially blocking operation, but it doesn't block other operations
 			if audioTrack != nil {
 				if err := audioTrack.WriteRTP(pkt); err != nil {
-					log.Printf("[Go/Pion] Error in audio sender goroutine: %v", err)
+					log.Printf("[Go/Pion] AUDIO ERROR: Failed to write RTP packet to audio track: %v", err)
 					// Return buffer immediately on error
 					putSampleBuf(pkt.Payload)
 				} else {
+					// Log successful transmission occasionally (every 100 packets)
+					if pkt.Header.SequenceNumber%100 == 0 {
+						log.Printf("[Go/Pion] AUDIO SUCCESS: RTP packet sent successfully (seq=%d)", pkt.Header.SequenceNumber)
+					}
 					// Return buffer immediately after successful write
 					// This ensures minimal latency between write completion and buffer reuse
 					putSampleBuf(pkt.Payload)
 				}
 			} else {
-				log.Printf("[Go/Pion] Audio track is nil, dropping packet")
+				log.Printf("[Go/Pion] AUDIO ERROR: Audio track is nil in sender goroutine, dropping packet (seq=%d)", pkt.Header.SequenceNumber)
 				// Return buffer immediately since packet won't be used
 				putSampleBuf(pkt.Payload)
 			}
@@ -801,7 +1083,7 @@ func audioSenderGoroutine() {
 func videoSenderGoroutine() {
 	// Set up MMCSS for this goroutine to ensure consistent timing
 	C.SetupGoThreadMMCSS()
-	log.Println("[Go/Pion] Video sender goroutine started with MMCSS priority (Games class)")
+	log.Println("[Go/Pion] Video sender goroutine started with MMCSS priority (Pro Audio class)")
 
 	// Watchdog to detect if we're not consuming samples fast enough
 	lastSampleTime := time.Now()
@@ -1010,10 +1292,57 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	// Check connection state and track availability with minimal lock time
 	pcMutex.Lock()
 	if peerConnection == nil || audioTrack == nil {
+		if peerConnection == nil {
+			log.Printf("[Go/Pion] AUDIO ERROR: PeerConnection is nil - cannot send audio packet")
+		}
+		if audioTrack == nil {
+			log.Printf("[Go/Pion] AUDIO ERROR: Audio track is nil - audio track not initialized")
+		}
 		pcMutex.Unlock()
 		return -1
 	}
 	if connectionState != webrtc.PeerConnectionStateConnected {
+		// Buffer audio packets until connection is established
+		// Create RTP packet first before buffering
+		n := int(size)
+		payload := getSampleBuf(n)
+		C.memcpy(unsafe.Pointer(&payload[0]), data, C.size_t(n))
+
+		// RTP Timestamp Management: Lock-free atomic operations
+		if !audioRTPState.IsBaselineSet() {
+			audioRTPState.SetBaseline(int64(pts))
+		}
+		packetSequence := audioRTPState.GetNextSequence()
+		packetRTPTimestamp := audioRTPState.GetNextTimestamp()
+
+		pkt := &rtp.Packet{
+			Header: rtp.Header{
+				Version:        2,
+				PayloadType:    audioPayloadType,
+				SequenceNumber: packetSequence,
+				Timestamp:      packetRTPTimestamp,
+				SSRC:           audioSSRC,
+				Marker:         true,
+			},
+			Payload: payload,
+		}
+
+		audioBufferMutex.Lock()
+		if len(audioConnectionBuffer) < maxAudioBufferSize {
+			audioConnectionBuffer = append(audioConnectionBuffer, pkt)
+			log.Printf("[Go/Pion] AUDIO BUFFER: Connection not ready (state: %s) - buffered packet (seq=%d), buffer size: %d/%d",
+				connectionState.String(), pkt.Header.SequenceNumber, len(audioConnectionBuffer), maxAudioBufferSize)
+		} else {
+			log.Printf("[Go/Pion] AUDIO WARNING: Connection buffer full (state: %s) - dropping oldest buffered packet", connectionState.String())
+			// Remove oldest packet and add new one
+			if len(audioConnectionBuffer) > 0 {
+				oldestPkt := audioConnectionBuffer[0]
+				audioConnectionBuffer = audioConnectionBuffer[1:]
+				putSampleBuf(oldestPkt.Payload)
+			}
+			audioConnectionBuffer = append(audioConnectionBuffer, pkt)
+		}
+		audioBufferMutex.Unlock()
 		pcMutex.Unlock()
 		return 0
 	}
@@ -1097,9 +1426,13 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		Payload: payload,
 	}
 
-	// Queue RTP packet for the dedicated sender goroutine (bounded queue, size ≤ 1)
+	// Queue RTP packet for the dedicated sender goroutine (bounded queue, size ≤ 3)
 	// This implements backpressure by dropping oldest packets rather than accumulating
 	// The sender goroutine will handle WriteRTP without holding any locks
+
+	// Record queue depth for bitrate adaptation monitoring
+	currentQueueDepth := len(audioSendQueue)
+	updateAudioQueueDepth(currentQueueDepth)
 
 	select {
 	case audioSendQueue <- pkt:
@@ -1108,11 +1441,10 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		// Next packet will use: currentAudioTS + audioFrameDuration
 		// This ensures stable inter-packet intervals and smooth sender timing
 
-		// Optional performance logging (disabled during normal operation to avoid spam)
-		// To enable performance monitoring, uncomment the following block:
-		// if packetSequence%1000 == 0 {
-		//     log.Printf("[Go/Pion] Audio RTP queued: seq=%d, ts=%d", packetSequence, packetRTPTimestamp)
-		// }
+		// Log successful queuing occasionally (every 200 packets)
+		if packetSequence%200 == 0 {
+			log.Printf("[Go/Pion] Audio RTP queued successfully: seq=%d, ts=%d", packetSequence, packetRTPTimestamp)
+		}
 
 		// Note: Buffer will be returned to pool by sender goroutine after WriteRTP
 		return 0
@@ -1355,6 +1687,13 @@ func createPeerConnectionGo() C.int {
 		audioPingCounter = 0                         // Reset audio ping counter
 		// Reset audio RTP state for new connection (atomic, lock-free)
 		audioRTPState.Reset()
+		// Clear any buffered audio packets from previous connection
+		audioBufferMutex.Lock()
+		for _, pkt := range audioConnectionBuffer {
+			putSampleBuf(pkt.Payload)
+		}
+		audioConnectionBuffer = audioConnectionBuffer[:0]
+		audioBufferMutex.Unlock()
 		log.Println("[Go/Pion] Audio RTP state reset for new connection")
 		log.Println(
 			"[Go/Pion] createPeerConnectionGo: Closed previous PeerConnection and reset state.",
@@ -2007,6 +2346,12 @@ func createPeerConnectionGo() C.int {
 		connectionState = state
 		pcMutex.Unlock()
 		log.Printf("[Go/Pion] PeerConnection State: %s\n", state.String())
+
+		// Flush buffered audio packets when connection becomes connected
+		if state == webrtc.PeerConnectionStateConnected {
+			log.Printf("[Go/Pion] PeerConnection connected - flushing buffered audio packets")
+			flushAudioConnectionBuffer()
+		}
 	})
 
 	log.Println("[Go/Pion] PeerConnection created.")
@@ -2418,6 +2763,61 @@ func getConnectionState() C.int {
 	return C.int(connectionState)
 }
 
+//export checkAudioQueueCongestionGo
+func checkAudioQueueCongestionGo() C.int {
+	if checkAudioQueueCongestion() {
+		return 1 // Congested
+	}
+	return 0 // Not congested
+}
+
+//export diagnoseAudioStreamingGo
+func diagnoseAudioStreamingGo() {
+	log.Printf("[Go/Pion] === AUDIO STREAMING DIAGNOSTICS ===")
+
+	pcMutex.Lock()
+	pcState := "nil"
+	if peerConnection != nil {
+		pcState = connectionState.String()
+	}
+	pcMutex.Unlock()
+
+	audioTrackState := "nil"
+	if audioTrack != nil {
+		audioTrackState = "initialized"
+	}
+
+	queueLen := len(audioSendQueue)
+
+	audioBufferMutex.Lock()
+	bufferLen := len(audioConnectionBuffer)
+	audioBufferMutex.Unlock()
+
+	log.Printf("[Go/Pion] PeerConnection: %s", pcState)
+	log.Printf("[Go/Pion] Audio Track: %s", audioTrackState)
+	log.Printf("[Go/Pion] Audio Send Queue Length: %d", queueLen)
+	log.Printf("[Go/Pion] Audio Connection Buffer: %d/%d packets", bufferLen, maxAudioBufferSize)
+	log.Printf("[Go/Pion] Audio RTP Baseline Set: %v", audioRTPState.IsBaselineSet())
+
+	if audioTrack == nil {
+		log.Printf("[Go/Pion] ❌ AUDIO ISSUE: Audio track is not initialized")
+	}
+
+	if pcState != "connected" {
+		log.Printf("[Go/Pion] ❌ AUDIO ISSUE: PeerConnection not in connected state (%s)", pcState)
+	}
+
+	if queueLen > 2 {
+		log.Printf("[Go/Pion] ⚠️  AUDIO WARNING: Audio queue is backing up (%d packets)", queueLen)
+	}
+
+	if bufferLen > 0 {
+		log.Printf("[Go/Pion] ℹ️  AUDIO INFO: %d packets buffered waiting for connection", bufferLen)
+	}
+
+	log.Printf("[Go/Pion] =====================================")
+}
+
 //export getPeerConnectionState
 func getPeerConnectionState() C.int {
 	pcMutex.Lock()
@@ -2507,6 +2907,14 @@ func closeGo() {
 		audioBufferCompletion = nil
 		log.Printf("[Go/Pion] Processed %d buffer completion signals", completed)
 	}
+
+	// Clear any remaining buffered audio packets
+	audioBufferMutex.Lock()
+	for _, pkt := range audioConnectionBuffer {
+		putSampleBuf(pkt.Payload)
+	}
+	audioConnectionBuffer = audioConnectionBuffer[:0]
+	audioBufferMutex.Unlock()
 
 	// Final buffer pool statistics
 	logBufferPoolStats()

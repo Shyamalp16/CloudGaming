@@ -329,14 +329,47 @@ bool AudioCapturer::StartCapture(DWORD processId)
 
     // Start the queue processor thread for async audio packet processing
     StartQueueProcessor();
-    
+
     m_captureThread = std::thread(&AudioCapturer::CaptureThread, this, processId);
+
+    // Run audio streaming diagnostics after a short delay to allow WebRTC connection to establish
+    std::wcout << L"[AudioCapturer] Scheduling audio streaming diagnostics..." << std::endl;
+    std::thread([this]() {
+        std::this_thread::sleep_for(std::chrono::seconds(2)); // Wait 2 seconds for connection
+        if (!m_stopCapture) {
+            std::wcout << L"[AudioCapturer] Running audio streaming diagnostics..." << std::endl;
+            diagnoseAudioStreamingGo();
+        }
+    }).detach();
+
+    // Start periodic audio streaming health check
+    m_audioHealthCheckThread = std::thread([this]() {
+        std::wcout << L"[AudioCapturer] Audio health check thread started" << std::endl;
+        while (!m_stopCapture) {
+            std::this_thread::sleep_for(std::chrono::minutes(1)); // Check every minute
+            if (!m_stopCapture) {
+                std::wcout << L"[AudioCapturer] Periodic audio streaming health check:" << std::endl;
+                diagnoseAudioStreamingGo();
+            }
+        }
+        std::wcout << L"[AudioCapturer] Audio health check thread stopped" << std::endl;
+    });
+
     return true;
 }
 
 void AudioCapturer::StopCapture()
 {
     m_stopCapture = true;
+
+    // Stop audio health check thread
+    if (m_audioHealthCheckThread.joinable()) {
+        try {
+            m_audioHealthCheckThread.join();
+        } catch (const std::system_error& e) {
+            std::wcerr << L"[AudioCapturer] Error joining audio health check thread: " << e.what() << std::endl;
+        }
+    }
 
     // Signal the stop event to wake up the capture thread immediately
     if (m_hStopEvent) {
@@ -807,7 +840,7 @@ void AudioCapturer::StartEncoderThread()
             }
 
             // Set thread priority for real-time audio processing
-            AUDIO_SET_THREAD_PRIORITY_HIGH();
+            AUDIO_SET_THREAD_PRIORITY_TIME_CRITICAL();
             EncoderThread();
         });
         AUDIO_LOG_INFO(L"[AudioEncoder] Started with thread affinity mask: 0x" << std::hex
@@ -831,7 +864,7 @@ void AudioCapturer::StartEncoderThread()
             }
 
             // Set thread priority for real-time audio processing
-            AUDIO_SET_THREAD_PRIORITY_HIGH();
+            AUDIO_SET_THREAD_PRIORITY_TIME_CRITICAL();
             EncoderThread();
         });
         AUDIO_LOG_INFO(L"[AudioEncoder] Started with MMCSS (no thread affinity)");
@@ -955,6 +988,12 @@ void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
             AUDIO_LOG_DEBUG(L"[AudioEncoder] Failed to queue encoded packet - WebRTC congestion detected");
             // Don't retry immediately - let WebRTC congestion control work
             // The encoder thread will continue processing new frames
+        } else {
+            // Log successful encoding/queuing occasionally (every 50 frames)
+            static int encodeCount = 0;
+            if (++encodeCount % 50 == 0) {
+                AUDIO_LOG_INFO(L"[AudioEncoder] Audio pipeline active: " << encodeCount << " packets encoded and queued successfully");
+            }
         }
     } else {
         AUDIO_LOG_ERROR(L"[AudioEncoder] Failed to encode audio frame");
@@ -3675,6 +3714,13 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
     auto now = std::chrono::steady_clock::now();
     auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastAudioChange).count();
 
+    // Check for audio queue congestion (complements packet loss detection)
+    bool queueCongested = false;
+    if (s_activeInstance != nullptr) {
+        // Call Go function to check queue congestion
+        queueCongested = (checkAudioQueueCongestionGo() != 0);
+    }
+
     // Determine if FEC should be enabled/disabled based on packet loss
     bool shouldEnableFec = (packetLoss >= s_fecEnableThreshold);
     bool shouldDisableFec = (packetLoss <= s_fecDisableThreshold);
@@ -3706,8 +3752,8 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
         std::wcout << L"[AudioAdapt] Disabling Opus FEC (loss: " << (packetLoss * 100.0) << L"%)" << std::endl;
     }
 
-    // High packet loss: Decrease bitrate aggressively
-    if (packetLoss >= s_highLossThreshold) {
+    // High packet loss OR queue congestion: Decrease bitrate aggressively
+    if (packetLoss >= s_highLossThreshold || queueCongested) {
         if (since >= s_decreaseCooldownMs) {
             // More aggressive decrease for high loss
             double factor = (packetLoss >= 0.10) ? 0.5 : 0.7;
@@ -3723,7 +3769,8 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
             UpdateOpusParameters(newBitrate, newLossPerc, newComplexity, 1); // Force FEC on
 
             std::wcout << L"[AudioAdapt] High loss detected (" << (packetLoss * 100.0)
-                      << L"%), decreased bitrate to " << newBitrate << L" bps" << std::endl;
+                      << L"%)" << (queueCongested ? L" + queue congested" : L"")
+                      << L", decreased bitrate to " << newBitrate << L" bps" << std::endl;
         }
         s_cleanSamples = 0;
         return;
