@@ -468,6 +468,7 @@
 
       <div class="game-controls">
         <button class="control-btn" id="debugBtn" onclick="toggleDebug()" title="Toggle Debug">🐛</button>
+        <button class="control-btn" id="audioBtn" onclick="checkAudioStatus()" title="Check Audio Status">🔊</button>
         <button class="control-btn" id="perfBtn" onclick="togglePerf()" title="Toggle Performance">📊</button>
         <button class="control-btn" id="fullscreenBtn" onclick="toggleFullscreen()" title="Fullscreen">⛶</button>
       </div>
@@ -630,8 +631,37 @@
     function togglePerf() {
       perfVisible = !perfVisible;
       document.getElementById('perfOverlay').style.display = perfVisible ? 'block' : 'none';
-      document.getElementById('perfBtn').style.background = perfVisible ? 
+      document.getElementById('perfBtn').style.background = perfVisible ?
         'rgba(0, 255, 136, 0.3)' : 'rgba(0, 0, 0, 0.8)';
+    }
+
+    function checkAudioStatus() {
+      const video = document.getElementById('hiddenVideo');
+      log('=== AUDIO STATUS CHECK ===');
+
+      if (video.srcObject) {
+        const audioTracks = video.srcObject.getAudioTracks();
+        log(`Audio tracks in stream: ${audioTracks.length}`);
+        audioTracks.forEach((track, index) => {
+          log(`Track ${index}: enabled=${track.enabled}, muted=${track.muted}, readyState=${track.readyState}`);
+        });
+      } else {
+        log('No media stream attached to video element');
+      }
+
+      log(`Video element - muted: ${video.muted}, volume: ${video.volume}, paused: ${video.paused}`);
+      log(`Video element - readyState: ${video.readyState}, networkState: ${video.networkState}`);
+
+      // Try to force audio playback
+      if (video.paused) {
+        video.play().then(() => {
+          log('Forced audio playback after status check');
+        }).catch(e => {
+          log(`Failed to force audio playback: ${e}`, 'error');
+        });
+      }
+
+      log('========================');
     }
 
     function updateConnectionStatus(status, text) {
@@ -970,6 +1000,11 @@
           }
         } else if (event.track.kind === 'audio') {
           log('Received audio track, attaching to video stream for playback');
+
+          // Ensure audio track is enabled
+          event.track.enabled = true;
+          log(`Audio track enabled: ${event.track.enabled}`);
+
           // Add audio track to the existing video stream, or create new stream if needed
           if (hiddenVideoElement.srcObject) {
             // Add audio track to existing stream
@@ -982,15 +1017,66 @@
             hiddenVideoElement.srcObject = audioStream;
             log('New audio-only stream created');
           }
+
+          // Ensure video element is not muted and volume is up
+          hiddenVideoElement.muted = false;
+          hiddenVideoElement.volume = 1.0;
+          log(`Audio settings - muted: ${hiddenVideoElement.muted}, volume: ${hiddenVideoElement.volume}`);
+
+          // Monitor audio levels to verify audio is working
+          let audioLevelCheck = setInterval(() => {
+            try {
+              if (hiddenVideoElement.srcObject) {
+                const audioTracks = hiddenVideoElement.srcObject.getAudioTracks();
+                if (audioTracks.length > 0) {
+                  const audioTrack = audioTracks[0];
+                  log(`Audio track status - enabled: ${audioTrack.enabled}, muted: ${audioTrack.muted}, readyState: ${audioTrack.readyState}`);
+                  // Check if we can get audio levels (some browsers support this)
+                  if (hiddenVideoElement.audioTracks && hiddenVideoElement.audioTracks.length > 0) {
+                    log(`Video element audio tracks: ${hiddenVideoElement.audioTracks.length}`);
+                  }
+                }
+              }
+            } catch (e) {
+              log(`Audio monitoring error: ${e.message}`, 'warn');
+            }
+          }, 5000); // Check every 5 seconds
+
           // Ensure audio plays (video element will handle both video and audio)
           if (hiddenVideoElement.paused) {
             hiddenVideoElement.play().then(() => {
               log('Audio playback started');
-              updateConnectionStatus('connected', 'Audio Connected');
+              updateConnectionStatus('connected', 'Streaming with Audio');
             }).catch(e => {
-              log(`Audio play failed: ${e}. User interaction might be required.`, 'error');
+              log(`Audio play failed: ${e}. This may be due to browser autoplay policy.`, 'error');
+              log('Try clicking anywhere on the page to enable audio playback.', 'warn');
+              updateConnectionStatus('connected', 'Click to Enable Audio');
+
+              // Add click handler to enable audio on user interaction
+              const enableAudio = () => {
+                hiddenVideoElement.play().then(() => {
+                  log('Audio enabled after user interaction');
+                  updateConnectionStatus('connected', 'Streaming with Audio');
+                  document.removeEventListener('click', enableAudio);
+                }).catch(e => {
+                  log(`Still failed to enable audio: ${e}`, 'error');
+                });
+              };
+              document.addEventListener('click', enableAudio, { once: true });
             });
+          } else {
+            // If already playing, ensure audio is working
+            log('Video already playing, audio should be active');
+            updateConnectionStatus('connected', 'Streaming with Audio');
           }
+
+          // Clean up monitoring after 30 seconds
+          setTimeout(() => {
+            if (audioLevelCheck) {
+              clearInterval(audioLevelCheck);
+              audioLevelCheck = null;
+            }
+          }, 30000);
         }
           // Auto-resize canvas to remote frame size on first frames
           hiddenVideoElement.onresize = () => {
