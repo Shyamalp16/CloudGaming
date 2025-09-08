@@ -236,6 +236,7 @@ private:
             double devicePeriodMs = 2.5;          // Preferred device period in milliseconds (2.5-5ms)
             double fallbackPeriodMs = 5.0;        // Fallback device period if preferred not available
             bool force48kHzStereo = true;          // Force 48kHz stereo format to avoid resampling
+            bool preferFloat = true;               // Prefer IEEE float capture to avoid PCM->float conversion
             bool preferLinearResampling = true;   // Prefer linear interpolation over DMO
             bool useDmoOnlyForHighQuality = false; // Only use DMO when exact quality required
         } wasapi;
@@ -257,6 +258,12 @@ private:
             bool ultraLowLatencyProfile = false;     // Enable ultra-low-latency Opus profile (5ms, moderate bitrate)
             bool disableFecInLowLatency = true;      // Disable FEC in low-latency mode unless needed
         } latency;
+
+        // Audio preprocessing controls
+        struct ProcessingConfig {
+            bool enableDCRemoval = false;           // Remove DC offset from each frame
+            bool enableAutoGain = false;            // Apply auto-gain if RMS is low
+        } processing;
     };
     static AudioConfig s_audioConfig;
 
@@ -298,8 +305,9 @@ private:
     };
 
     // Fixed-size buffer for encoded audio (avoid heap churn)
-    // Opus packets are typically <256 bytes at 64 kbps, so 512 bytes is sufficient
-    static constexpr size_t ENCODED_BUFFER_SIZE = 512; // Optimized for Opus packet sizes
+    // Safe upper bound per RFC 6716 is ~1275 bytes for 20ms at 48kHz per channel.
+    // Use 1500 bytes to provide headroom and prevent truncation across modes/bitrates.
+    static constexpr size_t ENCODED_BUFFER_SIZE = 1500; // Safe max Opus packet size
     std::array<uint8_t, ENCODED_BUFFER_SIZE> m_encodedBuffer;
 
     // Minimal queue for audio packets (effectively zero/one to let WebRTC handle congestion)

@@ -370,6 +370,9 @@ func flushAudioConnectionBuffer() {
 
 		// Send buffered packets (but don't hold the lock during sends)
 		for _, pkt := range bufferedPackets {
+			// Ensure buffered packets use the negotiated PayloadType and SSRC
+			pkt.Header.PayloadType = audioPayloadType
+			pkt.Header.SSRC = audioSSRC
 			select {
 			case audioSendQueue <- pkt:
 				// Successfully queued for sending
@@ -492,7 +495,7 @@ var (
 	audioRTPBaseline     uint32       // Initial RTP timestamp established from first PTS
 	audioPTSBaseline     int64        // Initial PTS value for reference
 	audioBaselineSet     bool         // Whether baseline has been established
-	audioFrameDuration   uint32 = 960 // RTP timestamp increment per frame (20ms at 48kHz)
+	audioFrameDuration   uint32 = 480 // RTP timestamp increment per frame (10ms at 48kHz)
 	videoFrameCounter    uint64
 	dataChannel          *webrtc.DataChannel
 	messageQueue         []string
@@ -505,7 +508,7 @@ var (
 	pingTimestampsMutex  sync.Mutex
 	connectionState      webrtc.PeerConnectionState
 	videoPayloadType     uint8 = 96
-	audioPayloadType     uint8 = 111
+	audioPayloadType     uint8 = 0
 
 	// Audio E2E latency measurement
 	audioPingCounter    uint64
@@ -2335,7 +2338,7 @@ func createPeerConnectionGo() C.int {
 			MimeType:    webrtc.MimeTypeOpus,
 			ClockRate:   48000,
 			Channels:    2,
-			SDPFmtpLine: "minptime=20;useinbandfec=1",
+			SDPFmtpLine: "minptime=10;stereo=1;useinbandfec=1",
 		},
 		"audio",
 		"game-audio",

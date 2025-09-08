@@ -999,75 +999,33 @@ void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
     }
     rmsLevel = sqrtf(rmsLevel / frame.samples.size());
 
-    // Always apply DC offset removal and normalization
-    // Calculate DC offset
+    // Optional DC removal and auto-gain (disabled by default)
     float dcOffset = 0.0f;
-    for (size_t i = 0; i < frame.samples.size(); ++i) {
-        dcOffset += frame.samples[i];
-    }
-    dcOffset /= frame.samples.size();
-
-    // Remove DC offset
-    for (size_t i = 0; i < frame.samples.size(); ++i) {
-        frame.samples[i] -= dcOffset;
-    }
-
-    // Recalculate RMS after DC removal
-    float rmsAfterDc = 0.0f;
-    for (size_t i = 0; i < frame.samples.size(); ++i) {
-        rmsAfterDc += frame.samples[i] * frame.samples[i];
-    }
-    rmsAfterDc = sqrtf(rmsAfterDc / frame.samples.size());
-
-    // If RMS is still low after DC removal, boost the audio
-    if (rmsAfterDc < 0.03f) {  // Even higher threshold
-        float boostFactor = (rmsAfterDc < 0.01f) ? 30.0f : 20.0f;  // 30x for very quiet, 20x for moderately quiet
+    float rmsAfterDc = rmsLevel;
+    if (s_audioConfig.processing.enableDCRemoval) {
         for (size_t i = 0; i < frame.samples.size(); ++i) {
-            frame.samples[i] *= boostFactor;
-            // Clamp to prevent clipping
-            if (frame.samples[i] > 1.0f) frame.samples[i] = 1.0f;
-            if (frame.samples[i] < -1.0f) frame.samples[i] = -1.0f;
+            dcOffset += frame.samples[i];
         }
-
-        // Recalculate RMS after boosting to verify
-        float boostedRms = 0.0f;
+        dcOffset /= frame.samples.size();
         for (size_t i = 0; i < frame.samples.size(); ++i) {
-            boostedRms += frame.samples[i] * frame.samples[i];
+            frame.samples[i] -= dcOffset;
         }
-        boostedRms = sqrtf(boostedRms / frame.samples.size());
-
-        // Log boost details
-        static auto lastAudioLog = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastAudioLog).count();
-
-        if (elapsed >= 5000) {
-            std::cout << "[AUDIO_DEBUG] Original RMS: " << rmsLevel << ", DC offset: " << dcOffset
-                      << ", RMS after DC: " << rmsAfterDc << ", Boosted by " << boostFactor << "x, final RMS: " << boostedRms << std::endl;
-            lastAudioLog = now;
+        rmsAfterDc = 0.0f;
+        for (size_t i = 0; i < frame.samples.size(); ++i) {
+            rmsAfterDc += frame.samples[i] * frame.samples[i];
         }
-    } else {
-        // Log normal levels
-        static auto lastAudioLog = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastAudioLog).count();
-
-        if (elapsed >= 5000) {
-            std::cout << "[AUDIO_DEBUG] Original RMS: " << rmsLevel << ", DC offset: " << dcOffset
-                      << ", RMS after DC: " << rmsAfterDc << " (no boost needed)" << std::endl;
-            lastAudioLog = now;
-        }
+        rmsAfterDc = sqrtf(rmsAfterDc / frame.samples.size());
     }
 
-    // Final safety: sanitize samples to ensure finite values and range [-1, 1]
-    for (size_t i = 0; i < frame.samples.size(); ++i) {
-        float s = frame.samples[i];
-        if (!std::isfinite(s)) {
-            frame.samples[i] = 0.0f;
-            continue;
+    if (s_audioConfig.processing.enableAutoGain) {
+        if (rmsAfterDc < 0.03f) {
+            float boostFactor = (rmsAfterDc < 0.01f) ? 30.0f : 20.0f;
+            for (size_t i = 0; i < frame.samples.size(); ++i) {
+                frame.samples[i] *= boostFactor;
+                if (frame.samples[i] > 1.0f) frame.samples[i] = 1.0f;
+                if (frame.samples[i] < -1.0f) frame.samples[i] = -1.0f;
+            }
         }
-        if (s > 1.0f) frame.samples[i] = 1.0f;
-        else if (s < -1.0f) frame.samples[i] = -1.0f;
     }
 
     if (shouldLog) {
@@ -2030,23 +1988,38 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     // Check if device already provides optimal format to avoid unnecessary conversions
                     bool isAlreadyOptimal = (pwfx->nSamplesPerSec == 48000 &&
                                            pwfx->nChannels == 2 &&
-                                           pwfx->wBitsPerSample == 16 &&
-                                           pwfx->wFormatTag == WAVE_FORMAT_PCM);
+                                           ((pwfx->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) ||
+                                            (pwfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE)));
 
                     if (isAlreadyOptimal) {
                         std::wcout << L"[AudioCapturer] Target process device already provides optimal 48kHz stereo PCM format - no conversion needed" << std::endl;
                         targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
                     } else {
-                        // Create a new format structure with 48kHz stereo
-                        static WAVEFORMATEX forcedFormat = {};
-                        forcedFormat.wFormatTag = WAVE_FORMAT_PCM;
-                        forcedFormat.nChannels = 2; // Force stereo
-                        forcedFormat.nSamplesPerSec = 48000; // Force 48kHz
-                        forcedFormat.nAvgBytesPerSec = 48000 * 2 * 2; // 48kHz * 2 channels * 2 bytes per sample (16-bit)
-                        forcedFormat.nBlockAlign = 2 * 2; // 2 channels * 2 bytes per sample
-                        forcedFormat.wBitsPerSample = 16;
-                        forcedFormat.cbSize = 0;
-                        targetFormat = &forcedFormat;
+                        // Create a new format structure with 48kHz stereo float if preferred
+                        static WAVEFORMATEXTENSIBLE forcedFloat = {};
+                        if (s_audioConfig.wasapi.preferFloat) {
+                            forcedFloat.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+                            forcedFloat.Format.nChannels = 2;
+                            forcedFloat.Format.nSamplesPerSec = 48000;
+                            forcedFloat.Format.wBitsPerSample = 32;
+                            forcedFloat.Format.nBlockAlign = (forcedFloat.Format.nChannels * forcedFloat.Format.wBitsPerSample) / 8;
+                            forcedFloat.Format.nAvgBytesPerSec = forcedFloat.Format.nSamplesPerSec * forcedFloat.Format.nBlockAlign;
+                            forcedFloat.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+                            forcedFloat.Samples.wValidBitsPerSample = 32;
+                            forcedFloat.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+                            forcedFloat.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+                            targetFormat = reinterpret_cast<WAVEFORMATEX*>(&forcedFloat);
+                        } else {
+                            static WAVEFORMATEX forcedPcm = {};
+                            forcedPcm.wFormatTag = WAVE_FORMAT_PCM;
+                            forcedPcm.nChannels = 2;
+                            forcedPcm.nSamplesPerSec = 48000;
+                            forcedPcm.wBitsPerSample = 16;
+                            forcedPcm.nBlockAlign = (forcedPcm.nChannels * forcedPcm.wBitsPerSample) / 8;
+                            forcedPcm.nAvgBytesPerSec = forcedPcm.nSamplesPerSec * forcedPcm.nBlockAlign;
+                            forcedPcm.cbSize = 0;
+                            targetFormat = &forcedPcm;
+                        }
                         std::wcout << L"[AudioCapturer] Forcing 48kHz stereo PCM format for target process optimal latency" << std::endl;
                     }
                 }
@@ -2095,17 +2068,15 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     }
                 }
 
-                // Use the actual format that was requested for capture path
+                // Update active format fields to match actual capture format
                 if (targetFormat) {
-                    pwfx = targetFormat;
-                    // Update active format fields to match actual capture format
-                    m_activeChannels = static_cast<uint16_t>(pwfx->nChannels);
-                    m_activeSampleRate = static_cast<uint32_t>(pwfx->nSamplesPerSec);
-                    m_activeBitsPerSample = pwfx->wBitsPerSample;
-                    if (pwfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-                        WAVEFORMATEXTENSIBLE* pEx = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(pwfx);
+                    m_activeChannels = static_cast<uint16_t>(targetFormat->nChannels);
+                    m_activeSampleRate = static_cast<uint32_t>(targetFormat->nSamplesPerSec);
+                    m_activeBitsPerSample = targetFormat->wBitsPerSample;
+                    if (targetFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+                        WAVEFORMATEXTENSIBLE* pEx = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(targetFormat);
                         m_activeWavAudioFormat = (pEx->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) ? 3 : 1;
-                    } else if (pwfx->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+                    } else if (targetFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
                         m_activeWavAudioFormat = 3;
                     } else {
                         m_activeWavAudioFormat = 1;
