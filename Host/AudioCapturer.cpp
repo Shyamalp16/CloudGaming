@@ -3060,7 +3060,14 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
         // Handle any remaining samples that didn't fit in the current frame
         if (samplesToCopy < sampleCount) {
             size_t remainingSamples = sampleCount - samplesToCopy;
-            ProcessAudioFrame(samples + samplesToCopy, remainingSamples, timestampUs);
+            // Advance timestamp by the duration of the consumed samples from this chunk
+            uint32_t channels = (m_frameSizeSamples > 0) ? static_cast<uint32_t>(m_samplesPerFrame / m_frameSizeSamples) : s_audioConfig.channels;
+            if (channels == 0) {
+                channels = 2; // conservative fallback to stereo
+            }
+            double secondsAdvanced = static_cast<double>(samplesToCopy) / (48000.0 * static_cast<double>(channels));
+            int64_t deltaUs = static_cast<int64_t>(secondsAdvanced * 1000000.0 + 0.5);
+            ProcessAudioFrame(samples + samplesToCopy, remainingSamples, timestampUs + deltaUs);
         }
     }
 }
