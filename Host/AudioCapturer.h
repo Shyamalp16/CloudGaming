@@ -224,7 +224,7 @@ private:
         bool enableFec = true;         // Enable forward error correction
         bool enableDtx = false;        // Enable discontinuous transmission
         int application = 2049;        // OPUS_APPLICATION_AUDIO
-        int frameSizeMs = 10;          // Frame size in milliseconds
+        int frameSizeMs = 20;          // Frame size in milliseconds
         int channels = 2;              // Number of audio channels
         bool useThreadAffinity = false;     // Use thread affinity for encoder
         DWORD encoderThreadAffinityMask = 0; // CPU affinity mask (0 = no affinity)

@@ -270,10 +270,10 @@ bool AudioCapturer::StartCapture(DWORD processId)
     settings.constrainedVbr = true;                 // Constrain VBR peaks (recommended)
     settings.enableFec = s_audioConfig.enableFec;    // Configurable FEC
     settings.expectedLossPerc = s_audioConfig.expectedLossPerc; // Configurable loss expectation
-    settings.enableDtx = false;                     // Force DTX off to prevent silence encoding
-    settings.application = 2048;                    // Force VOIP mode (2048) instead of AUDIO (2049)
+    settings.enableDtx = false;                     // Keep DTX off for continuous game audio
+    settings.application = 2049;                    // Use OPUS_APPLICATION_AUDIO for full-band game audio
 
-    std::wcout << L"[AudioOpus] Forcing VOIP application mode and DTX disabled to prevent silence encoding" << std::endl;
+    std::wcout << L"[AudioOpus] Using OPUS_APPLICATION_AUDIO (music/content) for game audio" << std::endl;
 
     // Apply ultra-low-latency profile optimizations
     if (s_audioConfig.latency.ultraLowLatencyProfile) {
