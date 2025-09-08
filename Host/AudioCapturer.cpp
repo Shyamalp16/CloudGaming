@@ -2655,36 +2655,48 @@ AfterDeviceSelection:
                 }
             }
 
-            // Calculate timestamp for this audio data using shared reference clock for AV sync
+            // Calculate timestamp for this audio data with a single pinned source
             int64_t timestampUs = 0;
             UINT64 audioClockPos = 0;
             UINT64 audioClockQpc = 0;
 
-            if (m_pAudioClock && m_audioClockFreq > 0) {
-                if (SUCCEEDED(m_pAudioClock->GetPosition(&audioClockPos, &audioClockQpc))) {
-                    // Convert audio clock position to microseconds using the audio clock frequency
+            // Pin timestamp source once
+            if (m_timestampSource == TimestampSource::Unknown) {
+                if (m_pAudioClock && m_audioClockFreq > 0 && SUCCEEDED(m_pAudioClock->GetPosition(&audioClockPos, &audioClockQpc))) {
+                    m_timestampSource = TimestampSource::AudioClock;
                     timestampUs = static_cast<int64_t>((audioClockPos * 1000000ULL) / m_audioClockFreq);
-
-                    // Store the initial audio clock time for RTP timestamp calculation
-                    if (m_initialAudioClockTime == 0) {
-                        m_initialAudioClockTime = timestampUs;
-                        std::wcout << L"[AudioCapturer] Initial audio clock time (IAudioClock): " << m_initialAudioClockTime << L" us" << std::endl;
-                    }
+                    m_initialAudioClockTime = timestampUs;
+                    m_lastTimestampUs = timestampUs;
+                    std::wcout << L"[AudioCapturer] Timestamp source pinned: IAudioClock (" << m_audioClockFreq << L" Hz), t0=" << m_initialAudioClockTime << L" us" << std::endl;
                 } else {
-                    std::wcerr << L"[AudioCapturer] Failed to get audio clock position, using shared reference clock" << std::endl;
+                    m_timestampSource = TimestampSource::SharedReference;
                     timestampUs = GetSharedReferenceTimeUs();
+                    m_initialAudioClockTime = timestampUs;
+                    m_lastTimestampUs = timestampUs;
+                    std::wcout << L"[AudioCapturer] Timestamp source pinned: Shared reference clock, t0=" << m_initialAudioClockTime << L" us" << std::endl;
                 }
-            } else {
-                std::wcerr << L"[AudioCapturer] Audio clock not available, using shared reference clock for AV sync" << std::endl;
+            } else if (m_timestampSource == TimestampSource::AudioClock) {
+                // Stick to IAudioClock; if it momentarily fails, synthesize monotonic time based on last timestamp
+                if (m_pAudioClock && m_audioClockFreq > 0 && SUCCEEDED(m_pAudioClock->GetPosition(&audioClockPos, &audioClockQpc))) {
+                    timestampUs = static_cast<int64_t>((audioClockPos * 1000000ULL) / m_audioClockFreq);
+                } else {
+                    // Synthesize timestamp: advance by duration of this captured block
+                    uint32_t channels = (pwfx && pwfx->nChannels > 0) ? pwfx->nChannels : s_audioConfig.channels;
+                    if (channels == 0) channels = 2;
+                    double secondsAdvanced = static_cast<double>(totalSamples) / (48000.0 * static_cast<double>(channels));
+                    int64_t deltaUs = static_cast<int64_t>(secondsAdvanced * 1000000.0 + 0.5);
+                    timestampUs = m_lastTimestampUs + deltaUs;
+                    std::wcerr << L"[AudioCapturer] IAudioClock read failed; synthesizing monotonic timestamp (+" << deltaUs << L" us)" << std::endl;
+                }
+            } else { // SharedReference
                 timestampUs = GetSharedReferenceTimeUs();
             }
 
-            // Store the initial timestamp for RTP timestamp calculation if not set
+            // Initialize base if needed (should be set when source pinned)
             if (m_initialAudioClockTime == 0) {
                 m_initialAudioClockTime = timestampUs;
-                std::wcout << L"[AudioCapturer] Initial audio reference time: " << m_initialAudioClockTime
-                          << L" us (shared clock synchronized)" << std::endl;
             }
+            m_lastTimestampUs = timestampUs;
             
             // Write to WAV (once per captured block) if enabled
             if (m_wavRecordingEnabled) {

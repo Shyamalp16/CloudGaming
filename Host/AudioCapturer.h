@@ -367,6 +367,9 @@ private:
 
     // Audio clock timing (single source of truth)
     int64_t m_initialAudioClockTime = 0; // Initial audio clock timestamp in microseconds
+    enum class TimestampSource { Unknown = 0, AudioClock = 1, SharedReference = 2 };
+    TimestampSource m_timestampSource = TimestampSource::Unknown; // Pin once, do not alternate mid-run
+    int64_t m_lastTimestampUs = 0; // End of previous block (for monotonic fallback)
     
     // COM interfaces (smart pointers)
     Microsoft::WRL::ComPtr<IMMDeviceEnumerator> m_pEnumerator;
