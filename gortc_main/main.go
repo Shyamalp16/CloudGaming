@@ -78,6 +78,7 @@ import (
 	"math/rand"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -969,8 +970,8 @@ func logBufferSizeDistribution() {
 
 // initAudioSendQueue initializes the bounded audio send queue and starts the sender goroutine
 func initAudioSendQueue() {
-	// Create bounded channel with capacity 3 (increased from 1 to reduce backpressure)
-	audioSendQueue = make(chan *rtp.Packet, 3)
+	// Create bounded channel with capacity 8 to better absorb transient bursts
+	audioSendQueue = make(chan *rtp.Packet, 8)
 	audioSendStop = make(chan struct{})
 
 	// Create buffer completion channel for safe buffer pool management
@@ -1482,22 +1483,11 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		return 0
 
 	default:
-		// Queue is full - implement backpressure by dropping the oldest packet
-		// This prevents head-of-line blocking and keeps latency bounded
-		select {
-		case oldestPkt := <-audioSendQueue:
-			// Successfully removed oldest packet, now queue the new one
-			audioSendQueue <- pkt
-			log.Printf("[Go/Pion] Audio backpressure: dropped oldest packet (seq=%d), queued new (seq=%d)",
-				oldestPkt.Header.SequenceNumber, packetSequence)
-			// Note: Buffer will be returned to pool by sender goroutine after WriteRTP
-			return 0
-		default:
-			// This should not happen with bounded channel, but handle gracefully
-			log.Printf("[Go/Pion] Audio queue unexpectedly full, dropping packet (seq=%d)", packetSequence)
-			putSampleBuf(payload)
-			return -1
-		}
+		// Queue is full - implement backpressure by dropping the NEWEST packet
+		// This avoids reordering artifacts from dropping older packets already queued
+		log.Printf("[Go/Pion] Audio backpressure: dropping newest packet (seq=%d), queue depth=%d", packetSequence, len(audioSendQueue))
+		putSampleBuf(payload)
+		return -1
 	}
 }
 
@@ -2332,13 +2322,45 @@ func createPeerConnectionGo() C.int {
 	// Enumerate codecs and select H264 payload type specifically
 	// Removed: previous code queried RTPSender params, which is unnecessary for TrackLocalStaticSample pacing.
 
-	// Create and add Opus audio track with explicit parameters (20ms)
+	// Create and add Opus audio track with fmtp aligned to host encoder
+	opusFmtp := "minptime=20;stereo=1;useinbandfec=1" // default 20ms, stereo, FEC enabled
+	if val := os.Getenv("AUDIO_PTIME_MS"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			opusFmtp = strings.ReplaceAll(opusFmtp, "minptime=20", fmt.Sprintf("minptime=%d", n))
+		}
+	}
+	if s := os.Getenv("AUDIO_STEREO"); s == "0" || strings.EqualFold(s, "false") {
+		opusFmtp = strings.ReplaceAll(opusFmtp, "stereo=1", "stereo=0")
+	}
+	if f := os.Getenv("AUDIO_USE_FEC"); f == "0" || strings.EqualFold(f, "false") {
+		opusFmtp = strings.ReplaceAll(opusFmtp, "useinbandfec=1", "useinbandfec=0")
+	}
+
+	// Derive RTP timestamp increment (48 kHz clock) from minptime in fmtp
+	// audioFrameDuration must equal samples per packet so jitter buffer sees consistent timing
+	ptimeMs := 20
+	if idx := strings.Index(opusFmtp, "minptime="); idx >= 0 {
+		start := idx + len("minptime=")
+		end := start
+		for end < len(opusFmtp) {
+			c := opusFmtp[end]
+			if c < '0' || c > '9' {
+				break
+			}
+			end++
+		}
+		if n, err := strconv.Atoi(opusFmtp[start:end]); err == nil && n > 0 {
+			ptimeMs = n
+		}
+	}
+	audioFrameDuration = uint32(ptimeMs) * 48
+
 	audio, err := webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypeOpus,
 			ClockRate:   48000,
 			Channels:    2,
-			SDPFmtpLine: "minptime=10;stereo=1;useinbandfec=1",
+			SDPFmtpLine: opusFmtp,
 		},
 		"audio",
 		"game-audio",

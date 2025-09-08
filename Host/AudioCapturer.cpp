@@ -2601,11 +2601,13 @@ AfterDeviceSelection:
 
             size_t totalSamples = static_cast<size_t>(numFramesAvailable) * static_cast<size_t>(pwfx->nChannels);
 
-            // Check if we can fit the data in our pre-allocated buffer
+            // Ensure working buffer is large enough (use capacity growth instead of dropping)
             if (totalSamples > m_floatBuffer.size()) {
-                std::wcerr << L"[AudioCapturer] Incoming audio data (" << totalSamples << L" samples) exceeds pre-allocated buffer size ("
-                          << m_floatBuffer.size() << L" samples). Dropping frame to maintain latency." << std::endl;
-                continue; // Skip this frame to maintain low latency
+                if (m_floatBuffer.capacity() < totalSamples) {
+                    try { m_floatBuffer.reserve(totalSamples); }
+                    catch (...) { /* reserve best-effort */ }
+                }
+                m_floatBuffer.resize(totalSamples);
             }
 
             // Convert PCM to float directly in the persistent buffer
@@ -2632,24 +2634,45 @@ AfterDeviceSelection:
                 AUDIO_LOG_DEBUG(L"[AudioCapturer] Audio data check: " << (hasAudioData ? L"Has signal" : L"Silent/near-silent"));
             }
 
-            // Resample to 48kHz if source rate differs (zero-allocation optimization)
+            // Resample to 48kHz if source rate differs (ensure buffer capacity; never skip)
             if (pwfx->nSamplesPerSec != 48000) {
                 uint32_t channels = pwfx->nChannels;
 
-                // Calculate expected output size
+                // Calculate expected output size (interleaved samples)
                 double ratio = 48000.0 / static_cast<double>(pwfx->nSamplesPerSec);
                 size_t expectedOutputSamples = static_cast<size_t>(std::ceil(totalSamples * ratio));
 
-                // Check if resampled data will fit in our pre-allocated buffer
-                if (expectedOutputSamples > m_floatBuffer.size()) {
-                    std::wcerr << L"[AudioCapturer] Resampled audio data (" << expectedOutputSamples << L" samples) would exceed buffer size ("
-                              << m_floatBuffer.size() << L" samples). Skipping resampling to maintain latency." << std::endl;
-                    // Continue with original rate - quality degradation but maintains latency
-                } else {
-                    // Use optimized resampling that works within pre-allocated buffer limits
-                    if (!ResampleTo48kInPlaceConstrained(m_floatBuffer, numFramesAvailable, pwfx->nSamplesPerSec, channels, m_floatBuffer.size())) {
-                        std::wcerr << L"[AudioCapturer] Resampling failed, continuing with original sample rate" << std::endl;
+                // Ensure working buffer has enough capacity for the resampled output
+                if (m_floatBuffer.capacity() < expectedOutputSamples) {
+                    try {
+                        m_floatBuffer.reserve(expectedOutputSamples);
+                    } catch (...) {
+                        std::wcerr << L"[AudioCapturer] Failed to reserve buffer for resampling; proceeding may cause latency/artifacts" << std::endl;
                     }
+                }
+
+                // Prefer high-quality path for 44.1 -> 48 kHz; otherwise use constrained in-place
+                bool resampled = false;
+                if (pwfx->nSamplesPerSec == 44100) {
+                    // Use in-place method that attempts DMO first
+                    ResampleTo48kInPlace(m_floatBuffer, numFramesAvailable, pwfx->nSamplesPerSec, channels);
+                    resampled = true;
+                } else {
+                    // Use optimized resampling within buffer capacity limits
+                    resampled = ResampleTo48kInPlaceConstrained(
+                        m_floatBuffer,
+                        numFramesAvailable,
+                        pwfx->nSamplesPerSec,
+                        channels,
+                        m_floatBuffer.capacity());
+                    if (!resampled) {
+                        // Fallback: attempt in-place resampler (may allocate temp)
+                        ResampleTo48kInPlace(m_floatBuffer, numFramesAvailable, pwfx->nSamplesPerSec, channels);
+                        resampled = true;
+                    }
+                }
+
+                if (resampled) {
                     // Update totalSamples to reflect the new (resampled) sample count
                     totalSamples = m_floatBuffer.size();
                 }
