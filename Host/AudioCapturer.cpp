@@ -2853,14 +2853,15 @@ bool AudioCapturer::ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, voi
     }
 
     WORD tag = formatStruct->wFormatTag;
-    WORD bitsPerSample = formatStruct->wBitsPerSample;
+    WORD containerBits = formatStruct->wBitsPerSample;
+    WORD validBits = containerBits;
 
     // Handle WAVE_FORMAT_EXTENSIBLE by inspecting SubFormat
     if (tag == WAVE_FORMAT_EXTENSIBLE && formatStruct->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
         const WAVEFORMATEXTENSIBLE* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(formatStruct);
-        // Prefer valid bits if set
+        // Record valid bits if set for PCM
         if (ext->Samples.wValidBitsPerSample) {
-            bitsPerSample = ext->Samples.wValidBitsPerSample;
+            validBits = ext->Samples.wValidBitsPerSample;
         }
 
         if (IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
@@ -2871,7 +2872,7 @@ bool AudioCapturer::ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, voi
     }
 
     if (tag == WAVE_FORMAT_IEEE_FLOAT) {
-        if (bitsPerSample == 32) {
+        if (containerBits == 32) {
             const float* pcmFloat = reinterpret_cast<const float*>(pcmData);
             std::copy(pcmFloat, pcmFloat + totalSamples, floatData.begin());
             return true;
@@ -2880,28 +2881,36 @@ bool AudioCapturer::ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, voi
     }
 
     if (tag == WAVE_FORMAT_PCM) {
-        if (bitsPerSample == 16) {
+        if (containerBits == 16) {
             const int16_t* pcm16 = reinterpret_cast<const int16_t*>(pcmData);
             for (size_t i = 0; i < totalSamples; ++i) {
                 floatData[i] = static_cast<float>(pcm16[i]) / 32768.0f;
             }
             return true;
-        } else if (bitsPerSample == 24) {
-            // 24-bit little-endian signed PCM
+        } else if (containerBits == 24) {
+            // 24-bit little-endian signed PCM (packed 3 bytes)
             const uint8_t* p = reinterpret_cast<const uint8_t*>(pcmData);
+            const float denom = static_cast<float>(1u << (validBits - 1)); // 2^(validBits-1)
             for (size_t i = 0; i < totalSamples; ++i) {
-                int32_t sample = (static_cast<int32_t>(p[i*3 + 0])      ) |
-                                 (static_cast<int32_t>(p[i*3 + 1]) << 8 ) |
-                                 (static_cast<int32_t>(p[i*3 + 2]) << 16);
+                int32_t b0 = static_cast<int32_t>(p[i*3 + 0]);
+                int32_t b1 = static_cast<int32_t>(p[i*3 + 1]) << 8;
+                int32_t b2 = static_cast<int32_t>(p[i*3 + 2]) << 16;
+                int32_t sample = b0 | b1 | b2;
                 // Sign-extend 24-bit to 32-bit
                 if (sample & 0x00800000) sample |= 0xFF000000;
-                floatData[i] = static_cast<float>(sample) / 8388608.0f; // 2^23
+                floatData[i] = static_cast<float>(sample) / denom;
             }
             return true;
-        } else if (bitsPerSample == 32) {
+        } else if (containerBits == 32) {
             const int32_t* pcm32 = reinterpret_cast<const int32_t*>(pcmData);
+            const int shift = (validBits > 0 && validBits < 32) ? (32 - validBits) : 0;
+            const float denom = (validBits > 0 && validBits <= 31)
+                ? static_cast<float>(1u << (validBits - 1))
+                : 2147483648.0f; // 2^31
             for (size_t i = 0; i < totalSamples; ++i) {
-                floatData[i] = static_cast<float>(pcm32[i]) / 2147483648.0f; // 2^31
+                int32_t raw = pcm32[i];
+                int32_t sample = (shift > 0) ? (raw >> shift) : raw; // arithmetic shift keeps sign
+                floatData[i] = static_cast<float>(sample) / denom;
             }
             return true;
         }
@@ -2926,14 +2935,14 @@ bool AudioCapturer::ConvertPCMToFloatInPlace(const BYTE* pcmData, UINT32 numFram
     }
 
     WORD tag = format->wFormatTag;
-    WORD bitsPerSample = format->wBitsPerSample;
+    WORD containerBits = format->wBitsPerSample;
+    WORD validBits = containerBits;
 
     // Handle WAVE_FORMAT_EXTENSIBLE by inspecting SubFormat
     if (tag == WAVE_FORMAT_EXTENSIBLE && format->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
         const WAVEFORMATEXTENSIBLE* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
-        // Prefer valid bits if set
         if (ext->Samples.wValidBitsPerSample) {
-            bitsPerSample = ext->Samples.wValidBitsPerSample;
+            validBits = ext->Samples.wValidBitsPerSample;
         }
 
         if (IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
@@ -2944,23 +2953,42 @@ bool AudioCapturer::ConvertPCMToFloatInPlace(const BYTE* pcmData, UINT32 numFram
     }
 
     if (tag == WAVE_FORMAT_IEEE_FLOAT) {
-        if (bitsPerSample == 32) {
+        if (containerBits == 32) {
             const float* pcmFloat = reinterpret_cast<const float*>(pcmData);
             std::copy(pcmFloat, pcmFloat + totalSamples, outputBuffer);
             return true;
         }
         return false;
     } else if (tag == WAVE_FORMAT_PCM) {
-        if (bitsPerSample == 16) {
+        if (containerBits == 16) {
             const int16_t* pcm16 = reinterpret_cast<const int16_t*>(pcmData);
             for (size_t i = 0; i < totalSamples; ++i) {
                 outputBuffer[i] = static_cast<float>(pcm16[i]) / 32768.0f; // 2^15
             }
             return true;
-        } else if (bitsPerSample == 32) {
-            const int32_t* pcm32 = reinterpret_cast<const int32_t*>(pcmData);
+        } else if (containerBits == 24) {
+            // 24-bit little-endian signed PCM (packed 3 bytes)
+            const uint8_t* p = reinterpret_cast<const uint8_t*>(pcmData);
+            const float denom = static_cast<float>(1u << (validBits - 1)); // 2^(validBits-1)
             for (size_t i = 0; i < totalSamples; ++i) {
-                outputBuffer[i] = static_cast<float>(pcm32[i]) / 2147483648.0f; // 2^31
+                int32_t b0 = static_cast<int32_t>(p[i*3 + 0]);
+                int32_t b1 = static_cast<int32_t>(p[i*3 + 1]) << 8;
+                int32_t b2 = static_cast<int32_t>(p[i*3 + 2]) << 16;
+                int32_t sample = b0 | b1 | b2;
+                if (sample & 0x00800000) sample |= 0xFF000000;
+                outputBuffer[i] = static_cast<float>(sample) / denom;
+            }
+            return true;
+        } else if (containerBits == 32) {
+            const int32_t* pcm32 = reinterpret_cast<const int32_t*>(pcmData);
+            const int shift = (validBits > 0 && validBits < 32) ? (32 - validBits) : 0;
+            const float denom = (validBits > 0 && validBits <= 31)
+                ? static_cast<float>(1u << (validBits - 1))
+                : 2147483648.0f; // 2^31
+            for (size_t i = 0; i < totalSamples; ++i) {
+                int32_t raw = pcm32[i];
+                int32_t sample = (shift > 0) ? (raw >> shift) : raw;
+                outputBuffer[i] = static_cast<float>(sample) / denom;
             }
             return true;
         }
@@ -3113,7 +3141,8 @@ void AudioCapturer::ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFr
     bool preferLinear = s_audioConfig.wasapi.preferLinearResampling;
     bool useDmoOnlyForHighQuality = s_audioConfig.wasapi.useDmoOnlyForHighQuality;
 
-    if (preferLinear && !useDmoOnlyForHighQuality) {
+    // Prefer high-quality DMO for 44.1 -> 48 kHz to avoid artifacts
+    if (preferLinear && !useDmoOnlyForHighQuality && inRate != 44100) {
         // Prefer linear interpolation - use it directly
         std::wcout << L"[AudioCapturer] Using linear interpolation resampler (preferred by config)" << std::endl;
     } else {
@@ -3154,15 +3183,8 @@ void AudioCapturer::ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFr
         m_lastInputRate = inRate;
     }
 
-    // Start with previous remainder sample for interpolation continuity
     // Use pre-allocated buffer to avoid heap allocations
     EnsureAudioBuffersCapacity();
-    g_audioResampleBuffer.resize(channels);
-    std::vector<float>& prev = g_audioResampleBuffer;
-    std::fill(prev.begin(), prev.end(), 0.0f);
-    if (!m_resampleRemainder.empty()) {
-        prev = m_resampleRemainder;
-    }
 
     // Perform in-place resampling using pre-allocated temporary buffer
     g_audioTempBuffer.resize(outputSamples);
@@ -3185,17 +3207,16 @@ void AudioCapturer::ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFr
                 }
             }
         } else {
-            // Linear interpolation between adjacent frames
+            // Linear interpolation between adjacent frames (channel-aware)
             for (uint32_t ch = 0; ch < channels; ++ch) {
-                size_t srcIdx1 = srcFrame * channels + ch;
-                size_t srcIdx2 = (srcFrame + 1) * channels + ch;
+                size_t srcIdx0 = srcFrame * channels + ch;
+                size_t srcIdx1 = (srcFrame + 1 < inFrames ? (srcFrame + 1) : srcFrame) * channels + ch;
                 size_t dstIdx = o * channels + ch;
 
-                if (srcIdx1 < buffer.size() && srcIdx2 < buffer.size() && dstIdx < tempBuffer.size()) {
-                    float sample1 = (srcFrame == 0 && !m_resampleRemainder.empty()) ?
-                                   prev[ch] : buffer[srcIdx1];
-                    float sample2 = buffer[srcIdx2];
-                    tempBuffer[dstIdx] = sample1 + (sample2 - sample1) * static_cast<float>(frac);
+                if (srcIdx0 < buffer.size() && srcIdx1 < buffer.size() && dstIdx < tempBuffer.size()) {
+                    float s0 = buffer[srcIdx0];
+                    float s1 = buffer[srcIdx1];
+                    tempBuffer[dstIdx] = s0 + static_cast<float>(frac) * (s1 - s0);
                 }
             }
         }
@@ -3212,8 +3233,9 @@ void AudioCapturer::ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFr
         }
     }
 
-    // Move temp buffer to original buffer (efficient move operation)
-    buffer = std::move(tempBuffer);
+    // Copy back into original buffer and resize (preserve temp buffer capacity)
+    std::copy(tempBuffer.begin(), tempBuffer.begin() + outputSamples, buffer.begin());
+    buffer.resize(outputSamples);
 }
 
 // ============================================================================
@@ -3753,7 +3775,8 @@ void AudioCapturer::ResampleTo48k(const float* in, size_t inFrames, uint32_t inR
     bool preferLinear = s_audioConfig.wasapi.preferLinearResampling;
     bool useDmoOnlyForHighQuality = s_audioConfig.wasapi.useDmoOnlyForHighQuality;
 
-    if (preferLinear && !useDmoOnlyForHighQuality) {
+    // Prefer high-quality DMO for 44.1 -> 48 kHz to avoid artifacts
+    if (preferLinear && !useDmoOnlyForHighQuality && inRate != 44100) {
         // Prefer linear interpolation - skip DMO
         std::wcout << L"[AudioCapturer] Using linear interpolation resampler (preferred by config)" << std::endl;
     } else {

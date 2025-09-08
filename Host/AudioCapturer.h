@@ -237,7 +237,7 @@ private:
             double fallbackPeriodMs = 5.0;        // Fallback device period if preferred not available
             bool force48kHzStereo = true;          // Force 48kHz stereo format to avoid resampling
             bool preferFloat = true;               // Prefer IEEE float capture to avoid PCM->float conversion
-            bool preferLinearResampling = true;   // Prefer linear interpolation over DMO
+            bool preferLinearResampling = false;   // Prefer linear interpolation over DMO
             bool useDmoOnlyForHighQuality = false; // Only use DMO when exact quality required
         } wasapi;
 
