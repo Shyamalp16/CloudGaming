@@ -239,12 +239,28 @@ void ApplyThreadPrioritySettings(const nlohmann::json& config)
         std::string taskName = tcfg.value("taskName", std::string("InputInjection"));
         ThreadPriorityManager::setTaskName(taskName);
 
+        // Configure fallback options
+        bool fallbackToWin32Priority = tcfg.value("fallbackToWin32Priority", true);
+        ThreadPriorityManager::globalPriorityConfig.fallbackToWin32Priority = fallbackToWin32Priority;
+
+        bool showDiagnosticsOnFailure = tcfg.value("showDiagnosticsOnFailure", true);
+        ThreadPriorityManager::globalPriorityConfig.showDiagnosticsOnFailure = showDiagnosticsOnFailure;
+
+        bool retryMMCSSOnFailure = tcfg.value("retryMMCSSOnFailure", false);
+        ThreadPriorityManager::globalPriorityConfig.retryMMCSSOnFailure = retryMMCSSOnFailure;
+
+        int mmcssRetryDelayMs = tcfg.value("mmcssRetryDelayMs", 1000);
+        ThreadPriorityManager::globalPriorityConfig.mmcssRetryDelayMs = mmcssRetryDelayMs;
+
         std::cout << "[ConfigUtils] Thread priority configuration applied successfully" << std::endl;
         std::cout << "  MMCSS: " << (enableMMCSS ? "enabled" : "disabled") << std::endl;
         std::cout << "  MMCSS Class: " << mmcssClassStr << std::endl;
         std::cout << "  TIME_CRITICAL: " << (enableTimeCritical ? "enabled" : "disabled") << std::endl;
         std::cout << "  Thread Priority: " << threadPriority << std::endl;
         std::cout << "  Task Name: " << taskName << std::endl;
+        std::cout << "  Fallback to Win32: " << (fallbackToWin32Priority ? "enabled" : "disabled") << std::endl;
+        std::cout << "  Show Diagnostics: " << (showDiagnosticsOnFailure ? "enabled" : "disabled") << std::endl;
+        std::cout << "  Retry MMCSS: " << (retryMMCSSOnFailure ? "enabled" : "disabled") << std::endl;
 
     } catch (const std::exception& e) {
         std::cerr << "[ConfigUtils] Error applying thread priority settings: " << e.what() << std::endl;

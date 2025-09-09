@@ -2138,21 +2138,77 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 }
 
     // ============================================================================
-    // Default device loopback (fallback path)
+    // Default/device-selected loopback path
     // ============================================================================
     if (!m_pAudioClient)
     {
-        if (processLoopbackAttempted) {
-            std::wcout << L"[AudioCapturer] Using default render device with loopback capture (fallback)." << std::endl;
-            if (!processLoopbackSucceeded && !processLoopbackFallbackReason.empty()) {
-                std::wcout << L"[AudioCapturer] reason: " << processLoopbackFallbackReason << std::endl;
+        // 1) deviceId override
+        if (!s_audioConfig.deviceId.empty()) {
+            IMMDevice* dev = nullptr;
+            hr = m_pEnumerator->GetDevice(s_audioConfig.deviceId.c_str(), &dev);
+            if (SUCCEEDED(hr) && dev) {
+                m_pDevice = dev;
+                std::wcout << L"[AudioCapturer] Using configured deviceId: " << s_audioConfig.deviceId << std::endl;
+            } else {
+                std::wcerr << L"[AudioCapturer] deviceId override failed: " << _com_error(hr).ErrorMessage() << std::endl;
             }
-        } else {
-            std::wcout << L"[AudioCapturer] Using default render device with loopback capture..." << std::endl;
         }
 
-        // Use the default render device with loopback
+        // 2) enumerate endpoints to find one hosting target PID
+        if (!m_pDevice && m_targetProcessId != 0) {
+            IMMDeviceCollection* pCollection = NULL;
+            hr = m_pEnumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pCollection);
+            if (SUCCEEDED(hr) && pCollection) {
+                UINT count = 0;
+                if (SUCCEEDED(pCollection->GetCount(&count))) {
+                    for (UINT i = 0; i < count && !m_pDevice; ++i) {
+                        IMMDevice* pDev = NULL;
+                        if (SUCCEEDED(pCollection->Item(i, &pDev)) && pDev) {
+                            IAudioSessionManager2* pMgr = NULL;
+                            if (SUCCEEDED(pDev->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, NULL, (void**)&pMgr)) && pMgr) {
+                                IAudioSessionEnumerator* pEnum = NULL;
+                                if (SUCCEEDED(pMgr->GetSessionEnumerator(&pEnum)) && pEnum) {
+                                    int sc = 0;
+                                    if (SUCCEEDED(pEnum->GetCount(&sc))) {
+                                        for (int s = 0; s < sc && !m_pDevice; ++s) {
+                                            IAudioSessionControl* pCtrl = NULL;
+                                            if (SUCCEEDED(pEnum->GetSession(s, &pCtrl)) && pCtrl) {
+                                                IAudioSessionControl2* pCtrl2 = NULL;
+                                                if (SUCCEEDED(pCtrl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&pCtrl2)) && pCtrl2) {
+                                                    DWORD pid = 0;
+                                                    if (SUCCEEDED(pCtrl2->GetProcessId(&pid))) {
+                                                        if (pid == m_targetProcessId) {
+                                                            m_pDevice = pDev; // take ownership
+                                                            std::wcout << L"[AudioCapturer] Selected endpoint hosting PID=" << pid << std::endl;
+                                                            pCtrl2->Release();
+                                                            pCtrl->Release();
+                                                            pEnum->Release();
+                                                            pMgr->Release();
+                                                            pCollection->Release();
+                                                            goto DeviceSelected; // break all
+                                                        }
+                                                    }
+                                                    pCtrl2->Release();
+                                                }
+                                                pCtrl->Release();
+                                            }
+                                        }
+                                    }
+                                    pEnum->Release();
+                                }
+                                pMgr->Release();
+                            }
+                            pDev->Release();
+                        }
+                    }
+                }
+                pCollection->Release();
+            }
+        }
+
+        // 3) fallback to default device
         hr = m_pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &m_pDevice);
+DeviceSelected:
         if (FAILED(hr))
         {
             std::wcerr << L"[AudioCapturer] Failed to get default render device: " << _com_error(hr).ErrorMessage()
@@ -4170,6 +4226,19 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
         // Read application type
         if (config.contains("application")) {
             s_audioConfig.application = config["application"].get<int>();
+        }
+
+        // Read optional deviceId override (UTF-8 in JSON → UTF-16 here)
+        if (config.contains("deviceId") && config["deviceId"].is_string()) {
+            std::string idUtf8 = config["deviceId"].get<std::string>();
+            int wlen = MultiByteToWideChar(CP_UTF8, 0, idUtf8.c_str(), -1, nullptr, 0);
+            if (wlen > 0) {
+                std::wstring wid(static_cast<size_t>(wlen), L'\0');
+                MultiByteToWideChar(CP_UTF8, 0, idUtf8.c_str(), -1, &wid[0], wlen);
+                // Trim trailing null inserted by MultiByteToWideChar
+                if (!wid.empty() && wid.back() == L'\0') wid.pop_back();
+                s_audioConfig.deviceId = wid;
+            }
         }
 
         // Read frame size in milliseconds (enforce 5-10ms for low latency when strict mode enabled)

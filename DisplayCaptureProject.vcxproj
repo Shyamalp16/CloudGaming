@@ -92,11 +92,11 @@
       <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
 ;avformat.lib
 ;avutil.lib
-;swscale.lib;boost_regex-vc143-mt-gd-x64-1_86.lib;boost_date_time-vc143-mt-gd-x64-1_86.lib;boost_system-vc143-mt-gd-x64-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib</AdditionalDependencies>
+;swscale.lib;boost_regex-vc143-mt-gd-x64-1_86.lib;boost_date_time-vc143-mt-gd-x64-1_86.lib;boost_system-vc143-mt-gd-x64-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib</AdditionalDependencies>
       <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
 ;avformat.lib
 ;avutil.lib
-;swscale.lib;boost_regex-vc143-mt-gd-x86-1_86.lib;boost_date_time-vc143-mt-gd-x86-1_86.lib;boost_system-vc143-mt-gd-x86-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib</AdditionalDependencies>
+;swscale.lib;boost_regex-vc143-mt-gd-x86-1_86.lib;boost_date_time-vc143-mt-gd-x86-1_86.lib;boost_system-vc143-mt-gd-x86-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
@@ -126,11 +126,11 @@
       <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
 ;avformat.lib
 ;avutil.lib
-;swscale.lib;boost_regex-vc143-mt-x64-1_86.lib;boost_date_time-vc143-mt-x64-1_86.lib;boost_system-vc143-mt-x64-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib</AdditionalDependencies>
+;swscale.lib;boost_regex-vc143-mt-x64-1_86.lib;boost_date_time-vc143-mt-x64-1_86.lib;boost_system-vc143-mt-x64-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib</AdditionalDependencies>
       <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
 ;avformat.lib
 ;avutil.lib
-;swscale.lib;boost_regex-vc143-mt-x86-1_86.lib;boost_date_time-vc143-mt-x86-1_86.lib;boost_system-vc143-mt-x86-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib</AdditionalDependencies>
+;swscale.lib;boost_regex-vc143-mt-x86-1_86.lib;boost_date_time-vc143-mt-x86-1_86.lib;boost_system-vc143-mt-x86-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

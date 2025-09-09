@@ -111,6 +111,8 @@ int main()
         }
     } catch (...) {}
     AudioCapturer audioCapturer;
+    std::wcout << L"[main] Waiting for 2 seconds before starting audio capture..." << std::endl;
+    Sleep(2000);
     audioCapturer.StartCapture(pid);
 
     // Start WAV recording for debugging if enabled in config

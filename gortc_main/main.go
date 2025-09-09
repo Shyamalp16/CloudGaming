@@ -536,7 +536,7 @@ var (
 	audioSendStop  chan struct{}    // Stop signal for sender goroutine
 
 	// Granular video send path: bounded queue and dedicated sender goroutine
-	videoSendQueue chan media.Sample // Bounded channel for video samples (size ≤ 2)
+	videoSendQueue chan media.Sample // Bounded channel for video samples (size ≤ 4)
 	videoSendStop  chan struct{}     // Stop signal for video sender goroutine
 
 	// Buffer completion mechanism to prevent use-after-free
@@ -986,9 +986,9 @@ func initAudioSendQueue() {
 
 // initVideoSendQueue initializes the bounded video send queue and starts the sender goroutine
 func initVideoSendQueue() {
-	// Create bounded channel with capacity 2 (for video: size ≤ 2)
-	// Slightly larger than audio to handle frame reordering and prevent drops
-	videoSendQueue = make(chan media.Sample, 2)
+	// Create bounded channel with capacity 4 (for video: size ≤ 4)
+	// Slightly larger to handle short bursts and prevent drops
+	videoSendQueue = make(chan media.Sample, 4)
 	videoSendStop = make(chan struct{})
 
 	// Create buffer completion channel for safe buffer pool management
@@ -1002,7 +1002,7 @@ func initVideoSendQueue() {
 	go videoBufferCompletionHandler()
 
 	log.Println("[Go/Pion] Audio send queue initialized with bounded channel (capacity: 3)")
-	log.Println("[Go/Pion] Video send queue initialized with bounded channel (capacity: 2)")
+	log.Println("[Go/Pion] Video send queue initialized with bounded channel (capacity: 4)")
 	log.Println("[Go/Pion] Buffer completion mechanism initialized for use-after-free prevention")
 }
 
@@ -1524,7 +1524,7 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 	// Create video sample for queuing
 	sample := media.Sample{Data: buf, Duration: dur}
 
-	// Queue sample for the dedicated sender goroutine (bounded queue, size ≤ 2)
+	// Queue sample for the dedicated sender goroutine (bounded queue, size ≤ 4)
 	// This implements backpressure by dropping oldest samples rather than accumulating
 	// The sender goroutine will handle WriteSample without holding any locks
 
@@ -1534,7 +1534,7 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 		// Sample successfully queued for sending
 		// Buffer will be returned to pool by sender goroutine after WriteSample
 		return 0
-	case <-time.After(10 * time.Millisecond):
+	case <-time.After(17 * time.Millisecond):
 		// Queue is full or sender is slow - implement backpressure
 		// Try to make room by dropping oldest sample
 		select {
@@ -1549,13 +1549,13 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 				log.Printf("[Go/Pion] Video backpressure: dropped oldest sample (size=%d), queued new (size=%d)",
 					len(oldestSample.Data), n)
 				return 0
-			case <-time.After(5 * time.Millisecond):
+			case <-time.After(8 * time.Millisecond):
 				// Still can't queue - sender might be stuck
 				putSampleBuf(buf)
 				log.Printf("[Go/Pion] Video sender stuck, dropped sample (size=%d)", n)
 				return -1
 			}
-		case <-time.After(5 * time.Millisecond):
+		case <-time.After(8 * time.Millisecond):
 			// Can't even read from queue - sender might be completely stuck
 			putSampleBuf(buf)
 			log.Printf("[Go/Pion] Video queue completely stuck, dropped sample (size=%d)", n)

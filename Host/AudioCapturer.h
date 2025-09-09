@@ -247,6 +247,10 @@ private:
             bool includeProcessTree = true;      // Include child processes of target
         } processLoopback;
 
+        // Optional override: capture from a specific render device by endpoint ID
+        // If set, this takes precedence over default device selection
+        std::wstring deviceId;                  // MMDevice endpoint ID (wide string)
+
         // Audio latency optimization configuration
         struct LatencyConfig {
             bool enforceSingleFrameBuffering = true; // Strictly enforce one frame max buffering

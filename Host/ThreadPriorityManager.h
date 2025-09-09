@@ -6,6 +6,7 @@
 #include <atomic>
 #include <mutex>
 #include <iostream>
+#include <sddl.h>  // For SID functions
 
 namespace ThreadPriorityManager {
 
@@ -26,6 +27,10 @@ struct ThreadPriorityConfig {
     bool enableMMCSS = true;                    // Whether to use MMCSS
     bool enableTimeCritical = true;             // Whether to use TIME_CRITICAL priority
     std::string taskName = "InputInjection";    // MMCSS task name
+    bool fallbackToWin32Priority = true;        // Fallback to Win32 priority if MMCSS fails
+    bool showDiagnosticsOnFailure = true;       // Show detailed diagnostics on MMCSS failure
+    bool retryMMCSSOnFailure = false;           // Retry MMCSS after initial failure
+    int mmcssRetryDelayMs = 1000;               // Delay before retrying MMCSS
 };
 
 // Global priority configuration
@@ -69,6 +74,71 @@ public:
         return *this;
     }
 
+    // Check if current process has administrator privileges
+    static bool isRunningAsAdministrator() {
+        BOOL isAdmin = FALSE;
+        PSID adminGroup = nullptr;
+        SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+
+        if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                   DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup)) {
+            if (!CheckTokenMembership(nullptr, adminGroup, &isAdmin)) {
+                isAdmin = FALSE;
+            }
+            FreeSid(adminGroup);
+        }
+        return isAdmin == TRUE;
+    }
+
+    // Diagnose MMCSS issues and provide detailed information
+    static void diagnoseMMCSSIssues() {
+        std::cout << "[ThreadPriorityManager] MMCSS Diagnostics:" << std::endl;
+
+        // Check administrator privileges
+        bool isAdmin = isRunningAsAdministrator();
+        std::cout << "  - Running as Administrator: " << (isAdmin ? "YES" : "NO") << std::endl;
+        if (!isAdmin) {
+            std::cout << "  - WARNING: MMCSS typically requires administrator privileges" << std::endl;
+        }
+
+        // Check MMCSS service status
+        SC_HANDLE scManager = OpenSCManager(nullptr, nullptr, SC_MANAGER_CONNECT);
+        if (scManager) {
+            SC_HANDLE service = OpenService(scManager, TEXT("MMCSS"), SERVICE_QUERY_STATUS);
+            if (service) {
+                SERVICE_STATUS status;
+                if (QueryServiceStatus(service, &status)) {
+                    std::cout << "  - MMCSS Service Status: "
+                              << (status.dwCurrentState == SERVICE_RUNNING ? "RUNNING" : "NOT RUNNING")
+                              << std::endl;
+                }
+                CloseServiceHandle(service);
+            } else {
+                std::cout << "  - MMCSS Service: Could not query status" << std::endl;
+            }
+            CloseServiceHandle(scManager);
+        }
+
+        // Check avrt.dll availability
+        HMODULE avrtModule = LoadLibraryA("avrt.dll");
+        if (avrtModule) {
+            std::cout << "  - avrt.dll: Available" << std::endl;
+            FreeLibrary(avrtModule);
+        } else {
+            std::cout << "  - avrt.dll: NOT FOUND" << std::endl;
+        }
+
+        // Get system memory info
+        MEMORYSTATUSEX memStatus;
+        memStatus.dwLength = sizeof(memStatus);
+        if (GlobalMemoryStatusEx(&memStatus)) {
+            std::cout << "  - System Memory: " << (memStatus.ullTotalPhys / (1024 * 1024)) << " MB total, "
+                      << (memStatus.ullAvailPhys / (1024 * 1024)) << " MB available" << std::endl;
+            std::cout << "  - Page File: " << (memStatus.ullTotalPageFile / (1024 * 1024)) << " MB total, "
+                      << (memStatus.ullAvailPageFile / (1024 * 1024)) << " MB available" << std::endl;
+        }
+    }
+
     // Elevate thread priority using MMCSS
     bool elevate(const ThreadPriorityConfig& config = globalPriorityConfig) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -85,6 +155,7 @@ public:
         }
 
         bool success = true;
+        bool mmcssSuccess = false;
 
         // Set MMCSS priority if enabled
         if (config.enableMMCSS) {
@@ -116,24 +187,65 @@ public:
             if (mmcssHandle == nullptr) {
                 DWORD error = GetLastError();
                 std::string errorMsg;
+                bool showDiagnostics = false;
+
                 switch (error) {
                     case 1552:
                         errorMsg = "MMCSS service not available or paging file too small";
+                        showDiagnostics = true;
                         break;
                     case 5:
                         errorMsg = "Access denied - MMCSS requires admin privileges";
+                        showDiagnostics = true;
                         break;
                     case 2:
                         errorMsg = "MMCSS service not running";
+                        showDiagnostics = true;
+                        break;
+                    case 87:
+                        errorMsg = "Invalid parameter - MMCSS task class may not be supported";
+                        std::cerr << "[ThreadPriorityManager] MMCSS task class '" << taskClass
+                                  << "' may not be supported. This can happen with certain Windows configurations." << std::endl;
+                        break;
+                    case 50:
+                        errorMsg = "MMCSS not supported on this platform";
                         break;
                     default:
                         errorMsg = "Unknown MMCSS error";
                         break;
                 }
+
                 std::cerr << "[ThreadPriorityManager] Failed to set MMCSS priority '" << taskClass
                           << "' (Error: " << error << " - " << errorMsg << ")" << std::endl;
-                success = false;
+
+                if (showDiagnostics) {
+                    diagnoseMMCSSIssues();
+                }
+
+                // Try fallback MMCSS task classes for error 87 (invalid parameter)
+                if (error == 87 && taskClass != "Games") {
+                    std::cerr << "[ThreadPriorityManager] Trying fallback MMCSS task class 'Games'..." << std::endl;
+                    mmcssHandle = AvSetMmThreadCharacteristicsA("Games", &taskIndex);
+                    if (mmcssHandle != nullptr) {
+                        std::cout << "[ThreadPriorityManager] Successfully elevated thread with MMCSS class 'Games' (fallback)" << std::endl;
+                        mmcssSuccess = true;
+
+                        // Set MMCSS priority level
+                        if (!AvSetMmThreadPriority(mmcssHandle, AVRT_PRIORITY_HIGH)) {
+                            DWORD priorityError = GetLastError();
+                            std::cerr << "[ThreadPriorityManager] Failed to set MMCSS priority level (Error: " << priorityError << ")" << std::endl;
+                        }
+                    } else {
+                        std::cerr << "[ThreadPriorityManager] Fallback MMCSS task class also failed" << std::endl;
+                        mmcssSuccess = false;
+                    }
+                } else {
+                    // Don't mark as complete failure - we can still try Win32 priority
+                    mmcssSuccess = false;
+                }
             } else {
+                mmcssSuccess = true;
+
                 // Set MMCSS priority level
                 if (!AvSetMmThreadPriority(mmcssHandle, AVRT_PRIORITY_HIGH)) {
                     DWORD error = GetLastError();
@@ -145,15 +257,23 @@ public:
             }
         }
 
-        // Set Win32 thread priority if enabled
-        if (config.enableTimeCritical) {
-            if (!SetThreadPriority(threadHandle, config.threadPriority)) {
-                DWORD error = GetLastError();
-                std::cerr << "[ThreadPriorityManager] Failed to set thread priority (Error: " << error << ")" << std::endl;
+        // Set Win32 thread priority (always try this as fallback)
+        if (!SetThreadPriority(threadHandle, config.threadPriority)) {
+            DWORD error = GetLastError();
+            std::cerr << "[ThreadPriorityManager] Failed to set thread priority (Error: " << error << ")" << std::endl;
+
+            // If both MMCSS and Win32 priority failed, this is a complete failure
+            if (!mmcssSuccess) {
                 success = false;
-            } else {
-                std::cout << "[ThreadPriorityManager] Successfully set thread priority to TIME_CRITICAL" << std::endl;
             }
+        } else {
+            if (config.enableTimeCritical) {
+                std::cout << "[ThreadPriorityManager] Successfully set thread priority to TIME_CRITICAL" << std::endl;
+            } else {
+                std::cout << "[ThreadPriorityManager] Successfully set thread priority to HIGH" << std::endl;
+            }
+            // At least Win32 priority succeeded
+            success = true;
         }
 
         if (success) {
