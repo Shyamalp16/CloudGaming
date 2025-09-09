@@ -206,6 +206,13 @@ static bool g_gpuTimingEnabled = false;
 static Microsoft::WRL::ComPtr<ID3D11Query> g_tsDisjoint;
 static Microsoft::WRL::ComPtr<ID3D11Query> g_tsStart;
 static Microsoft::WRL::ComPtr<ID3D11Query> g_tsEnd;
+
+// HDR tone mapping configuration
+static bool g_hdrToneMappingEnabled = false;
+static std::string g_hdrToneMappingMethod = "reinhard";
+static float g_hdrExposure = 0.0f;
+static float g_hdrGamma = 2.2f;
+static float g_hdrSaturation = 1.0f;
 static bool g_deferredContextEnabled = false;
 static Microsoft::WRL::ComPtr<ID3D11DeviceContext> g_deferredContext;
 static Microsoft::WRL::ComPtr<ID3D11CommandList> g_commandList;
@@ -580,6 +587,90 @@ namespace Encoder {
             g_commandList.Reset();
         }
     }
+
+    void SetHdrToneMappingConfig(bool enabled, const std::string& method, float exposure, float gamma, float saturation) {
+        g_hdrToneMappingEnabled = enabled;
+        g_hdrToneMappingMethod = method;
+        g_hdrExposure = exposure;
+        g_hdrGamma = gamma;
+        g_hdrSaturation = saturation;
+        
+        if (enabled) {
+            std::wcout << L"[Encoder] HDR tone mapping enabled - Method: " << method.c_str() 
+                      << L", Exposure: " << exposure << L", Gamma: " << gamma 
+                      << L", Saturation: " << saturation << std::endl;
+        }
+    }
+
+    // Helper function for linear interpolation
+    float lerp(float a, float b, float t) {
+        return a + t * (b - a);
+    }
+
+    // HDR tone mapping function using Reinhard tone mapping
+    void ApplyHdrToneMapping(ID3D11Texture2D* texture, ID3D11DeviceContext* context) {
+        if (!g_hdrToneMappingEnabled || !texture || !context) return;
+
+        // Map the texture for CPU access
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        HRESULT hr = context->Map(texture, 0, D3D11_MAP_READ_WRITE, 0, &mapped);
+        if (FAILED(hr)) return;
+
+        // Get texture description
+        D3D11_TEXTURE2D_DESC desc;
+        texture->GetDesc(&desc);
+        
+        // Process BGRA pixels (assuming 8-bit per channel)
+        if (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM) {
+            uint8_t* pixels = static_cast<uint8_t*>(mapped.pData);
+            int pixelCount = desc.Width * desc.Height;
+            
+            for (int i = 0; i < pixelCount; ++i) {
+                int pixelOffset = i * 4; // BGRA format
+                
+                // Convert to float [0,1]
+                float b = pixels[pixelOffset + 0] / 255.0f;
+                float g = pixels[pixelOffset + 1] / 255.0f;
+                float r = pixels[pixelOffset + 2] / 255.0f;
+                float a = pixels[pixelOffset + 3] / 255.0f;
+                
+                // Apply exposure adjustment
+                float exposureMultiplier = powf(2.0f, g_hdrExposure);
+                r *= exposureMultiplier;
+                g *= exposureMultiplier;
+                b *= exposureMultiplier;
+                
+                // Reinhard tone mapping: x / (1 + x)
+                r = r / (1.0f + r);
+                g = g / (1.0f + g);
+                b = b / (1.0f + b);
+                
+                // Apply gamma correction
+                r = powf(r, 1.0f / g_hdrGamma);
+                g = powf(g, 1.0f / g_hdrGamma);
+                b = powf(b, 1.0f / g_hdrGamma);
+                
+                // Apply saturation adjustment
+                float luminance = 0.299f * r + 0.587f * g + 0.114f * b;
+                r = lerp(luminance, r, g_hdrSaturation);
+                g = lerp(luminance, g, g_hdrSaturation);
+                b = lerp(luminance, b, g_hdrSaturation);
+                
+                // Clamp to [0,1] and convert back to uint8
+                r = std::max(0.0f, std::min(1.0f, r));
+                g = std::max(0.0f, std::min(1.0f, g));
+                b = std::max(0.0f, std::min(1.0f, b));
+                
+                pixels[pixelOffset + 0] = static_cast<uint8_t>(b * 255.0f);
+                pixels[pixelOffset + 1] = static_cast<uint8_t>(g * 255.0f);
+                pixels[pixelOffset + 2] = static_cast<uint8_t>(r * 255.0f);
+                // Alpha channel unchanged
+            }
+        }
+        
+        context->Unmap(texture, 0);
+    }
+
     bool AcquireHwInputSurface(int &slotIndexOut, ID3D11Texture2D** nv12TextureOut) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
         if (!codecCtx || g_hwFrames.empty()) return false;
@@ -591,6 +682,13 @@ namespace Encoder {
     }
 
     bool VideoProcessorBltToSlot(ID3D11Texture2D* bgraSrcTexture, int slotIndex) {
+        // Apply HDR tone mapping if enabled (before video processing)
+        if (g_hdrToneMappingEnabled) {
+            Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+            ((ID3D11Device*)GetD3DDevice().get())->GetImmediateContext(context.GetAddressOf());
+            ApplyHdrToneMapping(bgraSrcTexture, context.Get());
+        }
+
         // Core GPU operation under mutex (keep this minimal)
         HRESULT bltHr = E_FAIL;
         {
@@ -1229,6 +1327,11 @@ namespace Encoder {
     }
 
     void EncodeFrame(ID3D11Texture2D* texture, ID3D11DeviceContext* context, int width, int height, int64_t pts) {
+        // Apply HDR tone mapping if enabled (before video processing)
+        if (g_hdrToneMappingEnabled) {
+            ApplyHdrToneMapping(texture, context);
+        }
+
         // Use pre-allocated merge buffer to avoid reallocations
         EnsurePacketMergeBufferCapacity();
         auto& merged = g_packetMergeBuffer;

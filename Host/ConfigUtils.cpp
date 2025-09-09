@@ -112,6 +112,17 @@ void ApplyVideoSettings(const nlohmann::json& config)
         int asyncDepth     = vcfg.value("asyncDepth", 2);
         int surfaces       = vcfg.value("surfaces", 8);
         Encoder::SetNvencOptions(preset.c_str(), rc.c_str(), bf, rcLookahead, asyncDepth, surfaces);
+
+        // HDR tone mapping configuration
+        if (vcfg.contains("hdrToneMapping")) {
+            auto hdrCfg = vcfg["hdrToneMapping"];
+            bool hdrEnabled = hdrCfg.value("enabled", false);
+            std::string method = hdrCfg.value("method", std::string("reinhard"));
+            float exposure = hdrCfg.value("exposure", 0.0f);
+            float gamma = hdrCfg.value("gamma", 2.2f);
+            float saturation = hdrCfg.value("saturation", 1.0f);
+            Encoder::SetHdrToneMappingConfig(hdrEnabled, method, exposure, gamma, saturation);
+        }
     } catch (...) {}
 }
 

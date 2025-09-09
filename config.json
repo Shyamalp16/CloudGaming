@@ -26,7 +26,14 @@
         "ignorePli": false,
         "minPliIntervalMs": 500,
         "minPliLossThreshold": 0.03,
-        "gpuTiming": true
+        "gpuTiming": true,
+        "hdrToneMapping": {
+            "enabled": true,
+            "method": "reinhard",
+            "exposure": 0.0,
+            "gamma": 2.2,
+            "saturation": 1.0
+        }
     },
     "capture": {
       "copyPoolSize": 16,
@@ -35,7 +42,7 @@
       "dropWindowMs": 150,
       "dropMinEvents": 3,
       "mmcss": { "enable": true, "priority": 2 },
-      "cursor": false,
+      "cursor": true,
       "borderRequired": false,
       "minUpdateInterval100ns": 0
     },

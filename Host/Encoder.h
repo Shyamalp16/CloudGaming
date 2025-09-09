@@ -84,6 +84,9 @@ namespace Encoder {
     // Enable/disable D3D11 deferred context path for VideoProcessorBlt
     void SetDeferredContextEnabled(bool enable);
 
+    // HDR tone mapping configuration
+    void SetHdrToneMappingConfig(bool enabled, const std::string& method, float exposure, float gamma, float saturation);
+
     extern "C" int sendVideoSample(uint8_t* data, int size, int64_t durationUs);
 
     extern int currentWidth;
