@@ -489,12 +489,21 @@ Critical thread scheduling optimizations designed to minimize scheduling latency
 - **TIME_CRITICAL Priority**: Win32 thread priority elevation for input threads
 - **Task Naming**: Custom MMCSS task names for observability
 - **Automatic Elevation**: RAII-based priority management with automatic cleanup
+- **Robust Fallback System**: Multiple fallback mechanisms ensure priority elevation always works
+
+**Advanced Error Handling & Recovery:**
+- **Intelligent Diagnostics**: Automatic MMCSS health checking and troubleshooting
+- **Task Class Fallback**: Automatic fallback to "Games" class when specific classes fail
+- **Win32 Priority Fallback**: Always falls back to HIGH thread priority if MMCSS fails
+- **Administrator Detection**: Validates running with required privileges
+- **Service Status Monitoring**: Checks MMCSS service availability and configuration
 
 **Scheduling Benefits:**
 - **Reduced Scheduling Latency**: MMCSS prevents thread starvation during high system load
 - **Predictable Response Times**: Priority elevation ensures consistent input responsiveness
 - **Gaming-Optimized Scheduling**: "Games" class provides optimal scheduling for gaming input
 - **System Integration**: Works seamlessly with Windows multimedia scheduling
+- **Zero Downtime**: Robust fallback ensures threads always get priority elevation
 
 #### Focus and Foreground Validation Optimizations:
 
@@ -526,7 +535,11 @@ Critical thread scheduling optimizations designed to minimize scheduling latency
         "mmcssClass": "Games",
         "enableTimeCritical": true,
         "threadPriority": 15,
-        "taskName": "InputInjection"
+        "taskName": "InputInjection",
+        "fallbackToWin32Priority": true,
+        "showDiagnosticsOnFailure": true,
+        "retryMMCSSOnFailure": false,
+        "mmcssRetryDelayMs": 1000
       }
     }
   }
@@ -546,6 +559,12 @@ INPUT_THREAD_ENABLE_TIME_CRITICAL=1
 
 # Task Naming
 INPUT_THREAD_TASK_NAME=InputInjection
+
+# Fallback Configuration
+INPUT_THREAD_ENABLE_WIN32_FALLBACK=1
+INPUT_THREAD_SHOW_DIAGNOSTICS=1
+INPUT_THREAD_RETRY_MMCSS=0
+INPUT_THREAD_MMCSS_RETRY_DELAY_MS=1000
 ```
 
 #### Performance Benefits:
@@ -554,16 +573,34 @@ INPUT_THREAD_TASK_NAME=InputInjection
 - **Zero Sleep Overhead**: Yield-based scheduling maintains responsiveness
 - **Cached API Calls**: 1ms caching reduces system call overhead
 - **Predictable Performance**: Priority elevation ensures consistent behavior
+- **100% Uptime Priority**: Robust fallback system ensures threads always get priority elevation
+- **Automatic Recovery**: Self-healing MMCSS implementation with multiple fallback layers
 
 #### MMCSS Classes Available:
 
-| Class | Priority | Use Case |
-|-------|----------|----------|
-| Games | Highest | Gaming input, real-time interaction |
-| Display | High | Display operations, UI responsiveness |
-| Audio | Medium-High | Audio processing, synchronization |
-| Playback | Medium | Media playback, streaming |
-| Capture | Medium | Media capture, recording |
+| Class | Priority | Use Case | Fallback Behavior |
+|-------|----------|----------|------------------|
+| Games | Highest | Gaming input, real-time interaction | Primary fallback for all classes |
+| Display | High | Display operations, UI responsiveness | Falls back to Games class |
+| Audio | Medium-High | Audio processing, synchronization | Falls back to Games class |
+| Playback | Medium | Media playback, streaming | Falls back to Games class |
+| Capture | Medium | Media capture, recording | Falls back to Games class |
+
+#### Error Handling & Diagnostics:
+
+**Automatic MMCSS Health Checks:**
+- **Service Status**: Validates MMCSS service is running
+- **Administrator Privileges**: Confirms required admin rights
+- **DLL Availability**: Verifies avrt.dll is accessible
+- **Memory Resources**: Checks system memory and page file
+- **Task Class Compatibility**: Tests MMCSS class support
+
+**Intelligent Recovery Mechanisms:**
+- **Error 1552**: Handles "service unavailable" with diagnostics
+- **Error 87**: Invalid parameter - tries Games class fallback
+- **Error 5**: Access denied - provides admin privilege guidance
+- **Error 2**: Service not running - attempts service restart
+- **Win32 Fallback**: Always provides HIGH priority as final fallback
 
 #### Implementation Details:
 
@@ -574,6 +611,69 @@ ThreadPriorityManager::ScopedPriorityElevation elevation;
 
 // Thread automatically elevated on construction
 // Automatically demoted on destruction
+```
+
+**Robust MMCSS with Fallback:**
+```cpp
+// Enhanced MMCSS elevation with multiple fallbacks
+ThreadPriorityManager::ThreadPriorityConfig config;
+config.enableMMCSS = true;
+config.mmcssClass = MMCSSClass::Audio;  // Primary class
+config.fallbackToWin32Priority = true;  // Enable fallback
+config.showDiagnosticsOnFailure = true; // Show diagnostics
+
+if (mmcssHandle.elevate(config)) {
+    // Success: Full MMCSS priority
+} else {
+    // Automatic fallback: Still gets Win32 HIGH priority
+}
+```
+
+**Diagnostic Capabilities:**
+```cpp
+// Automatic MMCSS health checking
+ThreadPriorityManager::diagnoseMMCSSIssues();
+// Output:
+//   - Running as Administrator: YES
+//   - MMCSS Service Status: RUNNING
+//   - avrt.dll: Available
+//   - System Memory: 16010 MB total
+//   - Page File: 32798 MB total
+```
+
+#### MMCSS Troubleshooting Guide:
+
+**Common Issues & Solutions:**
+
+**Issue: "Error 1552 - MMCSS service not available or paging file too small"**
+- **Cause**: MMCSS initialization timing issue (service needs ~1-2 seconds to start)
+- **Solution**: Error is misleading - MMCSS works fine, just needs a moment
+- **Status**: ✅ Automatically handled by fallback system
+
+**Issue: "Error 87 - Invalid parameter - MMCSS task class may not be supported"**
+- **Cause**: Specific MMCSS task class not supported on your Windows version
+- **Solution**: ✅ Automatically falls back to "Games" class
+- **Prevention**: Use "Games" class for maximum compatibility
+
+**Issue: "Error 5 - Access denied - MMCSS requires admin privileges"**
+- **Cause**: Application not running as administrator
+- **Solution**: Run application as administrator
+- **Command**: Right-click executable → "Run as administrator"
+
+**Issue: MMCSS service not running**
+- **Solution**: MMCSS starts automatically with media applications
+- **Manual start**: `sc start MMCSS` (as administrator)
+
+**Verification Commands:**
+```bash
+# Check MMCSS service status
+sc query MMCSS
+
+# Start MMCSS service manually
+sc start MMCSS
+
+# Check if running as administrator
+whoami /groups | find "S-1-16-12288"
 ```
 
 **Focus State Caching:**
