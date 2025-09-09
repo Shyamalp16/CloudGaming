@@ -20,6 +20,11 @@
 #pragma comment(lib, "Propsys.lib")
 #include <versionhelpers.h>  // For Windows version checking
 #include <tlhelp32.h>         // For process enumeration
+#include <filesystem>         // For std::filesystem::path
+// Define PKEY_Device_FriendlyName if not available from headers
+#ifndef PKEY_Device_FriendlyName
+const PROPERTYKEY PKEY_Device_FriendlyName = { { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } }, 14 };
+#endif
 // Completion handler for ActivateAudioInterfaceAsync
 class ActivateAudioCompletionHandler : public IActivateAudioInterfaceCompletionHandler {
 public:
@@ -207,7 +212,7 @@ DWORD FindProcessIdByName(const std::wstring& processName)
     return processId;
 }
 
-bool AudioCapturer::StartCapture(DWORD processId)
+bool AudioCapturer::StartCapture(DWORD processId, const std::string& processName)
 {
     // Set up MMCSS for audio capture thread to ensure consistent timing
     static bool audioCaptureThreadConfigured = false;
@@ -240,6 +245,7 @@ bool AudioCapturer::StartCapture(DWORD processId)
     
     // Store initialization parameters for potential reinitialization
     m_targetProcessId = processId;
+    m_targetProcessName = processName; // Store for diagnostics
     m_hnsRequestedDuration = 20000000; // 2 seconds default (can be made configurable)
 
     // Set this as the active instance for parameter updates
@@ -344,6 +350,7 @@ bool AudioCapturer::StartCapture(DWORD processId)
     // Start the queue processor thread for async audio packet processing
     StartQueueProcessor();
 
+    std::wcout << L"[AudioCapturer] DEBUG: Starting capture thread for PID=" << processId << std::endl;
     m_captureThread = std::thread(&AudioCapturer::CaptureThread, this, processId);
 
     // Run audio streaming diagnostics after a short delay to allow WebRTC connection to establish
@@ -481,6 +488,11 @@ bool AudioCapturer::InitializeWAVFile(const std::string& filename)
         m_wavTotalSamples = 0;
         m_wavSamplesSinceHeader = 0;
 
+        // Additional safety check - ensure we have valid config
+        if (s_audioConfig.channels == 0) {
+            std::wcerr << L"[WAV] WARNING: Audio config not properly initialized, using defaults" << std::endl;
+        }
+
         m_wavFile.open(filename, std::ios::binary | std::ios::out | std::ios::trunc);
 
         if (!m_wavFile.is_open()) {
@@ -489,8 +501,13 @@ bool AudioCapturer::InitializeWAVFile(const std::string& filename)
         }
 
         // Initialize WAV header format. Force PCM16 to match WriteWAVData conversion path
-        m_wavHeader.numChannels = (m_activeChannels > 0) ? m_activeChannels : s_audioConfig.channels;
-        m_wavHeader.sampleRate = (m_activeSampleRate > 0) ? m_activeSampleRate : 48000;
+        // Use safe defaults if audio device hasn't been initialized yet
+        uint16_t channels = (m_activeChannels > 0) ? m_activeChannels :
+                           (s_audioConfig.channels > 0) ? s_audioConfig.channels : 2;
+        uint32_t sampleRate = (m_activeSampleRate > 0) ? m_activeSampleRate : 48000;
+
+        m_wavHeader.numChannels = channels;
+        m_wavHeader.sampleRate = sampleRate;
         m_wavHeader.bitsPerSample = 16;
         m_wavHeader.audioFormat = 1; // PCM
 
@@ -1389,6 +1406,7 @@ bool AudioCapturer::QueueAudioPacket(const uint8_t* buffer, size_t size, int64_t
 
 void AudioCapturer::CaptureThread(DWORD targetProcessId)
 {
+    std::wcout << L"[AudioCapturer] DEBUG: CaptureThread started for PID=" << targetProcessId << std::endl;
     HRESULT hr;
     // Calculate requested duration based on WASAPI configuration
     REFERENCE_TIME hnsRequestedDuration = static_cast<REFERENCE_TIME>(s_audioConfig.wasapi.devicePeriodMs * 10000.0); // Convert ms to 100ns units
@@ -1424,6 +1442,12 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     // Register this thread with MMCSS for proper scheduling priority
     // This helps prevent audio glitching under system load
     m_hMmcssTask = AvSetMmThreadCharacteristicsW(L"Pro Audio", &m_mmcssTaskIndex);
+
+    // Add delay for gaming applications to initialize audio sessions
+    // Games like CS2.exe may not have started audio sessions immediately
+    std::wcout << L"[AudioCapturer] Waiting 3 seconds for target process audio session initialization..." << std::endl;
+    Sleep(3000); // 3 second delay to allow games to start audio
+    std::wcout << L"[AudioCapturer] 3-second delay completed, proceeding with device scan..." << std::endl;
     if (m_hMmcssTask == nullptr) {
         // Fallback to "Audio" if "Pro Audio" is not available
         m_hMmcssTask = AvSetMmThreadCharacteristicsW(L"Audio", &m_mmcssTaskIndex);
@@ -1452,6 +1476,25 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     // ============================================================================
     // Application-specific audio capture via ActivateAudioInterfaceAsync
     // ============================================================================
+
+    // For gaming applications, log helpful information about audio capture methods
+    std::wcout << L"[AudioCapturer] Starting audio capture for PID=" << targetProcessId << std::endl;
+    std::wcout << L"[AudioCapturer] Process loopback enabled: " << (s_audioConfig.processLoopback.enabled ? L"YES" : L"NO") << std::endl;
+
+    // Store target process name for session matching (works with any process name)
+    std::string targetProcessNameLower = m_targetProcessName;
+    if (!targetProcessNameLower.empty()) {
+        std::transform(targetProcessNameLower.begin(), targetProcessNameLower.end(), targetProcessNameLower.begin(), ::tolower);
+    }
+
+    // Provide guidance based on process loopback configuration
+    if (s_audioConfig.processLoopback.enabled) {
+        std::wcout << L"[AudioCapturer] Process loopback is enabled - attempting direct process audio capture" << std::endl;
+        std::wcout << L"[AudioCapturer] This works best for applications that don't have special audio routing" << std::endl;
+    } else {
+        std::wcout << L"[AudioCapturer] Process loopback disabled - will use device loopback instead" << std::endl;
+    }
+
     if (s_audioConfig.processLoopback.enabled && targetProcessId != 0)
     {
         std::wcout << L"[AudioCapturer] Attempting process loopback capture via ActivateAudioInterfaceAsync for PID="
@@ -1472,8 +1515,22 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         {
             DWORD lastError = GetLastError();
             std::wcerr << L"[AudioCapturer] Cannot access target process " << targetProcessId
-                       << L": " << _com_error(HRESULT_FROM_WIN32(lastError)).ErrorMessage() << std::endl;
-            std::wcerr << L"[AudioCapturer] This may be due to UAC restrictions, process isolation, or the process not existing." << std::endl;
+                       << L": " << _com_error(HRESULT_FROM_WIN32(lastError)).ErrorMessage()
+                       << L" (Error code: " << lastError << L")" << std::endl;
+
+            // Provide specific guidance for gaming applications
+            if (lastError == ERROR_ACCESS_DENIED)
+            {
+                std::wcerr << L"[AudioCapturer] ACCESS DENIED - This is common with:" << std::endl;
+                std::wcerr << L"[AudioCapturer]   • Protected processes (games like CS2.exe)" << std::endl;
+                std::wcerr << L"[AudioCapturer]   • Elevated/UAC processes" << std::endl;
+                std::wcerr << L"[AudioCapturer]   • Anti-cheat protected games" << std::endl;
+                std::wcerr << L"[AudioCapturer]   → Will fallback to device loopback" << std::endl;
+            }
+            else if (lastError == ERROR_INVALID_PARAMETER)
+            {
+                std::wcerr << L"[AudioCapturer] Process does not exist or has terminated" << std::endl;
+            }
             processLoopbackFallbackReason = L"Cannot access target process";
         }
         else
@@ -1779,9 +1836,11 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 }
             }
         }
-    if (processLoopbackFallbackReason == L"Process loopback initialization started")
-    {
-        processLoopbackFallbackReason = L"Process loopback logic completed without setting success flag";
+
+        if (processLoopbackFallbackReason == L"Process loopback initialization started")
+        {
+            processLoopbackFallbackReason = L"Process loopback logic completed without setting success flag";
+        }
     }
 
     // Log final diagnostic summary
@@ -2135,7 +2194,6 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             pDevice = NULL;
         }
     }
-}
 
     // ============================================================================
     // Default/device-selected loopback path
@@ -2156,30 +2214,131 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
         // 2) enumerate endpoints to find one hosting target PID
         if (!m_pDevice && m_targetProcessId != 0) {
+            std::wcout << L"[AudioCapturer] 🔍 DEBUG: About to scan audio devices for target PID=" << m_targetProcessId << std::endl;
+            std::wcout << L"[AudioCapturer] 🔍 Scanning all active audio devices for target process sessions..." << std::endl;
+
+            // Safety check: ensure enumerator is valid
+            if (!m_pEnumerator) {
+                std::wcerr << L"[AudioCapturer] ERROR: Audio enumerator is NULL! Cannot scan devices." << std::endl;
+                std::wcout << L"[AudioCapturer] Will fallback to default device loopback" << std::endl;
+                goto AfterDeviceSelection; // Skip to default device fallback
+            }
+
             IMMDeviceCollection* pCollection = NULL;
             hr = m_pEnumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pCollection);
-            if (SUCCEEDED(hr) && pCollection) {
-                UINT count = 0;
-                if (SUCCEEDED(pCollection->GetCount(&count))) {
-                    for (UINT i = 0; i < count && !m_pDevice; ++i) {
-                        IMMDevice* pDev = NULL;
-                        if (SUCCEEDED(pCollection->Item(i, &pDev)) && pDev) {
-                            IAudioSessionManager2* pMgr = NULL;
-                            if (SUCCEEDED(pDev->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, NULL, (void**)&pMgr)) && pMgr) {
-                                IAudioSessionEnumerator* pEnum = NULL;
-                                if (SUCCEEDED(pMgr->GetSessionEnumerator(&pEnum)) && pEnum) {
-                                    int sc = 0;
-                                    if (SUCCEEDED(pEnum->GetCount(&sc))) {
-                                        for (int s = 0; s < sc && !m_pDevice; ++s) {
-                                            IAudioSessionControl* pCtrl = NULL;
-                                            if (SUCCEEDED(pEnum->GetSession(s, &pCtrl)) && pCtrl) {
+            if (FAILED(hr)) {
+                std::wcerr << L"[AudioCapturer] ERROR: EnumAudioEndpoints failed with HRESULT: 0x" << std::hex << hr << std::dec << std::endl;
+                std::wcout << L"[AudioCapturer] Will fallback to default device loopback" << std::endl;
+                goto AfterDeviceSelection; // Skip to default device fallback
+            }
+
+            if (!pCollection) {
+                std::wcerr << L"[AudioCapturer] ERROR: EnumAudioEndpoints returned NULL collection" << std::endl;
+                std::wcout << L"[AudioCapturer] Will fallback to default device loopback" << std::endl;
+                goto AfterDeviceSelection; // Skip to default device fallback
+            }
+
+            UINT count = 0;
+            hr = pCollection->GetCount(&count);
+            if (FAILED(hr)) {
+                std::wcerr << L"[AudioCapturer] ERROR: GetCount failed with HRESULT: 0x" << std::hex << hr << std::dec << std::endl;
+                pCollection->Release();
+                std::wcout << L"[AudioCapturer] Will fallback to default device loopback" << std::endl;
+                goto AfterDeviceSelection; // Skip to default device fallback
+            }
+
+            std::wcout << L"[AudioCapturer] DEBUG: EnumAudioEndpoints succeeded, found " << count << L" active audio devices" << std::endl;
+            std::wcout << L"[AudioCapturer] Found " << count << L" active audio devices" << std::endl;
+
+            for (UINT i = 0; i < count && !m_pDevice; ++i) {
+                IMMDevice* pDev = NULL;
+                hr = pCollection->Item(i, &pDev);
+                if (FAILED(hr)) {
+                    std::wcerr << L"[AudioCapturer] ERROR: Item(" << i << L") failed with HRESULT: 0x" << std::hex << hr << std::dec << std::endl;
+                    continue;
+                }
+
+                if (!pDev) {
+                    std::wcerr << L"[AudioCapturer] ERROR: Item(" << i << L") returned NULL device" << std::endl;
+                    continue;
+                }
+
+                // Get device friendly name for logging
+                IPropertyStore* pProps = NULL;
+                LPWSTR deviceName = NULL;
+                if (SUCCEEDED(pDev->OpenPropertyStore(STGM_READ, &pProps)) && pProps) {
+                    PROPVARIANT varName;
+                    PropVariantInit(&varName);
+                    if (SUCCEEDED(pProps->GetValue(PKEY_Device_FriendlyName, &varName))) {
+                        deviceName = varName.pwszVal;
+                    }
+                    PropVariantClear(&varName);
+                    pProps->Release();
+                }
+                std::wcout << L"[AudioCapturer]   Device " << i << L": " << (deviceName ? deviceName : L"Unknown") << std::endl;
+
+                IAudioSessionManager2* pMgr = NULL;
+                hr = pDev->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, NULL, (void**)&pMgr);
+                if (FAILED(hr)) {
+                    std::wcerr << L"[AudioCapturer] ERROR: Activate(IAudioSessionManager2) failed with HRESULT: 0x" << std::hex << hr << std::dec << std::endl;
+                    pDev->Release();
+                    continue;
+                }
+
+                if (!pMgr) {
+                    std::wcerr << L"[AudioCapturer] ERROR: Activate returned NULL session manager" << std::endl;
+                    pDev->Release();
+                    continue;
+                }
+
+                IAudioSessionEnumerator* pEnum = NULL;
+                hr = pMgr->GetSessionEnumerator(&pEnum);
+                if (FAILED(hr)) {
+                    std::wcerr << L"[AudioCapturer] ERROR: GetSessionEnumerator failed with HRESULT: 0x" << std::hex << hr << std::dec << std::endl;
+                    pMgr->Release();
+                    pDev->Release();
+                    continue;
+                }
+
+                // Now enumerate sessions on this device
+                int sc = 0;
+                if (SUCCEEDED(pEnum->GetCount(&sc))) {
+                    std::wcout << L"[AudioCapturer]     Sessions on this device: " << sc << std::endl;
+                    for (int s = 0; s < sc && !m_pDevice; ++s) {
+                        IAudioSessionControl* pCtrl = NULL;
+                        if (SUCCEEDED(pEnum->GetSession(s, &pCtrl)) && pCtrl) {
                                                 IAudioSessionControl2* pCtrl2 = NULL;
                                                 if (SUCCEEDED(pCtrl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&pCtrl2)) && pCtrl2) {
                                                     DWORD pid = 0;
                                                     if (SUCCEEDED(pCtrl2->GetProcessId(&pid))) {
-                                                        if (pid == m_targetProcessId) {
+                                                        // Get process name for better logging and matching
+                                                        std::wstring processName = L"Unknown";
+                                                        std::string processNameLower = "unknown";
+                                                        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+                                                        if (hProcess) {
+                                                            WCHAR exeName[MAX_PATH];
+                                                            DWORD exeNameSize = MAX_PATH;
+                                                            if (QueryFullProcessImageNameW(hProcess, 0, exeName, &exeNameSize)) {
+                                                                std::filesystem::path exePath(exeName);
+                                                                processName = exePath.filename().wstring();
+                                                                processNameLower = std::string(processName.begin(), processName.end());
+                                                                std::transform(processNameLower.begin(), processNameLower.end(), processNameLower.begin(), ::tolower);
+                                                            }
+                                                            CloseHandle(hProcess);
+                                                        }
+
+                                                        std::wcout << L"[AudioCapturer]       Session " << s << L": PID=" << pid << L" (" << processName << L")" << std::endl;
+                                                        // Match either by PID or by process name
+                                                        bool isTargetProcess = (pid == m_targetProcessId);
+                                                        if (!isTargetProcess && !targetProcessNameLower.empty() && !processNameLower.empty()) {
+                                                            // Check if the session process name matches our target process name
+                                                            isTargetProcess = (processNameLower.find(targetProcessNameLower) != std::string::npos);
+                                                        }
+
+                                                        if (isTargetProcess) {
                                                             m_pDevice = pDev; // take ownership
-                                                            std::wcout << L"[AudioCapturer] Selected endpoint hosting PID=" << pid << std::endl;
+                                                            std::wcout << L"[AudioCapturer] 🎯 FOUND TARGET PROCESS SESSION! Selected endpoint hosting PID=" << pid << L" (" << processName << L")" << std::endl;
+                                                            std::wcout << L"[AudioCapturer] Device: " << (deviceName ? deviceName : L"Unknown") << std::endl;
                                                             pCtrl2->Release();
                                                             pCtrl->Release();
                                                             pEnum->Release();
@@ -2190,27 +2349,41 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                                     }
                                                     pCtrl2->Release();
                                                 }
-                                                pCtrl->Release();
-                                            }
-                                        }
-                                    }
-                                    pEnum->Release();
-                                }
-                                pMgr->Release();
+                            pCtrl->Release();
                             }
-                            pDev->Release();
-                        }
+                        pEnum->Release();    
+                        pMgr->Release();
                     }
+                    pDev->Release();
                 }
-                pCollection->Release();
             }
         }
+        pCollection->Release();
 
-        // 3) fallback to default device
+        // Log if we didn't find target process on any device
+        if (!m_pDevice && m_targetProcessId != 0) {
+            std::wcout << L"[AudioCapturer] ❌ Target process sessions NOT found on any audio device!" << std::endl;
+            std::wcout << L"[AudioCapturer] This could mean:" << std::endl;
+            std::wcout << L"[AudioCapturer]   • Target process hasn't started producing audio yet" << std::endl;
+            std::wcout << L"[AudioCapturer]   • Target process is using a different audio device (not listed)" << std::endl;
+            std::wcout << L"[AudioCapturer]   • Application is routing audio through middleware/overlay" << std::endl;
+            std::wcout << L"[AudioCapturer]   • Target process audio is muted or disabled" << std::endl;
+            std::wcout << L"[AudioCapturer] Will fallback to default device loopback" << std::endl;
+        }
+    }
+
+    // 3) fallback to default device
+    std::wcout << L"[AudioCapturer] DEBUG: Attempting to get default audio device..." << std::endl;
+
+    // Safety check: ensure enumerator is still valid
+    if (!m_pEnumerator) {
+        std::wcerr << L"[AudioCapturer] ERROR: Audio enumerator became NULL before default device fallback!" << std::endl;
+        goto Exit;
+    }
+
         hr = m_pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &m_pDevice);
 DeviceSelected:
-        if (FAILED(hr))
-        {
+        if (FAILED(hr)){
             std::wcerr << L"[AudioCapturer] Failed to get default render device: " << _com_error(hr).ErrorMessage()
                        << L" (HRESULT: 0x" << std::hex << hr << std::dec << L")" << std::endl;
             std::wcerr << L"[AudioCapturer] Audio capture initialization failed completely." << std::endl;
@@ -2218,10 +2391,41 @@ DeviceSelected:
             std::wcerr << L"[AudioCapturer]   - No audio devices available" << std::endl;
             std::wcerr << L"[AudioCapturer]   - Audio service not running" << std::endl;
             std::wcerr << L"[AudioCapturer]   - Insufficient permissions" << std::endl;
+            std::wcerr << L"[AudioCapturer]   - COM initialization issues" << std::endl;
         goto Exit;
         }
 
+        if (!m_pDevice) {
+            std::wcerr << L"[AudioCapturer] ERROR: GetDefaultAudioEndpoint returned NULL device!" << std::endl;
+            goto Exit;
+        }
+
+        // Log which device we're using
+        if (m_pDevice) {
+            IPropertyStore* pProps = NULL;
+            if (SUCCEEDED(m_pDevice->OpenPropertyStore(STGM_READ, &pProps)) && pProps) {
+                PROPVARIANT varName;
+                PropVariantInit(&varName);
+                if (SUCCEEDED(pProps->GetValue(PKEY_Device_FriendlyName, &varName))) {
+                    std::wcout << L"[AudioCapturer] 📢 Using default audio device: " << varName.pwszVal << std::endl;
+                }
+                PropVariantClear(&varName);
+                pProps->Release();
+            }
+        }
+
         std::wcout << L"[AudioCapturer] Capture path selected: DEVICE_LOOPBACK (default device)" << std::endl;
+        std::wcout << L"[AudioCapturer] Using system audio capture - this will capture ALL audio on the default device" << std::endl;
+
+        // Generic troubleshooting guidance
+        if (!m_targetProcessName.empty()) {
+            std::wcout << L"[AudioCapturer] 📋 Troubleshooting for " << std::wstring(m_targetProcessName.begin(), m_targetProcessName.end()) << L":" << std::endl;
+            std::wcout << L"[AudioCapturer]   • Make sure the application is not muted in Windows Volume Mixer" << std::endl;
+            std::wcout << L"[AudioCapturer]   • Check if the application is outputting to the expected audio device" << std::endl;
+            std::wcout << L"[AudioCapturer]   • Verify the application is actually producing audio" << std::endl;
+            std::wcout << L"[AudioCapturer]   • Try restarting the application after starting this capture" << std::endl;
+            std::wcout << L"[AudioCapturer]   • Check if any overlays or middleware are interfering with audio" << std::endl;
+        }
 
         hr = m_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, reinterpret_cast<void**>(m_pAudioClient.ReleaseAndGetAddressOf()));
         if (FAILED(hr))
@@ -2380,7 +2584,7 @@ DeviceSelected:
         }
 
         std::wcout << L"[AudioCapturer] Successfully initialized default device with loopback capture." << std::endl;
-    }
+    
 
 AfterDeviceSelection:
     // Release local COM objects that are no longer needed
@@ -2484,6 +2688,11 @@ AfterDeviceSelection:
     while (m_stopCapture == false)
     {
         captureCycles++;
+
+        // DEBUG: Log every 100 cycles to verify capture loop is running
+        if (captureCycles % 500 == 0) {
+            std::wcout << L"[AudioCapturer] DEBUG: Capture loop iteration " << captureCycles << L" - still running" << std::endl;
+        }
 
         // Periodic heartbeat log to verify capture loop is running
         if (captureCycles % 1000 == 0) {
@@ -3139,6 +3348,13 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
         if (PushFrameToRingBuffer(m_currentFrameBuffer, m_currentFrameTimestamp)) {
             // Frame successfully queued to ring buffer
             AUDIO_LOG_INFO(L"[AudioCapturer] Frame successfully pushed to ring buffer");
+            // DEBUG: Log successful frame capture
+            static uint64_t frameCounter = 0;
+            frameCounter++;
+            if (frameCounter % 10 == 0) { // Log every 10th frame
+                std::wcout << L"[AudioCapturer] DEBUG: Successfully captured and queued frame #" << frameCounter
+                           << L" (size: " << m_currentFrameBuffer.size() << L" samples)" << std::endl;
+            }
             // Encoder thread polls continuously, so no explicit wake-up needed
         } else {
             std::wcerr << L"[AudioCapturer] Failed to push frame to ring buffer - encoder congestion" << std::endl;

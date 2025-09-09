@@ -113,7 +113,12 @@ int main()
     AudioCapturer audioCapturer;
     std::wcout << L"[main] Waiting for 2 seconds before starting audio capture..." << std::endl;
     Sleep(2000);
-    audioCapturer.StartCapture(pid);
+    // Start audio capture first (this initializes the audio device and format)
+    audioCapturer.StartCapture(pid, targetProcessName);
+
+    // Give audio capture time to initialize before starting WAV recording
+    std::wcout << L"[main] Waiting for audio capture initialization..." << std::endl;
+    Sleep(1000); // 1 second delay to allow audio device setup
 
     // Start WAV recording for debugging if enabled in config
     try {

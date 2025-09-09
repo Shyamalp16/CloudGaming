@@ -69,7 +69,7 @@ public:
     AudioCapturer();
     ~AudioCapturer();
 
-    bool StartCapture(DWORD processId);
+    bool StartCapture(DWORD processId, const std::string& processName = "");
     void StopCapture();
 
     // Static method to configure audio settings from config.json
@@ -411,6 +411,7 @@ private:
     DWORD m_targetProcessId = 0;
     REFERENCE_TIME m_hnsRequestedDuration = 0;
     WAVEFORMATEX* m_pwfxOriginal = nullptr;
+    std::string m_targetProcessName; // Store target process name for diagnostics
 
     // Enhanced error handling and monitoring
     struct ErrorStats {
