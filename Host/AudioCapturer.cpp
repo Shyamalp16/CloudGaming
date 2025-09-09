@@ -1418,6 +1418,12 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     DWORD sleepMs = 10; // polling interval (fallback when event mode is unavailable)
     bool eventMode = false; // declared early to avoid goto skipping initialization
 
+    // Declare variables that might be skipped by goto statements
+    DWORD streamFlags = 0;
+    AUDCLNT_SHAREMODE shareMode = AUDCLNT_SHAREMODE_SHARED;
+    WAVEFORMATEX* targetFormat = NULL;
+    size_t requiredSamplesDefault = 0;
+
     // Debug state for process loopback attempt/fallback
     bool processLoopbackAttempted = false;
     bool processLoopbackSucceeded = false;
@@ -1676,8 +1682,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                                 }
 
                                                 // For process loopback, use shared mode for broad compatibility
-                                                DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
-                                                WAVEFORMATEX* targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
+                                                streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+                                                targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
 
                                                 if (s_audioConfig.wasapi.force48kHzStereo) {
                                                     bool isAlreadyOptimal = (pwfx->nSamplesPerSec == 48000 &&
@@ -2037,12 +2043,12 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 GUID targetSessionGuid = GUID_NULL;
 
                 // Try exclusive mode first if preferred, then shared mode with event-driven capture
-                DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
-                AUDCLNT_SHAREMODE shareMode = s_audioConfig.wasapi.preferExclusiveMode ?
+                streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+                shareMode = s_audioConfig.wasapi.preferExclusiveMode ?
                     AUDCLNT_SHAREMODE_EXCLUSIVE : AUDCLNT_SHAREMODE_SHARED;
 
                 // If forcing 48kHz stereo, modify the format before initialization
-                WAVEFORMATEX* targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
+                targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
                 if (s_audioConfig.wasapi.force48kHzStereo) {
                     // Check if device already provides optimal format to avoid unnecessary conversions
                     bool isAlreadyOptimal = (pwfx->nSamplesPerSec == 48000 &&
@@ -2450,12 +2456,12 @@ DeviceSelected:
             << L", cbSize=" << pwfx->cbSize << std::endl;
 
         // Try exclusive mode first if preferred, then shared mode with event-driven capture
-        DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
-        AUDCLNT_SHAREMODE shareMode = s_audioConfig.wasapi.preferExclusiveMode ?
+        streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        shareMode = s_audioConfig.wasapi.preferExclusiveMode ?
             AUDCLNT_SHAREMODE_EXCLUSIVE : AUDCLNT_SHAREMODE_SHARED;
 
         // If forcing 48kHz stereo, modify the format before initialization
-        WAVEFORMATEX* targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
+        targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
         if (s_audioConfig.wasapi.force48kHzStereo) {
             // Check if device already provides optimal format to avoid unnecessary conversions
             bool isAlreadyOptimal = (pwfx->nSamplesPerSec == 48000 &&
@@ -2561,7 +2567,7 @@ DeviceSelected:
         std::wcout << L"[AudioCapturer] Default device buffer frame count: " << bufferFrameCount << std::endl;
 
         // Ensure working buffers can hold the device buffer size (avoid dropping frames)
-        size_t requiredSamplesDefault = static_cast<size_t>(bufferFrameCount) * static_cast<size_t>(pwfx->nChannels);
+        requiredSamplesDefault = static_cast<size_t>(bufferFrameCount) * static_cast<size_t>(pwfx->nChannels);
         if (m_floatBuffer.size() < requiredSamplesDefault) {
             m_floatBuffer.resize(requiredSamplesDefault);
         }
