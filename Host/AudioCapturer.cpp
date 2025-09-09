@@ -962,19 +962,19 @@ void AudioCapturer::EncoderThread()
         std::vector<float> frame;
         int64_t timestamp;
 
-        AUDIO_LOG_INFO(L"[AudioEncoder] Encoder thread polling ring buffer");
+        // AUDIO_LOG_INFO(L"[AudioEncoder] Encoder thread polling ring buffer");
 
         if (PopFrameFromRingBuffer(frame, timestamp)) {
             // We have a frame to encode
             AUDIO_LOG_DEBUG(L"[AudioEncoder] Processing frame: " << frame.size() << L" samples, timestamp: " << timestamp);
-            AUDIO_LOG_INFO(L"[AudioEncoder] FRAME RECEIVED FROM RING BUFFER - Size: " << frame.size() << L" samples");
+            // AUDIO_LOG_INFO(L"[AudioEncoder] FRAME RECEIVED FROM RING BUFFER - Size: " << frame.size() << L" samples");
             RawAudioFrame rawFrame;
             rawFrame.samples = std::move(frame);
             rawFrame.timestampUs = timestamp;
             EncodeAndQueueFrame(rawFrame);
         } else {
             // No frames available, sleep briefly to avoid busy waiting
-            AUDIO_LOG_INFO(L"[AudioEncoder] No frames in ring buffer, sleeping");
+            // AUDIO_LOG_INFO(L"[AudioEncoder] No frames in ring buffer, sleeping");
 
             // Use shorter sleep in ultra-low-latency mode for more responsive processing
             if (s_audioConfig.latency.ultraLowLatencyProfile) {
@@ -4030,23 +4030,23 @@ bool AudioCapturer::PushFrameToRingBuffer(const std::vector<float>& frame, int64
 
 bool AudioCapturer::PopFrameFromRingBuffer(std::vector<float>& frame, int64_t& timestamp)
 {
-    AUDIO_LOG_INFO(L"[RingBuffer] PopFrameFromRingBuffer called");
+    // AUDIO_LOG_INFO(L"[RingBuffer] PopFrameFromRingBuffer called");
 
     if (IsRingBufferEmpty()) {
-        AUDIO_LOG_INFO(L"[RingBuffer] Ring buffer is EMPTY");
+        // AUDIO_LOG_INFO(L"[RingBuffer] Ring buffer is EMPTY");
         return false;
     }
 
-    AUDIO_LOG_INFO(L"[RingBuffer] Popping frame from index " << m_ringBufferReadIndex << L", Count: " << m_ringBufferCount);
+    // AUDIO_LOG_INFO(L"[RingBuffer] Popping frame from index " << m_ringBufferReadIndex << L", Count: " << m_ringBufferCount);
 
     // Get frame from ring buffer (audio data is intact!)
     const auto& ringBufferFrame = m_frameRingBuffer[m_ringBufferReadIndex];
     frame = ringBufferFrame; // Direct copy - no corruption!
-    AUDIO_LOG_INFO(L"[RingBuffer] Frame copied - Size: " << frame.size() << L" samples");
+    // AUDIO_LOG_INFO(L"[RingBuffer] Frame copied - Size: " << frame.size() << L" samples");
 
     // Get timestamp from separate array
     timestamp = m_frameTimestamps[m_ringBufferReadIndex];
-    AUDIO_LOG_INFO(L"[RingBuffer] Timestamp retrieved: " << timestamp);
+    // AUDIO_LOG_INFO(L"[RingBuffer] Timestamp retrieved: " << timestamp);
 
     // Update ring buffer indices
     size_t oldReadIndex = m_ringBufferReadIndex;
