@@ -10,22 +10,22 @@
       "targetHeight": 1080
     },
     "video": {
-        "fps": 120,
-        "pacingFixedUs": 5000,
+        "fps": 144,
+        "pacingFixedUs": 6944,
         "bitrateStart": 25000000,
-        "bitrateMin": 10000000,
+        "bitrateMin": 12000000,
         "bitrateMax": 50000000,
-        "hwFramePoolSize": 20,
+        "hwFramePoolSize": 32,
         "fullRange": false,
-        "preset": "p4",
+        "preset": "p2",
         "rc": "cbr",
         "bf": 0,
         "rcLookahead": 0,
-        "asyncDepth": 4,
-        "surfaces": 12,
+        "asyncDepth": 8,
+        "surfaces": 20,
         "ignorePli": true,
-        "minPliIntervalMs": 1000,
-        "minPliLossThreshold": 0.05,
+        "minPliIntervalMs": 3000,
+        "minPliLossThreshold": 0.15,
         "gpuTiming": false,
         "hdrToneMapping": {
             "enabled": true,
@@ -36,27 +36,27 @@
         }
     },
     "capture": {
-      "copyPoolSize": 20,
-      "maxQueueDepth": 12,
-      "framePoolBuffers": 20,
-      "dropWindowMs": 200,
-      "dropMinEvents": 5,
-      "mmcss": { "enable": true, "priority": 3 },
+      "copyPoolSize": 32,
+      "maxQueueDepth": 20,
+      "framePoolBuffers": 32,
+      "dropWindowMs": 500,
+      "dropMinEvents": 12,
+      "mmcss": { "enable": true, "priority": 4 },
       "cursor": false,
       "borderRequired": false,
       "minUpdateInterval100ns": 0,
       "skipUnchanged": true,
-      "adaptiveBackoff": false,
+      "adaptiveBackoff": true,
       "adaptiveWindowMs": 2000,
-      "adaptiveEagainThreshold": 10
+      "adaptiveEagainThreshold": 8
     },
     "audio": {
       "processLoopback": {
         "enabled": false,
         "includeProcessTree": false
       },
-      "bitrate": 96000,
-      "complexity": 8,
+      "bitrate": 80000,
+      "complexity": 6,
       "expectedLossPerc": 5,
       "enableFec": true,
       "enableDtx": false,
@@ -68,8 +68,8 @@
       "wasapi": {
         "preferExclusiveMode": false,
         "enforceEventDriven": true,
-        "devicePeriodMs": 2.5,
-        "fallbackPeriodMs": 5.0,
+        "devicePeriodMs": 5.0,
+        "fallbackPeriodMs": 10.0,
         "force48kHzStereo": true,
         "preferLinearResampling": true,
         "useDmoOnlyForHighQuality": false
@@ -77,7 +77,7 @@
       "latency": {
         "enforceSingleFrameBuffering": true,
         "maxFrameSizeMs": 20,
-        "minFrameSizeMs": 10,
+        "minFrameSizeMs": 20,
         "strictLatencyMode": false,
         "warnOnBuffering": true,
         "targetOneWayLatencyMs": 40,
@@ -86,7 +86,7 @@
       },
       "bitrateAdaptation": {
         "enabled": true,
-        "minBitrate": 8000,
+        "minBitrate": 64000,
         "maxBitrate": 128000,
         "decreaseCooldownMs": 2000,
         "increaseIntervalMs": 10000,
@@ -143,7 +143,7 @@
         "mmcssRetryDelayMs": 1000
       },
       "adaptiveQualityControl": {
-        "enableAdaptiveDropping": false,
+        "enableAdaptiveDropping": true,
         "rttExcellentThreshold": 10.0,
         "rttGoodThreshold": 50.0,
         "rttFairThreshold": 100.0,
@@ -153,16 +153,16 @@
         "lossFairThreshold": 0.10,
         "lossPoorThreshold": 0.20,
         "queueExcellentThreshold": 1,
-        "queueGoodThreshold": 2,
-        "queueFairThreshold": 5,
-        "queuePoorThreshold": 10,
+        "queueGoodThreshold": 3,
+        "queueFairThreshold": 6,
+        "queuePoorThreshold": 12,
         "excellentDropRatio": 0.0,
         "goodDropRatio": 0.0,
-        "fairDropRatio": 0.0,
-        "poorDropRatio": 0.1,
-        "criticalDropRatio": 0.25,
-        "minFrameIntervalMs": 3,
-        "statsUpdateIntervalMs": 100
+        "fairDropRatio": 0.05,
+        "poorDropRatio": 0.15,
+        "criticalDropRatio": 0.3,
+        "minFrameIntervalMs": 5,
+        "statsUpdateIntervalMs": 50
       }
     }
   }
