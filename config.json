@@ -3,7 +3,7 @@
     "serverUrlBase": "ws://localhost:3002"
   },
   "host": {
-    "targetProcessName": "hollow_knight.exe",
+    "targetProcessName": "cs2.exe",
     "window": {
       "resizeClientArea": true,
       "targetWidth": 1920,
@@ -14,19 +14,19 @@
         "pacingFixedUs": 5000,
         "bitrateStart": 25000000,
         "bitrateMin": 10000000,
-        "bitrateMax": 60000000,
-        "hwFramePoolSize": 16,
+        "bitrateMax": 50000000,
+        "hwFramePoolSize": 20,
         "fullRange": false,
-        "preset": "p5",
+        "preset": "p4",
         "rc": "cbr",
         "bf": 0,
         "rcLookahead": 0,
-        "asyncDepth": 3,
-        "surfaces": 10,
-        "ignorePli": false,
-        "minPliIntervalMs": 500,
-        "minPliLossThreshold": 0.03,
-        "gpuTiming": true,
+        "asyncDepth": 4,
+        "surfaces": 12,
+        "ignorePli": true,
+        "minPliIntervalMs": 1000,
+        "minPliLossThreshold": 0.05,
+        "gpuTiming": false,
         "hdrToneMapping": {
             "enabled": true,
             "method": "reinhard",
@@ -36,15 +36,19 @@
         }
     },
     "capture": {
-      "copyPoolSize": 16,
-      "maxQueueDepth": 20,
-      "framePoolBuffers": 16,
-      "dropWindowMs": 150,
-      "dropMinEvents": 3,
-      "mmcss": { "enable": true, "priority": 2 },
-      "cursor": true,
+      "copyPoolSize": 20,
+      "maxQueueDepth": 12,
+      "framePoolBuffers": 20,
+      "dropWindowMs": 200,
+      "dropMinEvents": 5,
+      "mmcss": { "enable": true, "priority": 3 },
+      "cursor": false,
       "borderRequired": false,
-      "minUpdateInterval100ns": 0
+      "minUpdateInterval100ns": 0,
+      "skipUnchanged": true,
+      "adaptiveBackoff": false,
+      "adaptiveWindowMs": 2000,
+      "adaptiveEagainThreshold": 10
     },
     "audio": {
       "processLoopback": {
@@ -154,10 +158,10 @@
         "queuePoorThreshold": 10,
         "excellentDropRatio": 0.0,
         "goodDropRatio": 0.0,
-        "fairDropRatio": 0.25,
-        "poorDropRatio": 0.5,
-        "criticalDropRatio": 0.75,
-        "minFrameIntervalMs": 5,
+        "fairDropRatio": 0.0,
+        "poorDropRatio": 0.1,
+        "criticalDropRatio": 0.25,
+        "minFrameIntervalMs": 3,
         "statsUpdateIntervalMs": 100
       }
     }

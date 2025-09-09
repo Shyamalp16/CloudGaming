@@ -2070,7 +2070,14 @@ PRETTY_LOGS=true
       "bitrateMax": 50000000,
       "gpuTiming": false,
       "deferredContext": false,
-      "exportMetrics": false
+      "exportMetrics": false,
+      "hdrToneMapping": {
+        "enabled": true,
+        "method": "reinhard",
+        "exposure": 0.0,
+        "gamma": 2.2,
+        "saturation": 1.0
+      }
     },
     "capture": {
       "maxQueueDepth": 4,
@@ -2094,6 +2101,11 @@ Key fields:
 - `video.gpuTiming` (default false): when true, measures D3D11 VideoProcessor GPU time per second and logs it; latest ms value exposed via metrics.
 - `video.deferredContext` (default false): hint to prefer deferred paths. Note: D3D11 video processing executes via `ID3D11VideoContext` (immediate). The flag is a placeholder for future async/compute paths.
 - `video.exportMetrics` (default false): when true, periodically emits a `video-metrics` JSON over the signaling WebSocket with queue depth, drop counters, and GPU ms.
+- `video.hdrToneMapping.enabled` (default false): enables HDR to SDR tone mapping for compatibility with non-HDR client displays.
+- `video.hdrToneMapping.method` (default "reinhard"): tone mapping algorithm. Currently supports "reinhard" for preserving highlights while mapping to SDR range.
+- `video.hdrToneMapping.exposure` (default 0.0): exposure adjustment in stops (-2.0 to +2.0). Positive values brighten, negative values darken the image.
+- `video.hdrToneMapping.gamma` (default 2.2): gamma correction value (1.0-3.0). Standard display gamma is 2.2.
+- `video.hdrToneMapping.saturation` (default 1.0): color saturation multiplier (0.0-2.0). 1.0 = no change, >1.0 = more saturated, <1.0 = less saturated.
 - `capture.maxQueueDepth`: bounded capture queue size; oldest frames are dropped first to keep latency low.
 - `capture.framePoolBuffers` (default 6): number of buffers in the WGC free-threaded frame pool to absorb transient latency.
 - `capture.dropWindowMs`/`dropMinEvents`: drop policy threshold based on encoder backpressure (EAGAIN).
@@ -2103,6 +2115,106 @@ Key fields:
 - `capture.adaptiveWindowMs` (default 2000): window for sampling backpressure events.
 - `capture.adaptiveEagainThreshold` (default 10): if EAGAIN events within the window exceed this threshold, increase `minUpdateInterval100ns` by ~10% (capped) to reduce capture rate; if zero events, decrease by ~10% toward the base.
 - `capture.mmcss`: enables Multimedia Class Scheduler (MCSS) "Games" profile for the capture/encode thread with configurable priority.
+
+### HDR Tone Mapping
+
+The system includes HDR to SDR tone mapping functionality to ensure proper video display when streaming from HDR-enabled host displays to non-HDR client devices. This prevents the washed-out appearance that occurs when HDR content is displayed on SDR monitors without proper tone mapping.
+
+#### Problem
+When your host PC has HDR enabled and captures HDR content, but the client device doesn't support HDR, the video appears washed out because:
+1. HDR content is captured with extended brightness and color range
+2. The content is encoded as SDR BT.709 without proper tone mapping
+3. Non-HDR clients display the content as if it were standard SDR, causing washed-out appearance
+
+#### Solution
+HDR tone mapping converts HDR content to SDR range before encoding, ensuring proper display on all client devices:
+
+```json
+{
+  "host": {
+    "video": {
+      "hdrToneMapping": {
+        "enabled": true,
+        "method": "reinhard",
+        "exposure": 0.0,
+        "gamma": 2.2,
+        "saturation": 1.0
+      }
+    }
+  }
+}
+```
+
+#### Configuration Parameters
+
+- **`enabled`** (boolean, default: false): Enable/disable HDR tone mapping
+- **`method`** (string, default: "reinhard"): Tone mapping algorithm
+  - `"reinhard"`: Preserves highlights while mapping to SDR range using `x / (1 + x)`
+- **`exposure`** (float, default: 0.0): Exposure adjustment in stops (-2.0 to +2.0)
+  - Positive values brighten the image
+  - Negative values darken the image
+  - 0.0 = no exposure adjustment
+- **`gamma`** (float, default: 2.2): Gamma correction value (1.0-3.0)
+  - 2.2 = standard display gamma
+  - Lower values make image brighter
+  - Higher values make image darker
+- **`saturation`** (float, default: 1.0): Color saturation multiplier (0.0-2.0)
+  - 1.0 = no saturation change
+  - >1.0 = more saturated colors
+  - <1.0 = less saturated colors
+
+#### How It Works
+
+1. **Capture**: HDR content is captured normally from your HDR-enabled display
+2. **Tone Mapping**: Before encoding, the system applies:
+   - **Exposure adjustment**: `pixel * 2^exposure`
+   - **Reinhard tone mapping**: `pixel / (1 + pixel)` to compress HDR range to SDR
+   - **Gamma correction**: `pixel^(1/gamma)` for display compensation
+   - **Saturation adjustment**: Color intensity modification
+3. **Encoding**: Tone-mapped SDR content is encoded as BT.709
+4. **Client Display**: All clients receive properly tone-mapped SDR content
+
+#### Usage Examples
+
+**Basic HDR to SDR conversion:**
+```json
+"hdrToneMapping": {
+  "enabled": true,
+  "method": "reinhard",
+  "exposure": 0.0,
+  "gamma": 2.2,
+  "saturation": 1.0
+}
+```
+
+**Brighten HDR content for better visibility:**
+```json
+"hdrToneMapping": {
+  "enabled": true,
+  "method": "reinhard",
+  "exposure": 0.5,
+  "gamma": 2.0,
+  "saturation": 1.1
+}
+```
+
+**Reduce saturation for more natural colors:**
+```json
+"hdrToneMapping": {
+  "enabled": true,
+  "method": "reinhard",
+  "exposure": 0.0,
+  "gamma": 2.2,
+  "saturation": 0.9
+}
+```
+
+#### Performance Impact
+
+- **CPU Processing**: Tone mapping is performed on the CPU during video processing
+- **Minimal Overhead**: Applied only when enabled and only to captured frames
+- **No GPU Impact**: Uses efficient pixel processing without additional GPU operations
+- **Memory Efficient**: Processes pixels in-place without additional memory allocation
 
 ### Audio Configuration
 
