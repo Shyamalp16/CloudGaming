@@ -265,7 +265,8 @@ bool AudioCapturer::StartCapture(DWORD processId, const std::string& processName
     OpusEncoderWrapper::Settings settings;
 
     // Calculate frame size in samples from milliseconds
-    int frameSizeSamples = (s_audioConfig.frameSizeMs * 48000) / 1000; // 48kHz * ms / 1000
+    // FIX: Use proper rounding to avoid precision loss in integer division
+    int frameSizeSamples = static_cast<int>((s_audioConfig.frameSizeMs * 48000.0) / 1000.0 + 0.5);
 
     settings.sampleRate = 48000;                    // 48 kHz (fixed for Opus compatibility)
     settings.channels = s_audioConfig.channels;      // Configurable: 1=mono, 2=stereo
@@ -4274,7 +4275,10 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
             // More aggressive decrease for high loss
             double factor = (packetLoss >= 0.10) ? 0.5 : 0.7;
             int target = static_cast<int>(s_currentAudioBitrate.load() * factor);
-            int newBitrate = (std::max)(s_minAudioBitrate, target);
+            // FIX: Proper bitrate clamping with Opus limits
+            int opusMin = 6000;  // Opus minimum is 6 kbps
+            int effectiveMin = std::max(s_minAudioBitrate, opusMin);
+            int newBitrate = std::max(effectiveMin, target);
 
             s_currentAudioBitrate.store(newBitrate);
             s_lastAudioChange = now;
@@ -4300,7 +4304,13 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
 
         int current = s_currentAudioBitrate.load();
         int target = current + s_increaseStep;
-        int newBitrate = (std::min)(s_maxAudioBitrate, target);
+        // FIX: Proper bitrate clamping with Opus limits (6-510 kbps per RFC 6716)
+        // Also ensure we respect configured min/max bounds
+        int opusMin = 6000;  // Opus minimum is 6 kbps
+        int opusMax = 510000; // Opus maximum is 510 kbps per channel (1020 kbps for stereo)
+        int effectiveMin = std::max(s_minAudioBitrate, opusMin);
+        int effectiveMax = std::min(s_maxAudioBitrate, opusMax);
+        int newBitrate = std::clamp(target, effectiveMin, effectiveMax);
 
         if (newBitrate > current) {
             s_currentAudioBitrate.store(newBitrate);
@@ -4494,9 +4504,15 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
                     s_audioConfig.frameSizeMs = 10; // Default to 10ms
                 }
             } else {
-                // Legacy validation for backward compatibility
-                if (frameSizeMs == 10 || frameSizeMs == 20 || frameSizeMs == 40) {
+                // Legacy validation for backward compatibility - accept any valid Opus frame size
+                // Valid Opus frame sizes: 2.5, 5, 10, 20, 40, 60ms (we use integer ms, so: 5, 10, 20, 40, 60)
+                if (frameSizeMs == 5 || frameSizeMs == 10 || frameSizeMs == 20 || frameSizeMs == 40 || frameSizeMs == 60) {
                     s_audioConfig.frameSizeMs = frameSizeMs;
+                } else {
+                    // Default to 20ms if invalid value provided (don't silently fail)
+                    std::wcerr << L"[AudioConfig] Invalid frameSizeMs " << frameSizeMs 
+                              << L"ms (valid: 5,10,20,40,60), using default 20ms" << std::endl;
+                    s_audioConfig.frameSizeMs = 20;
                 }
             }
         }
@@ -4604,7 +4620,8 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
             }
         }
 
-        std::wcout << L"[AudioCapturer] Audio config loaded: bitrate=" << s_audioConfig.bitrate
+        // FIX: Ensure decimal output for bitrate (not hex) and verify frameSizeMs was set
+        std::wcout << L"[AudioCapturer] Audio config loaded: bitrate=" << std::dec << s_audioConfig.bitrate
                    << L" bps, complexity=" << s_audioConfig.complexity
                    << L", frameSize=" << s_audioConfig.frameSizeMs << L"ms, channels=" << s_audioConfig.channels
                    << L", threadAffinity=" << (s_audioConfig.useThreadAffinity ? L"enabled" : L"disabled")
