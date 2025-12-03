@@ -3,7 +3,7 @@
     "serverUrlBase": "ws://localhost:3002"
   },
   "host": {
-    "targetProcessName": "cs2.exe",
+    "targetProcessName": "vlc.exe",
     "window": {
       "resizeClientArea": true,
       "targetWidth": 1920,
@@ -12,11 +12,11 @@
     "video": {
         "fps": 144,
         "pacingFixedUs": 6944,
-        "bitrateStart": 25000000,
-        "bitrateMin": 12000000,
+        "bitrateStart": 35000000,
+        "bitrateMin": 15000000,
         "bitrateMax": 50000000,
         "hwFramePoolSize": 32,
-        "fullRange": false,
+        "fullRange": true,
         "preset": "p2",
         "rc": "cbr",
         "bf": 0,
@@ -28,7 +28,7 @@
         "minPliLossThreshold": 0.15,
         "gpuTiming": false,
         "hdrToneMapping": {
-            "enabled": true,
+            "enabled": false,
             "method": "reinhard",
             "exposure": 0.0,
             "gamma": 2.2,
@@ -143,7 +143,7 @@
         "mmcssRetryDelayMs": 1000
       },
       "adaptiveQualityControl": {
-        "enableAdaptiveDropping": true,
+        "enableAdaptiveDropping": false,
         "rttExcellentThreshold": 10.0,
         "rttGoodThreshold": 50.0,
         "rttFairThreshold": 100.0,
@@ -158,11 +158,11 @@
         "queuePoorThreshold": 12,
         "excellentDropRatio": 0.0,
         "goodDropRatio": 0.0,
-        "fairDropRatio": 0.05,
-        "poorDropRatio": 0.15,
-        "criticalDropRatio": 0.3,
-        "minFrameIntervalMs": 5,
-        "statsUpdateIntervalMs": 50
+        "fairDropRatio": 0.0,
+        "poorDropRatio": 0.0,
+        "criticalDropRatio": 0.0,
+        "minFrameIntervalMs": 0,
+        "statsUpdateIntervalMs": 100
       }
     }
   }

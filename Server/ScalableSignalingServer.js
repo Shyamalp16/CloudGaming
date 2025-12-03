@@ -173,12 +173,21 @@ async function handleNewConnection(ws, request) {
 			return;
 		}
 		if (config.allowedOrigins.length > 0) {
-			// Permit native clients (no Origin header) while enforcing for browsers
-			const allowed = (!origin) || config.allowedOrigins.some((o) => origin.includes(o));
+			const allowed = (!origin) || config.allowedOrigins.some((o) => {
+				if (origin === o) return true;
+				try {
+					const originUrl = new URL(origin);
+					const allowedUrl = o.startsWith('http://') || o.startsWith('https://') 
+						? new URL(o) 
+						: new URL(`http://${o}`);
+					return originUrl.host === allowedUrl.host || originUrl.hostname === allowedUrl.hostname;
+				} catch {
+					return origin.includes(o);
+				}
+			});
 			if (!allowed) {
-				log('warn', 'Origin not allowed', { origin });
+				log('warn', 'Origin not allowed', { origin, allowedOrigins: config.allowedOrigins });
 				ws.close(1008, 'Origin not allowed');
-				return;
 			}
 		}
 		if (config.subprotocol) {

@@ -70,10 +70,11 @@ int OpusEncoderWrapper::encodeFrameToBuffer(const float* pcmInterleaved, uint8_t
         return -1;
     }
 
-    // Debug: Check input audio levels before encoding
+    // Debug: Check input audio levels before encoding (reduced frequency to avoid log spam)
     static int debugCount = 0;
     debugCount++;
-    if (debugCount <= 3 || debugCount % 100 == 0) {
+    // FIX: Reduce logging frequency - log first 3 frames, then every 1000 frames (was 100)
+    if (debugCount <= 3 || debugCount % 1000 == 0) {
         float maxVal = -FLT_MAX, minVal = FLT_MAX, sumSquares = 0.0f;
         int validSamples = 0;
 

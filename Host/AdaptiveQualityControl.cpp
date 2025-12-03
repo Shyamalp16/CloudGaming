@@ -29,6 +29,17 @@ void QualityController::webrtcStatsCallback(double packetLoss, double rtt, doubl
         stats.sendBitrateKbps = sendBitrateKbps;
         stats.lastUpdate = std::chrono::steady_clock::now();
 
+        // FIX: Validate encoder bitrate matches WebRTC send rate
+        // If encoder produces significantly more than WebRTC can send, it's wasteful
+        // Note: We can't directly access g_currentBitrate here, but we can log a warning
+        // The bitrate controller should handle this via RTCP feedback
+        if (sendBitrateKbps > 0 && pacerQueueLength > 10) {
+            // High queue length suggests encoder is producing faster than WebRTC can send
+            LOG_WARN("High pacer queue length (" + std::to_string(pacerQueueLength) + 
+                    ") detected. WebRTC send rate: " + std::to_string(sendBitrateKbps) + 
+                    " kbps. Consider reducing encoder bitrate if queue persists.");
+        }
+
         globalQualityController.updateNetworkStats(stats);
     }
 }

@@ -3314,11 +3314,13 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
     }
     rawRms = sqrtf(rawRms / sampleCount);
 
+    // FIX: Reduce debug logging frequency to avoid console I/O overhead
     static auto lastRawLog = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRawLog).count();
 
-    if (elapsed >= 5000) {  // 5 seconds
+    // Log every 30 seconds instead of 5 seconds to reduce overhead
+    if (elapsed >= 30000) {
         std::cout << "[AUDIO_DEBUG] Raw audio RMS: " << rawRms << std::endl;
         lastRawLog = now;
     }

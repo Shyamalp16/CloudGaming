@@ -19,6 +19,7 @@
 #include <deque>
 #include <cstring>
 #include <list>
+#include <cmath>  // For std::abs in UpdatePacingFromTimestamp
 #include <avrt.h>
 #pragma comment(lib, "Avrt.lib")
 #include "AdaptiveQualityControl.h"
@@ -360,9 +361,22 @@ static inline int64_t UpdatePacingFromTimestamp(int64_t currentTsUs) {
     long long prevTs = g_lastCaptureTsUs.exchange(currentTsUs, std::memory_order_relaxed);
     if (prevTs > 0) {
         long long delta = currentTsUs - prevTs;
-        if (delta > 1000 && delta < 2'000'000) { // 1 ms .. 2 s sane bounds
+        // FIX: Stricter bounds checking (500us = 2000fps max, 100ms = 10fps min)
+        // This prevents invalid deltas from corrupting the smoothed duration
+        if (delta > 500 && delta < 100000) {
             long long prevSm = g_smoothedDurUs.load(std::memory_order_relaxed);
-            long long newSm = (prevSm <= 0) ? delta : static_cast<long long>(0.8 * static_cast<double>(prevSm) + 0.2 * static_cast<double>(delta));
+            // FIX: Adaptive alpha - use more of new value if delta differs significantly from smoothed
+            // This allows faster adaptation to FPS changes while maintaining stability
+            double alpha = 0.2; // Default smoothing factor
+            if (prevSm > 0) {
+                double diffRatio = std::abs(static_cast<double>(delta - prevSm)) / static_cast<double>(prevSm);
+                if (diffRatio > 0.1) {
+                    // Delta differs by more than 10% from smoothed - use more aggressive smoothing
+                    alpha = 0.3;
+                }
+            }
+            long long newSm = (prevSm <= 0) ? delta : 
+                static_cast<long long>((1.0 - alpha) * static_cast<double>(prevSm) + alpha * static_cast<double>(delta));
             g_smoothedDurUs.store(newSm, std::memory_order_relaxed);
             return newSm;
         }
@@ -640,10 +654,12 @@ namespace Encoder {
                 g *= exposureMultiplier;
                 b *= exposureMultiplier;
                 
-                // Reinhard tone mapping: x / (1 + x)
-                r = r / (1.0f + r);
-                g = g / (1.0f + g);
-                b = b / (1.0f + b);
+                        // FIX: Only apply Reinhard tone mapping if values exceed SDR range (> 1.0)
+                // This prevents crushing blacks on non-HDR content
+                // Reinhard tone mapping: x / (1 + x) - only for values > 1.0
+                if (r > 1.0f) r = r / (1.0f + r);
+                if (g > 1.0f) g = g / (1.0f + g);
+                if (b > 1.0f) b = b / (1.0f + b);
                 
                 // Apply gamma correction
                 r = powf(r, 1.0f / g_hdrGamma);
@@ -870,7 +886,20 @@ namespace Encoder {
         if (bf >= 0) g_nvBf = bf;
         if (rc_lookahead >= 0) g_nvRcLookahead = rc_lookahead;
         if (async_depth >= 0) g_nvAsyncDepth = async_depth;
-        if (surfaces >= 1) g_nvSurfaces = surfaces;
+        if (surfaces >= 1) {
+            // FIX: Enforce optimal surfaces = async_depth + 1 (allow +2 for safety margin)
+            // Excessive surfaces increase latency unnecessarily
+            int optimalMax = g_nvAsyncDepth + 2;
+            if (surfaces > optimalMax) {
+                // FIX: Ensure decimal output (not hex) for numbers in log messages
+                std::wcout << L"[Encoder] WARNING: Surfaces (" << std::dec << surfaces 
+                          << L") exceeds optimal (async_depth + 2 = " << optimalMax 
+                          << L"). Clamping to " << optimalMax << L" for low latency" << std::endl;
+                g_nvSurfaces = optimalMax;
+            } else {
+                g_nvSurfaces = surfaces;
+            }
+        }
     }
     void SetFullRangeColor(bool enable_full_range) {
         g_fullRangeColor = enable_full_range;
@@ -902,29 +931,48 @@ namespace Encoder {
         if (increase_interval_ms > 0) g_increaseIntervalMs = increase_interval_ms;
     }
 
-    void OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*jitter*/) {
+    void OnRtcpFeedback(double packetLoss, double rtt, double /*jitter*/) {
         auto now = std::chrono::steady_clock::now();
         auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastChange).count();
 
-        if (packetLoss >= g_minPliLossThreshold.load()) { // configurable loss trigger
+        // FIX: Don't reduce bitrate on localhost (RTT < 5ms) or when packet loss is very low
+        // This prevents unnecessary bitrate reduction during local testing
+        bool isLocalhost = (rtt < 5.0); // Localhost typically has < 1ms RTT
+        double effectiveLossThreshold = isLocalhost ? 0.25 : g_minPliLossThreshold.load(); // Higher threshold for localhost
+
+        if (packetLoss >= effectiveLossThreshold) { // configurable loss trigger
             if (since >= g_decreaseCooldownMs) {
-                double factor = (packetLoss >= 0.10) ? 0.6 : 0.8;
+                // Less aggressive reduction on localhost
+                double factor = isLocalhost ? 0.9 : ((packetLoss >= 0.10) ? 0.6 : 0.8);
                 int target = static_cast<int>(g_currentBitrate * factor);
                 g_currentBitrate = std::max(g_minBitrateController, target);
                 AdjustBitrate(g_currentBitrate);
                 g_lastChange = now;
+                if (isLocalhost) {
+                    std::wcout << L"[Encoder] Localhost bitrate reduction (loss: " << (packetLoss * 100.0) 
+                              << L"%, RTT: " << rtt << L"ms) - reduced to " << g_currentBitrate << L" bps" << std::endl;
+                }
             }
             g_cleanSamples = 0;
             return;
         }
 
-        g_cleanSamples++;
-        if (since >= g_increaseIntervalMs && g_cleanSamples >= g_cleanSamplesRequired) {
-            int target = g_currentBitrate + g_increaseStep;
+        g_cleanSamples++;   
+        int requiredSamples = isLocalhost ? 1 : g_cleanSamplesRequired; // Only need 1 clean sample on localhost
+        int increaseInterval = isLocalhost ? 500 : g_increaseIntervalMs; // Faster increases on localhost (500ms vs 1000ms)
+        
+        if (since >= increaseInterval && g_cleanSamples >= requiredSamples) {
+            // Larger increase steps on localhost to reach target bitrate faster
+            int step = isLocalhost ? (g_increaseStep * 2) : g_increaseStep;
+            int target = g_currentBitrate + step;
             if (target <= g_maxBitrateController) {
                 g_currentBitrate = target;
                 AdjustBitrate(g_currentBitrate);
                 g_lastChange = now;
+                if (isLocalhost && g_cleanSamples % 5 == 0) {
+                    std::wcout << L"[Encoder] Localhost bitrate increase - now at " << g_currentBitrate 
+                              << L" bps (target: " << g_maxBitrateController << L" bps)" << std::endl;
+                }
             }
             g_cleanSamples = 0;
         }
@@ -1343,8 +1391,12 @@ namespace Encoder {
         if (g_pendingReopen.load() && codecCtx) {
             int fpsNum = codecCtx->framerate.num > 0 ? codecCtx->framerate.num : 60;
             int fpsDen = codecCtx->framerate.den > 0 ? codecCtx->framerate.den : 1;
-            int fps = fpsDen != 0 ? fpsNum / fpsDen : 60;
-            if (fps <= 0) fps = 60;
+            // FIX: Proper FPS calculation with rounding and validation
+            int fps = 60; // default fallback
+            if (fpsDen > 0 && fpsNum > 0) {
+                fps = (fpsNum + fpsDen / 2) / fpsDen; // Proper integer division with rounding
+                if (fps <= 0) fps = 60;
+            }
             int target = g_reopenTargetBitrate.load();
             // std::wcout << L"[Encoder] Reopening encoder to apply bitrate=" << target << L" bps" << std::endl;
             FlushEncoder();
@@ -1615,12 +1667,15 @@ namespace Encoder {
             if (codecCtx) {
                 codecCtx->bit_rate = new_bitrate;
                 codecCtx->rc_max_rate = new_bitrate;
-                codecCtx->rc_buffer_size = new_bitrate * 2;
+                // FIX: Use 1x bitrate for VBV buffer to match initialization (low-latency)
+                // This ensures consistent VBV buffer size throughout encoding session
+                codecCtx->rc_buffer_size = new_bitrate;
                 // Apply encoder-specific runtime controls
                 if (codecCtx->priv_data) {
                     int r1 = av_opt_set_int(codecCtx->priv_data, "bitrate", new_bitrate, 0);
                     int r2 = av_opt_set_int(codecCtx->priv_data, "maxrate", new_bitrate, 0);
-                    int r3 = av_opt_set_int(codecCtx->priv_data, "bufsize", new_bitrate * 2, 0);
+                    // FIX: Use 1x bitrate for bufsize to match initialization
+                    int r3 = av_opt_set_int(codecCtx->priv_data, "bufsize", new_bitrate, 0);
                     if (r1 < 0 || r2 < 0 || r3 < 0) {
                         codecSupportsRuntimeUpdate = false;
                         g_pendingReopen.store(true);
