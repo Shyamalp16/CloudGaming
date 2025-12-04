@@ -140,45 +140,55 @@ bool SetWindowClientAreaSize(HWND hwnd, int targetWidth, int targetHeight)
 }
 
 std::wstring GetProcessNameFromHWND(HWND hwnd) {
-    if (!::IsWindow(hwnd)) {
-		return L""; //invalid window
+	if (!::IsWindow(hwnd)) {
+		return L""; // invalid window
     }
 
-    //Get process ID
+    // Get process ID
 	DWORD processId = 0;
 	::GetWindowThreadProcessId(hwnd, &processId);
     if (!processId) {
-		return L""; //invalid process ID
+		return L""; // invalid process ID
     }
 
-    //Open process with "Query rights"
-    HANDLE hProcess = ::OpenProcess(
-        PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-        FALSE,
-        processId
-    );
+    // Try to open the process with minimal rights first. Many games (or
+    // protected processes) may deny PROCESS_VM_READ, but allow LIMITED_INFORMATION,
+    // which is enough for QueryFullProcessImageNameW.
+    HANDLE hProcess = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!hProcess) {
+        // Fallback to older flag set for compatibility on systems where
+        // PROCESS_QUERY_LIMITED_INFORMATION is not sufficient / available.
+        hProcess = ::OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    }
 
     if (!hProcess) {
-		return L""; //invalid process handle
+		return L""; // invalid process handle or access denied
     }
 
 	WCHAR pathBuffer[MAX_PATH] = { 0 };
-	if (::GetModuleFileNameExW(hProcess, nullptr, pathBuffer, MAX_PATH) == 0) {
-		::CloseHandle(hProcess);
-		return L""; //failed to get module name
-	}
+    DWORD size = static_cast<DWORD>(std::size(pathBuffer));
+
+    // Prefer QueryFullProcessImageNameW (works with LIMITED_INFORMATION)
+    BOOL ok = ::QueryFullProcessImageNameW(hProcess, 0, pathBuffer, &size);
+    if (!ok || size == 0) {
+        // Fallback to legacy GetModuleFileNameExW if available
+        if (::GetModuleFileNameExW(hProcess, nullptr, pathBuffer, static_cast<DWORD>(std::size(pathBuffer))) == 0) {
+            ::CloseHandle(hProcess);
+            return L""; // failed to get module name
+        }
+    }
 	::CloseHandle(hProcess);
 
-    //path buffer can be for ex C:\programfiles\steamapps\CS2.exe etc.
+    // path buffer can be for ex C:\programfiles\steamapps\CS2.exe etc.
 	std::wstring fullPath(pathBuffer);
 
 	size_t lastSlash = fullPath.find_last_of(L"\\");
 	if (lastSlash == std::wstring::npos) {
-		return L""; //no slash found
+		return L""; // no slash found
 	}
-	//return only the process name
+	// return only the process name
 	std::wstring processName = fullPath.substr(lastSlash + 1);
-	return processName; //file name or empty
+	return processName; // file name or empty
 }
 
 std::wstring GetWindowTitle(HWND hwnd) {
