@@ -13,6 +13,14 @@ const gaugeLocalRooms = new client.Gauge({
 	name: 'signaling_local_rooms',
 	help: 'Number of rooms with at least one local connection on this instance',
 });
+const gaugeRedisUp = new client.Gauge({
+	name: 'signaling_redis_up',
+	help: 'Indicates if Redis connection is healthy (1 for up, 0 for down)',
+});
+const gaugeCircuitBreakerOpen = new client.Gauge({
+	name: 'signaling_circuit_breaker_open',
+	help: 'Indicates if the Redis circuit breaker is open (1 for open, 0 for closed)',
+});
 
 // Counters
 const counterMessagesForwarded = new client.Counter({
@@ -48,6 +56,8 @@ const histoFanoutLatency = new client.Histogram({
 
 register.registerMetric(gaugeActiveConnections);
 register.registerMetric(gaugeLocalRooms);
+register.registerMetric(gaugeRedisUp);
+register.registerMetric(gaugeCircuitBreakerOpen);
 register.registerMetric(counterMessagesForwarded);
 register.registerMetric(counterSchemaRejects);
 register.registerMetric(counterRateLimitDrops);
@@ -57,6 +67,8 @@ register.registerMetric(histoFanoutLatency);
 
 function setActiveConnections(n) { gaugeActiveConnections.set(n); }
 function setLocalRooms(n) { gaugeLocalRooms.set(n); }
+function setRedisUp(isUp) { gaugeRedisUp.set(isUp ? 1 : 0); }
+function setCircuitBreakerOpen(isOpen) { gaugeCircuitBreakerOpen.set(isOpen ? 1 : 0); }
 function incMessagesForwarded(n = 1) { counterMessagesForwarded.inc(n); }
 function incSchemaRejects(n = 1) { counterSchemaRejects.inc(n); }
 function incRateLimitDrops(n = 1) { counterRateLimitDrops.inc(n); }
@@ -88,6 +100,8 @@ module.exports = {
 	metricsHandler,
 	setActiveConnections,
 	setLocalRooms,
+	setRedisUp,
+	setCircuitBreakerOpen,
 	incMessagesForwarded,
 	incSchemaRejects,
 	incRateLimitDrops,

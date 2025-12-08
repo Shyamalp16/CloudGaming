@@ -10,6 +10,8 @@ const { RateLimiter } = require('./rateLimiter');
 const {
 	setActiveConnections,
 	setLocalRooms,
+	setRedisUp,
+	setCircuitBreakerOpen,
 	incMessagesForwarded,
 	incSchemaRejects,
 	incRateLimitDrops,
@@ -27,8 +29,18 @@ const { atomicJoin, atomicLeave } = require('./redisScripts');
 // Logging helper (pino-backed)
 // =============================
 function log(level, message, context) {
-	const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info';
-	logger[method](context || {}, message);
+	const validLevels = ['fatal', 'error', 'warn', 'info', 'debug', 'trace'];
+	const method = validLevels.includes(level) ? level : 'info';
+	const ctx = context || {};
+	// Ensure error objects are passed to pino as 'err'
+	if (ctx.error && !ctx.err) {
+		ctx.err = ctx.error;
+	}
+	if (typeof logger[method] === 'function') {
+		logger[method](ctx, message);
+	} else {
+		logger.info(ctx, message);
+	}
 }
 
 // =============================
@@ -54,8 +66,13 @@ const serverInstanceId = (crypto.randomUUID && crypto.randomUUID()) || `srv:${Da
 const rateLimiter = RateLimiter(redisClient);
 let redisCircuitOpenUntil = 0;
 
-redisClient.on('error', (err) => log('error', 'Redis client error', { err: String(err && err.message || err) }));
-subscriber.on('error', (err) => log('error', 'Redis subscriber error', { err: String(err && err.message || err) }));
+redisClient.on('error', (err) => {
+	setRedisUp(false);
+	log('error', 'Redis client error', { err });
+});
+subscriber.on('error', (err) => {
+	log('error', 'Redis subscriber error', { err });
+});
 
 // Circuit breaker: track consecutive failures
 let redisFailureCount = 0;
@@ -63,6 +80,7 @@ function noteRedisFailure() {
 	redisFailureCount += 1;
 	if (redisFailureCount >= config.cbErrorThreshold) {
 		redisCircuitOpenUntil = Date.now() + config.cbOpenMs;
+		setCircuitBreakerOpen(true);
 		log('warn', 'Redis circuit opened', { until: redisCircuitOpenUntil });
 	}
 }
@@ -70,7 +88,9 @@ function noteRedisSuccess() {
 	redisFailureCount = 0;
 	if (redisCircuitOpenUntil && Date.now() >= redisCircuitOpenUntil) {
 		redisCircuitOpenUntil = 0;
+		setCircuitBreakerOpen(false);
 	}
+	setRedisUp(true);
 }
 
 // =============================
@@ -108,7 +128,7 @@ function handleRedisMessage(message, channel) {
 		try {
 			payload = JSON.parse(message);
 		} catch (e) {
-			log('warn', 'Dropping non-JSON message from Redis', { channel, error: String(e && e.message || e) });
+			log('warn', 'Dropping non-JSON message from Redis', { channel, err: e });
 			return;
 		}
 		const { senderId, data, originServerId } = payload || {};
@@ -130,14 +150,14 @@ function handleRedisMessage(message, channel) {
 					return;
 				}
 				try { client.send(dataStr); } catch (e) {
-					log('warn', 'Failed to forward message to client', { clientId: client.clientId, roomId, error: String(e && e.message || e) });
+					log('warn', 'Failed to forward message to client', { clientId: client.clientId, roomId, err: e });
 				}
 			}
 		});
 		endFanout();
 		incMessagesForwarded();
 	} catch (error) {
-		log('error', 'Error handling Redis message', { channel, error: String(error && error.message || error) });
+		log('error', 'Error handling Redis message', { channel, err: error });
 	}
 }
 
@@ -182,7 +202,7 @@ async function handleNewConnection(ws, request) {
 						: new URL(`http://${o}`);
 					return originUrl.host === allowedUrl.host || originUrl.hostname === allowedUrl.hostname;
 				} catch {
-					return origin.includes(o);
+					return false;
 				}
 			});
 			if (!allowed) {
@@ -226,7 +246,7 @@ async function handleNewConnection(ws, request) {
 				}
 				ws.user = { sub: payload.sub };
 			} catch (e) {
-				log('warn', 'JWT verification failed');
+				log('warn', 'JWT verification failed', { err: e });
 				ws.close(1008, 'Unauthorized');
 				return;
 			}
@@ -238,7 +258,7 @@ async function handleNewConnection(ws, request) {
 		try {
 			allowedConn = await rateLimiter.allow({ namespace: 'conn', id: ip, limit: config.rateLimitConnPer10s, periodSeconds: 10 });
 		} catch (e) {
-			log('warn', 'Rate limiter error on connection', { ip, error: String(e && e.message || e) });
+			log('warn', 'Rate limiter error on connection', { ip, err: e });
 		}
 		if (!allowedConn) {
 			log('warn', 'IP connection rate-limited', { ip });
@@ -262,7 +282,7 @@ async function handleNewConnection(ws, request) {
 			}
 			// result is new size (>=1)
 		} catch (e) {
-			log('error', 'Redis error during join', { roomId, clientId, error: String(e && e.message || e) });
+			log('error', 'Redis error during join', { roomId, clientId, err: e });
 			noteRedisFailure();
 			ws.close(1011, 'Internal error');
 			return;
@@ -293,7 +313,7 @@ async function handleNewConnection(ws, request) {
 			log('debug', 'Sending ping to client', { clientId: ws.clientId, wasAlive: ws.isAlive });
 			ws.isAlive = false;
 			try { ws.ping(); } catch (e) {
-				log('warn', 'Failed to send ping', { clientId: ws.clientId, error: String(e.message) });
+				log('warn', 'Failed to send ping', { clientId: ws.clientId, err: e });
 			}
 		}, config.heartbeatIntervalMs);
 		ws._heartbeat = heartbeat;
@@ -306,10 +326,10 @@ async function handleNewConnection(ws, request) {
 		ws.on('message', (message) => handleMessage(ws, roomKey, message));
 		ws.on('close', () => handleDisconnection(ws, roomKey));
 		ws.on('error', (err) => {
-			log('warn', 'WebSocket error', { clientId: ws.clientId, roomId: ws.roomId, error: String(err && err.message || err) });
+			log('warn', 'WebSocket error', { clientId: ws.clientId, roomId: ws.roomId, err });
 		});
 	} catch (error) {
-		log('error', 'Unhandled error during connection setup', { error: String(error && error.message || error) });
+		log('error', 'Unhandled error during connection setup', { err: error });
 		try { ws.close(1011, 'Internal server error'); } catch (_) {}
 	}
 }
@@ -381,7 +401,7 @@ async function handleMessage(ws, roomKey, message) {
 				allowedMsg = await rateLimiter.allow({ namespace: 'msg-room', id: ws.roomId, limit: config.rateLimitRoomMsgsPer10s, periodSeconds: 10 });
 			}
 		} catch (e) {
-			log('warn', 'Rate limiter error on message', { ip, roomId: ws.roomId, error: String(e && e.message || e) });
+			log('warn', 'Rate limiter error on message', { ip, roomId: ws.roomId, err: e });
 		}
 		if (!allowedMsg) {
 			log('warn', 'Message rate-limited', { clientId: ws.clientId, roomId: ws.roomId, ip });
@@ -410,11 +430,11 @@ async function handleMessage(ws, roomKey, message) {
 			ePub();
 			noteRedisSuccess();
 		} catch (e) {
-			log('error', 'Failed to publish to Redis', { roomId: ws.roomId, clientId: ws.clientId, error: String(e && e.message || e) });
+			log('error', 'Failed to publish to Redis', { roomId: ws.roomId, clientId: ws.clientId, err: e });
 			noteRedisFailure();
 		}
 	} catch (error) {
-		log('error', 'Unhandled error in message handler', { clientId: ws.clientId, roomId: ws.roomId, error: String(error && error.message || error) });
+		log('error', 'Unhandled error in message handler', { clientId: ws.clientId, roomId: ws.roomId, err: error });
 	}
 }
 
@@ -436,7 +456,7 @@ async function handleDisconnection(ws, roomKey) {
 			}
 		}
 	} catch (e) {
-		log('warn', 'Local room cleanup failed', { roomId, error: String(e && e.message || e) });
+		log('warn', 'Local room cleanup failed', { roomId, err: e });
 	}
 
 	// Redis cleanup and notify peers
@@ -447,7 +467,7 @@ async function handleDisconnection(ws, roomKey) {
 		noteRedisSuccess();
 		await redisClient.publish(roomKey, JSON.stringify({ senderId: clientId, data: { type: 'peer-disconnected' } }));
 	} catch (e) {
-		log('warn', 'Redis cleanup or notify failed', { roomId, clientId, error: String(e && e.message || e) });
+		log('warn', 'Redis cleanup or notify failed', { roomId, clientId, err: e });
 		noteRedisFailure();
 	}
 }
@@ -460,8 +480,9 @@ async function main() {
 		await redisClient.connect();
 		await subscriber.connect();
 		log('info', 'Connected to Redis');
+		setRedisUp(true);
 	} catch (e) {
-		log('error', 'Failed to connect to Redis', { error: String(e && e.message || e) });
+		log('error', 'Failed to connect to Redis', { err: e });
 		process.exit(1);
 	}
 
@@ -469,7 +490,7 @@ async function main() {
 		await subscriber.pSubscribe('room:*', handleRedisMessage);
 		log('info', 'Subscribed to Redis channel pattern', { pattern: 'room:*' });
 	} catch (e) {
-		log('error', 'Failed to subscribe to Redis pattern', { error: String(e && e.message || e) });
+		log('error', 'Failed to subscribe to Redis pattern', { err: e });
 		process.exit(1);
 	}
 
@@ -480,7 +501,7 @@ async function main() {
 		}
 		handleNewConnection(ws, request);
 	});
-	server.on('error', (err) => log('error', 'WebSocket server error', { error: String(err && err.message || err) }));
+	server.on('error', (err) => log('error', 'WebSocket server error', { err }));
 
 	log('info', 'Scalable Signaling Server listening', { port: config.wsPort });
 
@@ -500,7 +521,7 @@ async function main() {
 }
 
 main().catch(err => {
-	log('error', 'Unhandled error in main()', { error: String(err && err.message || err) });
+	log('error', 'Unhandled error in main()', { err });
 	process.exit(1);
 });
 
