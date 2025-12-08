@@ -37,46 +37,48 @@ app.post('/api/match/find', async(req, res) => {
         if(keys.length === 0){
             return res.status(404).json({ found:false, message:'No hosts available'});
         }
-        const hostsJSON = await redisClient.mGet(keys);
-        let match = null;
-        for(const json of hostsJSON){
-            if(!json) continue;
+        for(const key of keys){
+            await redisClient.watch(key);
+            const json = await redisClient.get(key);
+            if(!json) {
+                await redisClient.unwatch();
+                continue
+            }
             let host;
-            try{
+            try {
                 host = JSON.parse(json)
             }catch(e){
+                await redisClient.unwatch();
                 continue;
             }
-
             const isIdle = host.status === 'idle'
             const regionsMatch = !region || host.region === region;
-
             if(isIdle && regionsMatch){
                 host.status = 'allocated'
-                await redisClient.set(`host:${host.hostId}`, JSON.stringify(host), {EX: 30});
-                match = host;
-                break;
+                const multi = redisClient.multi().set(key, JSON.stringify(host), {EX: 30})
+                const results = await multi.exec()
+                if(results){
+                    return res.json({
+                        found: true,
+                        roomId: host.roomId,
+                        signalingUrl: `ws://localhost:${config.wsPort}`,
+                        iceServers: [
+                            {
+                                urls: "stun:stun.l.google.com:19032"
+                            },
+                            {
+                                urls: "turn:openrelay.metered.ca:80",
+                                username: "openrelayproject",
+                                credential: "openrelayproject"
+                            }
+                        ]
+                    });
+                }
+            }else{
+                await redisClient.unwatch()
             }
         }
-        if(match){
-            return res.json({
-                found: true,
-                roomId: match.roomId,
-                signalingUrl: `ws://localhost:${config.wsPort}`,
-                iceServers: [
-                    {
-                        urls: "stun:stun.l.google.com:19032"
-                    },
-                    {
-                        urls: "turn:openrelay.metered.ca:80",
-                        username: "openrelayproject",
-                        credential: "openrelayproject"
-                    }
-                ]
-            });
-        }else{
-            return res.status(404).json({ found: false, message: `All hosts are busy`});
-        }
+        return res.status(404).json({ found: false, message: 'No hosts available' });
     }catch(err){
         console.error('Match Error:', err)
         res.status(500).json({ error: 'Internal server error'})
