@@ -22,8 +22,17 @@ app.post('/api/host/heartbeat', async(req, res) => {
     });
 
     try{
-        await redisClient.set(key, value, { EX: 30 });
-        res.json({ success: true, ttl: 30 });
+        const isIdle = (!status || status === 'idle');
+        const multi = redisClient.multi()
+        multi.set(key, value, {EX:30})
+
+        if(isIdle){
+            multi.sAdd('idle_hosts', hostId)
+        }else{
+            multi.sRem('idle_hosts', hostId)
+        }
+        await multi.exec()
+        res.json({ success: true, ttl: 30})
     }catch (err){
         console.error('Failed to set heartbeat', err);
         res.status(500).json({ success: false, error: 'Failed to set heartbeat' });
@@ -33,16 +42,25 @@ app.post('/api/host/heartbeat', async(req, res) => {
 app.post('/api/match/find', async(req, res) => {
     try{
         const { region } = req.body;
-        const keys = await redisClient.keys('host:*');
-        if(keys.length === 0){
-            return res.status(404).json({ found:false, message:'No hosts available'});
+        const rawCandidates = await redisClient.sRandMember('idle_hosts', 10);
+        const candidateIds = Array.isArray(rawCandidates) ? rawCandidates : [rawCandidates];
+        console.log('Debug - Candidates:', candidateIds);
+
+        if(!candidateIds || candidateIds.length === 0){
+            return res.status(404).json({found: false, message: 'No hosts available'})
         }
-        for(const key of keys){
+
+        for(const hostId of candidateIds){
+            const key = `host:${hostId}`
             await redisClient.watch(key);
             const json = await redisClient.get(key);
+            
+            console.log(`Debug - Host ${hostId} JSON:`, json);
+
             if(!json) {
+                await redisClient.sRem('idle_hosts', hostId)
                 await redisClient.unwatch();
-                continue
+                continue;
             }
             let host;
             try {
@@ -53,10 +71,14 @@ app.post('/api/match/find', async(req, res) => {
             }
             const isIdle = host.status === 'idle'
             const regionsMatch = !region || host.region === region;
+            
+            console.log(`Debug - Match check: isIdle=${isIdle}, regionsMatch=${regionsMatch}, region=${region}, hostRegion=${host.region}`);
+            
             if(isIdle && regionsMatch){
                 host.status = 'allocated'
-                const multi = redisClient.multi().set(key, JSON.stringify(host), {EX: 30})
+                const multi = redisClient.multi().set(key, JSON.stringify(host), {EX: 30}).sRem('idle_hosts', hostId)
                 const results = await multi.exec()
+                console.log('Debug - Transaction results:', results);
                 if(results){
                     return res.json({
                         found: true,
