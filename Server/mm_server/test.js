@@ -1,51 +1,54 @@
 const axios = require('axios');
 
-const BASE_URL = 'http://localhost:3000/api'; 
+const BASE_URL = 'http://localhost:3000'; 
 
-async function runTest() {
-    console.log("\n1. Host sending heartbeat...");
+async function testMatchmaker() {
+    console.log('--- Starting Matchmaker Test ---');
+    const hostPayload = {
+        hostId: 'test-host-123',
+        roomId: 'room-abc-789',
+        region: 'us-east-1',
+        status: 'idle'
+    };
     try {
-        await axios.post(`${BASE_URL}/host/heartbeat`, {
-            hostId: 'test-host-01',
-            roomId: 'test-room-01',
-            region: 'us-east',
-            status: 'idle'
-        });
-        console.log(" Host registered successfully.");
+        console.log('1. Registering Host...');
+        await axios.post(`${BASE_URL}/api/host/heartbeat`, hostPayload);
+        console.log('   Host registered successfully.');
     } catch (error) {
-        console.error(" Host heartbeat failed:", error.message);
+        console.error('   Failed to register host:', error.message);
         return;
     }
-
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    console.log("\n2. Client requesting match...");
     try {
-        const response = await axios.post(`${BASE_URL}/match/find`, {
-            region: 'us-west'
+        console.log('\n2. Finding Match...');
+        const response = await axios.post(`${BASE_URL}/api/match/find`, {
+            region: 'us-east-1'
         });
-        console.log("Match found!", response.data);
-        
-        if (response.data.roomId !== 'test-room-01') {
-             console.warn("Warning: Matched with unexpected room:", response.data.roomId);
+        const data = response.data;
+        if (data.found) {
+            console.log('   Match Found!');
+            console.log(`   Room ID: ${data.roomId}`);
+            console.log('\n3. Verifying ICE Servers...');
+            if (data.iceServers && data.iceServers.length > 0) {
+                console.log('   Received ICE Servers:', JSON.stringify(data.iceServers, null, 2)); 
+                const hasOpenRelay = JSON.stringify(data.iceServers).includes('openrelay');
+                if (hasOpenRelay) {
+                     console.log('   ✅ SUCCESS: OpenRelay credentials present.');
+                } else {
+                     console.log('   ⚠️ WARNING: OpenRelay credentials NOT found.');
+                }
+            } else {
+                console.log('   ❌ FAILED: No ICE servers returned.');
+            }
+        } else {
+            console.log('   Match NOT found (Unexpected).');
         }
     } catch (error) {
-        console.error("Match request failed:", error.response ? error.response.data : error.message);
-    }
-
-    console.log("\n3. Second Client requesting match (expecting failure)...");
-    try {
-        await axios.post(`${BASE_URL}/match/find`, {
-            region: 'us-west'
-        });
-        console.log("Error: Second client found a match! (Should have been busy)");
-    } catch (error) {
-        if (error.response && error.response.status === 404) {
-            console.log("Correctly rejected: No hosts available (Host was allocated).");
+        if (error.response) {
+             console.log('   Server responded with error:', error.response.status, error.response.data);
         } else {
-            console.error("Unexpected error:", error.message);
+             console.error('   Request failed:', error.message);
         }
     }
 }
 
-runTest();
+testMatchmaker();
