@@ -9,7 +9,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Simple structured logger
 function log(level, message, meta) {
 	const entry = { level, message, ...(meta || {}) };
 	if (level === 'error') {
@@ -21,7 +20,6 @@ function log(level, message, meta) {
 	}
 }
 
-// Request ID middleware (honor incoming header if present)
 app.use((req, res, next) => {
 	const headerId = req.headers['x-request-id'];
 	const reqId = (typeof headerId === 'string' && headerId.trim()) ? headerId.trim() : randomUUID();
@@ -30,7 +28,6 @@ app.use((req, res, next) => {
 	next();
 });
 
-// Helper to format zod errors consistently
 function formatZodIssues(zodError) {
 	return zodError.errors.map((e) => ({
 		path: e.path.join('.'),
@@ -168,7 +165,6 @@ app.get('/api/hosts', async (req, res) => {
 	}
 });
 
-// Observability: TTL view for idle hosts
 app.get('/api/hosts/ttl', async (req, res) => {
 	try {
 		await pruneStaleIdleHosts();
@@ -203,7 +199,6 @@ app.post('/api/match/find', async(req, res) => {
 	try {
 		await pruneStaleIdleHosts();
 
-		// Candidate gathering with region-aware weighting
 		const sampleSize = requestedHostId ? 1 : 50;
 		const rawCandidates = requestedHostId
 			? [requestedHostId]
@@ -243,12 +238,10 @@ app.post('/api/match/find', async(req, res) => {
 			return res.status(404).json({ found: false, message: 'No hosts available' });
 		}
 
-		// Prefer region-matching candidates if present
 		const regionPreferred = region ? candidates.filter(c => c.host.region === region) : candidates;
 		const selectionPool = (region && regionPreferred.length > 0) ? regionPreferred : candidates;
 		log('info', 'Match candidates prepared', { requestId: req.id, total: candidates.length, selectionPool: selectionPool.length, region });
 
-		// Attempt allocations until success or exhaustion
 		const pool = [...selectionPool];
 		while (pool.length > 0) {
 			const pick = weightedPick(pool);
@@ -303,6 +296,9 @@ app.post('/api/match/find', async(req, res) => {
 							{ urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" }
 						]
 					});
+				} else {
+					log('info', 'Allocation race detected, retrying host', { requestId: req.id, hostId: currentHostId });
+					continue;
 				}
 			}
 

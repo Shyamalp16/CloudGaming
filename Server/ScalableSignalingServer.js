@@ -16,8 +16,6 @@ const {
 	incSchemaRejects,
 	incRateLimitDrops,
 	incBackpressureCloses,
-	// observeRedisLatency,
-	// observeFanoutLatency,
 	startRedisTimer,
 	startFanoutTimer,
 } = require('./metrics');
@@ -25,14 +23,10 @@ const jwt = require('jsonwebtoken');
 const { createRemoteJWKSet, jwtVerify } = require('jose');
 const { atomicJoin, atomicLeave } = require('./redisScripts');
 
-// =============================
-// Logging helper (pino-backed)
-// =============================
 function log(level, message, context) {
 	const validLevels = ['fatal', 'error', 'warn', 'info', 'debug', 'trace'];
 	const method = validLevels.includes(level) ? level : 'info';
 	const ctx = context || {};
-	// Ensure error objects are passed to pino as 'err'
 	if (ctx.error && !ctx.err) {
 		ctx.err = ctx.error;
 	}
@@ -43,9 +37,6 @@ function log(level, message, context) {
 	}
 }
 
-// =============================
-// Redis Clients and helpers
-// =============================
 function createRedis(urlString) {
 	return createClient({
 		url: urlString,
@@ -58,10 +49,8 @@ function createRedis(urlString) {
 	});
 }
 
-// Need two clients: one for commands, one for subscriber mode
 const redisClient = createRedis(config.redisUrl);
 const subscriber = redisClient.duplicate();
-// Unique ID for this server instance for loop prevention on Redis fanout
 const serverInstanceId = (crypto.randomUUID && crypto.randomUUID()) || `srv:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
 const rateLimiter = RateLimiter(redisClient);
 let redisCircuitOpenUntil = 0;
@@ -71,10 +60,10 @@ redisClient.on('error', (err) => {
 	log('error', 'Redis client error', { err });
 });
 subscriber.on('error', (err) => {
+	setRedisUp(false);
 	log('error', 'Redis subscriber error', { err });
 });
 
-// Circuit breaker: track consecutive failures
 let redisFailureCount = 0;
 function noteRedisFailure() {
 	redisFailureCount += 1;
@@ -99,13 +88,8 @@ function noteRedisSuccess() {
 let draining = false;
 const server = new WebSocket.Server({ port: config.wsPort, maxPayload: config.messageMaxBytes });
 
-// In-memory map for clients connected to THIS server instance.
-// Map<roomId, Set<WebSocket>>
 const localRooms = new Map();
 
-// =============================
-// Validation helpers
-// =============================
 const ROOM_ID_REGEX = /^[A-Za-z0-9_\-:.]+$/;
 function validateRoomId(roomId) {
 	if (typeof roomId !== 'string') return false;
@@ -118,9 +102,6 @@ function safeClientId() {
 	return `client:${Date.now()}:${crypto.randomBytes(8).toString('hex')}`;
 }
 
-// =============================
-// Redis Pub/Sub handler
-// =============================
 function handleRedisMessage(message, channel) {
 	try {
 		const roomId = channel.replace(/^room:/, '');
@@ -132,7 +113,6 @@ function handleRedisMessage(message, channel) {
 			return;
 		}
 		const { senderId, data, originServerId } = payload || {};
-		// Avoid re-fanout to local clients if this server originated the publish
 		if (originServerId && originServerId === serverInstanceId) {
 			return;
 		}
@@ -142,7 +122,6 @@ function handleRedisMessage(message, channel) {
 		const endFanout = startFanoutTimer();
 		clientsInRoom.forEach(client => {
 			if (client.clientId !== senderId && client.readyState === WebSocket.OPEN) {
-				// Backpressure guard
 				if (client.bufferedAmount > config.backpressureCloseThresholdBytes) {
 					log('warn', 'Closing client due to excessive backpressure', { clientId: client.clientId, roomId });
 					incBackpressureCloses();
@@ -161,12 +140,8 @@ function handleRedisMessage(message, channel) {
 	}
 }
 
-// =============================
-// Connection lifecycle handlers
-// =============================
 async function handleNewConnection(ws, request) {
 	try {
-		// Circuit breaker: refuse new connections if Redis is considered down
 		if (Date.now() < redisCircuitOpenUntil) {
 			log('warn', 'Refusing connection due to Redis circuit open');
 			ws.close(1013, 'Service unavailable');
@@ -184,7 +159,6 @@ async function handleNewConnection(ws, request) {
 			ws.close(1008, 'Invalid roomId');
 			return;
 		}
-		// Transport security checks
 		const origin = request.headers['origin'];
 		const protocols = request.headers['sec-websocket-protocol'];
 		if (config.requireWss && request.headers['x-forwarded-proto'] !== 'https') {
@@ -219,7 +193,6 @@ async function handleNewConnection(ws, request) {
 			}
 			try { ws.protocol = config.subprotocol; } catch (_) {}
 		}
-		// Auth (optional)
 		if (config.enableAuth) {
 			const authHeader = request.headers['authorization'] || '';
 			let token = parameters.get('token');
@@ -252,7 +225,6 @@ async function handleNewConnection(ws, request) {
 			}
 		}
 
-		// IP-based connection rate limiting
 		const ip = (request.socket && request.socket.remoteAddress) || 'unknown';
 		let allowedConn = true;
 		try {
@@ -269,7 +241,6 @@ async function handleNewConnection(ws, request) {
 		const roomKey = `room:${roomId}`;
 		const clientId = safeClientId();
 
-		// Atomic join via Lua script
 		try {
 			const end = startRedisTimer();
 			const result = await atomicJoin(redisClient, roomKey, clientId, config.roomCapacity);
@@ -280,7 +251,6 @@ async function handleNewConnection(ws, request) {
 				ws.close(1000, 'Room is full');
 				return;
 			}
-			// result is new size (>=1)
 		} catch (e) {
 			log('error', 'Redis error during join', { roomId, clientId, err: e });
 			noteRedisFailure();
@@ -288,13 +258,11 @@ async function handleNewConnection(ws, request) {
 			return;
 		}
 
-		// Attach metadata
 		ws.roomId = roomId;
 		ws.clientId = clientId;
 		ws.isAlive = true;
 		ws._rate = { tokens: config.rateLimitMessagesPer10s, lastRefill: Date.now() };
 
-		// Register locally
 		if (!localRooms.has(roomId)) localRooms.set(roomId, new Set());
 		localRooms.get(roomId).add(ws);
 		setActiveConnections([...localRooms.values()].reduce((acc, set) => acc + set.size, 0));
@@ -302,7 +270,6 @@ async function handleNewConnection(ws, request) {
 
 		log('info', 'Client joined room', { clientId, roomId, localCount: localRooms.get(roomId).size });
 
-		// Heartbeat
 		const heartbeat = setInterval(() => {
 			if (!ws || ws.readyState !== WebSocket.OPEN) return;
 			if (!ws.isAlive) {
@@ -322,7 +289,6 @@ async function handleNewConnection(ws, request) {
 			log('debug', 'Received pong from client', { clientId: ws.clientId });
 		});
 
-		// Wire message / close / error handlers
 		ws.on('message', (message) => handleMessage(ws, roomKey, message));
 		ws.on('close', () => handleDisconnection(ws, roomKey));
 		ws.on('error', (err) => {
@@ -357,7 +323,6 @@ async function handleMessage(ws, roomKey, message) {
 			}
 			message = message.toString('utf8');
 		} else {
-			// Unsupported frame type
 			return;
 		}
 
