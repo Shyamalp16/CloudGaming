@@ -3,7 +3,7 @@
     "serverUrlBase": "ws://localhost:3002"
   },
   "host": {
-    "targetProcessName": "hl2.exe",
+    "targetProcessName": "cs2.exe",
     "window": {
       "resizeClientArea": true,
       "targetWidth": 1920,
