@@ -97,18 +97,14 @@ static void metricsExportLoop() {
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last).count() >= 1) {
             last = now;
-            try {
-                json m;
-                m["type"] = "video-metrics";
-                m["queueDepth"] = VideoMetrics::load(VideoMetrics::queueDepth());
-                m["overwriteDrops"] = VideoMetrics::load(VideoMetrics::overwriteDrops());
-                m["backpressureSkips"] = VideoMetrics::load(VideoMetrics::backpressureSkips());
-                m["outOfOrder"] = VideoMetrics::load(VideoMetrics::outOfOrder());
-                m["vpGpuMs"] = VideoMetrics::vpGpuMs().load(std::memory_order_relaxed);
-                send_message(m);
-            } catch (...) {
-                // ignore
-            }
+            json m;
+            m["type"] = "video-metrics";
+            m["queueDepth"] = VideoMetrics::load(VideoMetrics::queueDepth());
+            m["overwriteDrops"] = VideoMetrics::load(VideoMetrics::overwriteDrops());
+            m["backpressureSkips"] = VideoMetrics::load(VideoMetrics::backpressureSkips());
+            m["outOfOrder"] = VideoMetrics::load(VideoMetrics::outOfOrder());
+            m["vpGpuMs"] = VideoMetrics::vpGpuMs().load(std::memory_order_relaxed);
+            send_message(m);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }

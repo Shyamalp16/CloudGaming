@@ -9,20 +9,12 @@
 
 HWND fetchForegroundWindow()
 {
-    try
+    HWND foreground = ::GetForegroundWindow();
+    if (!foreground)
     {
-        HWND foreground = ::GetForegroundWindow();
-        if (!foreground)
-        {
-            std::wcerr << L"[fetchForegroundWindow] Returned NULL.\n";
-        }
-        return foreground;
+        std::wcerr << L"[fetchForegroundWindow] Returned NULL.\n";
     }
-    catch (...)
-    {
-        std::wcerr << L"[fetchForegroundWindow] Exception.\n";
-        return nullptr;
-    }
+    return foreground;
 }
 
 uint64_t GetWindowIdFromHWND(HWND hwnd)

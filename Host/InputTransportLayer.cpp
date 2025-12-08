@@ -199,7 +199,6 @@ void Layer::pionMessageLoop() {
             }
         } catch (const std::exception& e) {
             LOG_INPUT_ERROR("Exception in Pion message loop: " + std::string(e.what()), "");
-            // Yield instead of sleep to maintain responsiveness
             std::this_thread::yield();
         }
     }
@@ -251,12 +250,8 @@ void Layer::processingLoop() {
                 }
 
                 if (messageHandler) {
-                    try {
-                        messageHandler(message);
-                        processed++;
-                    } catch (const std::exception& e) {
-                        LOG_INPUT_ERROR("Exception in message handler: " + std::string(e.what()), message.data);
-                    }
+                    messageHandler(message);
+                    processed++;
                 }
 
                 lock.lock(); // Re-lock for next iteration

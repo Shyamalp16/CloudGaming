@@ -662,11 +662,13 @@ bool AudioCapturer::WriteWAVData(const float* samples, size_t sampleCount)
     }
     catch (const std::exception& e) {
         m_wavConsecutiveErrors++;
-        try { std::wcerr << L"[AudioCapturer] WAV write error (" << m_wavConsecutiveErrors << L"): " << e.what() << std::endl; } catch (...) {}
+        std::wcerr << L"[AudioCapturer] WAV write error (" << m_wavConsecutiveErrors << L"): " << e.what() << std::endl;
         if (m_wavConsecutiveErrors >= MAX_WAV_CONSECUTIVE_ERRORS) {
             std::wcerr << L"[AudioCapturer] Too many consecutive WAV write errors, disabling recording" << std::endl;
             m_wavRecordingEnabled = false;
-            try { if (m_wavFile.is_open()) { m_wavFile.close(); } } catch (...) {}
+            if (m_wavFile.is_open()) {
+                m_wavFile.close();
+            }
         }
         return false;
     }

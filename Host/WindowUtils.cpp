@@ -43,14 +43,12 @@ void MaybeResizeClientArea(HWND hwnd, const nlohmann::json& config)
     int targetW = 1920;
     int targetH = 1080;
     bool resizeClient = true;
-    try {
-        if (config.contains("host") && config["host"].contains("window")) {
-            const auto& wcfg = config["host"]["window"];
-            if (wcfg.contains("targetWidth")) targetW = wcfg["targetWidth"].get<int>();
-            if (wcfg.contains("targetHeight")) targetH = wcfg["targetHeight"].get<int>();
-            if (wcfg.contains("resizeClientArea")) resizeClient = wcfg["resizeClientArea"].get<bool>();
-        }
-    } catch (...) {}
+    if (config.contains("host") && config["host"].contains("window")) {
+        const auto& wcfg = config["host"]["window"];
+        if (wcfg.contains("targetWidth")) targetW = wcfg["targetWidth"].get<int>();
+        if (wcfg.contains("targetHeight")) targetH = wcfg["targetHeight"].get<int>();
+        if (wcfg.contains("resizeClientArea")) resizeClient = wcfg["resizeClientArea"].get<bool>();
+    }
     if (resizeClient && (cW < targetW || cH < targetH)) {
         if (SetWindowClientAreaSize(hwnd, targetW, targetH)) {
             std::wcout << L"[window] Resized window client area to " << targetW << L"x" << targetH << std::endl;

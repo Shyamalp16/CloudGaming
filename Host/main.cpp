@@ -1,4 +1,4 @@
-﻿
+
 #include <winrt/Windows.Foundation.h>
 #include <windows.h>
 #include <winrt/Windows.Graphics.Capture.h>
@@ -20,8 +20,6 @@
 #include "InputConfig.h"
 #include "ErrorUtils.h"
 #include "InputIntegrationLayer.h"
-
-// removed: custom callbacks and monitorConnection (moved into modules)
 
 int main()
 {
@@ -100,16 +98,14 @@ int main()
     StartCapture();
     initWebsocket(roomId);
     // Optional metrics export to signaling channel
-    try {
-        if (config.contains("host") && config["host"].contains("video")) {
-            auto vcfg = config["host"]["video"];
-            bool exportMetrics = vcfg.value("exportMetrics", false);
-            if (exportMetrics) {
-                extern void startMetricsExport(bool enable);
-                startMetricsExport(true);
-            }
+    if (config.contains("host") && config["host"].contains("video")) {
+        auto vcfg = config["host"]["video"];
+        bool exportMetrics = vcfg.value("exportMetrics", false);
+        if (exportMetrics) {
+            extern void startMetricsExport(bool enable);
+            startMetricsExport(true);
         }
-    } catch (...) {}
+    }
     AudioCapturer audioCapturer;
     std::wcout << L"[main] Waiting for 2 seconds before starting audio capture..." << std::endl;
     Sleep(2000);
@@ -121,36 +117,28 @@ int main()
     Sleep(1000); // 1 second delay to allow audio device setup
 
     // Start WAV recording for debugging if enabled in config
-    try {
-        // Simple check for WAV recording
-        bool enableWAV = false;
-        std::string wavFilename = "output.wav";
+    bool enableWAV = false;
+    std::string wavFilename = "output.wav";
 
-        // Try to get the WAV recording setting
-        if (config.contains("host") && config["host"].contains("debug")) {
-            auto& debugSection = config["host"]["debug"];
-            if (debugSection.contains("enableWAVRecording") && debugSection["enableWAVRecording"].is_boolean()) {
-                enableWAV = debugSection["enableWAVRecording"];
-            }
-            if (debugSection.contains("wavFilename") && debugSection["wavFilename"].is_string()) {
-                wavFilename = debugSection["wavFilename"];
-            }
+    if (config.contains("host") && config["host"].contains("debug")) {
+        auto& debugSection = config["host"]["debug"];
+        if (debugSection.contains("enableWAVRecording") && debugSection["enableWAVRecording"].is_boolean()) {
+            enableWAV = debugSection["enableWAVRecording"];
         }
-
-        if (enableWAV) {
-            std::wcout << L"[main] Starting WAV recording to: " << wavFilename.c_str() << std::endl;
-            if (!audioCapturer.StartWAVRecording(wavFilename)) {
-                std::wcerr << L"[main] Failed to start WAV recording to: " << wavFilename.c_str() << std::endl;
-            } else {
-                std::wcout << L"[main] WAV recording started successfully" << std::endl;
-            }
-        } else {
-            std::wcout << L"[main] WAV recording disabled in config" << std::endl;
+        if (debugSection.contains("wavFilename") && debugSection["wavFilename"].is_string()) {
+            wavFilename = debugSection["wavFilename"];
         }
     }
-    catch (const std::exception& e) {
-        std::wcerr << L"[main] Exception in WAV recording setup: " << e.what() << std::endl;
-        std::wcout << L"[main] WAV recording disabled due to error" << std::endl;
+
+    if (enableWAV) {
+        std::wcout << L"[main] Starting WAV recording to: " << wavFilename.c_str() << std::endl;
+        if (!audioCapturer.StartWAVRecording(wavFilename)) {
+            std::wcerr << L"[main] Failed to start WAV recording to: " << wavFilename.c_str() << std::endl;
+        } else {
+            std::wcout << L"[main] WAV recording started successfully" << std::endl;
+        }
+    } else {
+        std::wcout << L"[main] WAV recording disabled in config" << std::endl;
     }
 
     std::wcout << L"[main] Capture started! Press any key to stop.\n";

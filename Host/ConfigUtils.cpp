@@ -54,135 +54,122 @@ bool LoadConfig(nlohmann::json& outConfig)
 
 bool GetTargetProcessName(const nlohmann::json& config, std::string& outName)
 {
-    try {
-        if (config.contains("host") && config["host"].contains("targetProcessName") && config["host"]["targetProcessName"].is_string()) {
-            outName = config["host"]["targetProcessName"].get<std::string>();
-            return !outName.empty();
-        }
-    } catch (...) {}
+    if (config.contains("host") && config["host"].contains("targetProcessName") && config["host"]["targetProcessName"].is_string()) {
+        outName = config["host"]["targetProcessName"].get<std::string>();
+        return !outName.empty();
+    }
     return false;
 }
 
 void ApplyVideoSettings(const nlohmann::json& config)
 {
-    try {
-        if (!(config.contains("host") && config["host"].contains("video"))) return;
-        auto vcfg = config["host"]["video"];
-        int cfgFps = vcfg.value("fps", 120);
-        int brStart = vcfg.value("bitrateStart", 20000000);
-        int brMin = vcfg.value("bitrateMin", 10000000);
-        int brMax = vcfg.value("bitrateMax", 50000000);
-        Encoder::SetBitrateConfig(brStart, brMin, brMax);
-        Encoder::ConfigureBitrateController(brMin, brMax,
-                                           5'000'000,
-                                           300,
-                                           3,
-                                           1000);
-        SetCaptureTargetFps(cfgFps);
+    if (!(config.contains("host") && config["host"].contains("video"))) return;
+    auto vcfg = config["host"]["video"];
+    int cfgFps = vcfg.value("fps", 120);
+    int brStart = vcfg.value("bitrateStart", 20000000);
+    int brMin = vcfg.value("bitrateMin", 10000000);
+    int brMax = vcfg.value("bitrateMax", 50000000);
+    Encoder::SetBitrateConfig(brStart, brMin, brMax);
+    Encoder::ConfigureBitrateController(brMin, brMax,
+                                       5'000'000,
+                                       300,
+                                       3,
+                                       1000);
+    SetCaptureTargetFps(cfgFps);
 
-        bool fullRange = vcfg.value("fullRange", true);
-        Encoder::SetFullRangeColor(fullRange);
+    bool fullRange = vcfg.value("fullRange", true);
+    Encoder::SetFullRangeColor(fullRange);
 
-        bool gpuTiming = vcfg.value("gpuTiming", false);
-        Encoder::SetGpuTimingEnabled(gpuTiming);
+    bool gpuTiming = vcfg.value("gpuTiming", false);
+    Encoder::SetGpuTimingEnabled(gpuTiming);
 
-        bool deferredCtx = vcfg.value("deferredContext", false);
-        Encoder::SetDeferredContextEnabled(deferredCtx);
+    bool deferredCtx = vcfg.value("deferredContext", false);
+    Encoder::SetDeferredContextEnabled(deferredCtx);
 
-        if (vcfg.contains("pacingFixedUs")) {
-            Encoder::SetPacingFixedUs(std::max(1, vcfg["pacingFixedUs"].get<int>()));
-        } else if (vcfg.contains("pacingFps")) {
-            Encoder::SetPacingFps(std::max(1, vcfg["pacingFps"].get<int>()));
-        }
+    if (vcfg.contains("pacingFixedUs")) {
+        Encoder::SetPacingFixedUs(std::max(1, vcfg["pacingFixedUs"].get<int>()));
+    } else if (vcfg.contains("pacingFps")) {
+        Encoder::SetPacingFps(std::max(1, vcfg["pacingFps"].get<int>()));
+    }
 
-        bool ignorePli = vcfg.value("ignorePli", false);
-        int minPliIntervalMs = vcfg.value("minPliIntervalMs", 500);
-        double minLossThreshold = vcfg.value("minPliLossThreshold", 0.03);
-        Encoder::ConfigurePliPolicy(ignorePli, minPliIntervalMs, minLossThreshold);
+    bool ignorePli = vcfg.value("ignorePli", false);
+    int minPliIntervalMs = vcfg.value("minPliIntervalMs", 500);
+    double minLossThreshold = vcfg.value("minPliLossThreshold", 0.03);
+    Encoder::ConfigurePliPolicy(ignorePli, minPliIntervalMs, minLossThreshold);
 
-        if (vcfg.contains("hwFramePoolSize")) {
-            int pool = vcfg["hwFramePoolSize"].get<int>();
-            Encoder::SetHwFramePoolSize(pool);
-        }
+    if (vcfg.contains("hwFramePoolSize")) {
+        int pool = vcfg["hwFramePoolSize"].get<int>();
+        Encoder::SetHwFramePoolSize(pool);
+    }
 
-        std::string preset = vcfg.value("preset", std::string("p5"));
-        std::string rc     = vcfg.value("rc", std::string("cbr"));
-        int bf             = vcfg.value("bf", 0);
-        int rcLookahead    = vcfg.value("rcLookahead", 0);
-        int asyncDepth     = vcfg.value("asyncDepth", 2);
-        int surfaces       = vcfg.value("surfaces", 8);
-        Encoder::SetNvencOptions(preset.c_str(), rc.c_str(), bf, rcLookahead, asyncDepth, surfaces);
+    std::string preset = vcfg.value("preset", std::string("p5"));
+    std::string rc     = vcfg.value("rc", std::string("cbr"));
+    int bf             = vcfg.value("bf", 0);
+    int rcLookahead    = vcfg.value("rcLookahead", 0);
+    int asyncDepth     = vcfg.value("asyncDepth", 2);
+    int surfaces       = vcfg.value("surfaces", 8);
+    Encoder::SetNvencOptions(preset.c_str(), rc.c_str(), bf, rcLookahead, asyncDepth, surfaces);
 
-        // HDR tone mapping configuration
-        if (vcfg.contains("hdrToneMapping")) {
-            auto hdrCfg = vcfg["hdrToneMapping"];
-            bool hdrEnabled = hdrCfg.value("enabled", false);
-            std::string method = hdrCfg.value("method", std::string("reinhard"));
-            float exposure = hdrCfg.value("exposure", 0.0f);
-            float gamma = hdrCfg.value("gamma", 2.2f);
-            float saturation = hdrCfg.value("saturation", 1.0f);
-            Encoder::SetHdrToneMappingConfig(hdrEnabled, method, exposure, gamma, saturation);
-        }
-    } catch (...) {}
+    if (vcfg.contains("hdrToneMapping")) {
+        auto hdrCfg = vcfg["hdrToneMapping"];
+        bool hdrEnabled = hdrCfg.value("enabled", false);
+        std::string method = hdrCfg.value("method", std::string("reinhard"));
+        float exposure = hdrCfg.value("exposure", 0.0f);
+        float gamma = hdrCfg.value("gamma", 2.2f);
+        float saturation = hdrCfg.value("saturation", 1.0f);
+        Encoder::SetHdrToneMappingConfig(hdrEnabled, method, exposure, gamma, saturation);
+    }
 }
 
 
 void ApplyCaptureSettings(const nlohmann::json& config, int configuredFps)
 {
-    try {
-        if (!(config.contains("host") && config["host"].contains("capture"))) {
-            if (configuredFps > 0) {
-                long long interval = 10000000LL / configuredFps;
-                // Allow system to run at configured FPS without artificial clamping
-                SetMinUpdateInterval100ns(interval);
-            }
-            return;
-        }
-        auto ccfg = config["host"]["capture"];
-        if (ccfg.contains("maxQueueDepth")) {
-            SetMaxQueuedFrames(std::max(1, ccfg["maxQueueDepth"].get<int>()));
-        }
-        if (ccfg.contains("framePoolBuffers")) {
-            SetFramePoolBuffers(std::max(1, ccfg["framePoolBuffers"].get<int>()));
-        } else if (ccfg.contains("numberOfBuffers")) {
-            SetFramePoolBuffers(std::max(1, ccfg["numberOfBuffers"].get<int>()));
-        }
-        if (ccfg.contains("cursor")) {
-            bool cursor = ccfg.value("cursor", true);
-            SetCursorCaptureEnabled(cursor);
-        }
-        if (ccfg.contains("borderRequired")) {
-            bool border = ccfg.value("borderRequired", true);
-            SetBorderRequired(border);
-        }
-        if (ccfg.contains("dropWindowMs") || ccfg.contains("dropMinEvents")) {
-            int w = ccfg.value("dropWindowMs", 200);
-            int m = ccfg.value("dropMinEvents", 2);
-            SetBackpressureDropPolicy(w, m);
-        }
-        if (ccfg.contains("mmcss")) {
-            auto mcfg = ccfg["mmcss"];
-            bool enable = mcfg.value("enable", true);
-            int prio = mcfg.value("priority", 2);
-            SetMmcssConfig(enable, prio);
-        }
-        if (ccfg.contains("minUpdateInterval100ns")) {
-            long long interval = 0;
-            try { interval = ccfg["minUpdateInterval100ns"].get<long long>(); } catch (...) { interval = 0; }
+    if (!(config.contains("host") && config["host"].contains("capture"))) {
+        if (configuredFps > 0) {
+            long long interval = 10000000LL / configuredFps;
             SetMinUpdateInterval100ns(interval);
-        } else {
-            if (configuredFps > 0) {
-                long long interval = 10000000LL / configuredFps;
-                // Allow system to run at configured FPS without artificial clamping
-                SetMinUpdateInterval100ns(interval);
-            }
         }
-        if (ccfg.contains("skipUnchanged")) {
-            bool skip = false;
-            try { skip = ccfg["skipUnchanged"].get<bool>(); } catch (...) { skip = false; }
-            SetSkipUnchanged(skip);
-        }
-    } catch (...) {}
+        return;
+    }
+    auto ccfg = config["host"]["capture"];
+    if (ccfg.contains("maxQueueDepth")) {
+        SetMaxQueuedFrames(std::max(1, ccfg["maxQueueDepth"].get<int>()));
+    }
+    if (ccfg.contains("framePoolBuffers")) {
+        SetFramePoolBuffers(std::max(1, ccfg["framePoolBuffers"].get<int>()));
+    } else if (ccfg.contains("numberOfBuffers")) {
+        SetFramePoolBuffers(std::max(1, ccfg["numberOfBuffers"].get<int>()));
+    }
+    if (ccfg.contains("cursor")) {
+        bool cursor = ccfg.value("cursor", true);
+        SetCursorCaptureEnabled(cursor);
+    }
+    if (ccfg.contains("borderRequired")) {
+        bool border = ccfg.value("borderRequired", true);
+        SetBorderRequired(border);
+    }
+    if (ccfg.contains("dropWindowMs") || ccfg.contains("dropMinEvents")) {
+        int w = ccfg.value("dropWindowMs", 200);
+        int m = ccfg.value("dropMinEvents", 2);
+        SetBackpressureDropPolicy(w, m);
+    }
+    if (ccfg.contains("mmcss")) {
+        auto mcfg = ccfg["mmcss"];
+        bool enable = mcfg.value("enable", true);
+        int prio = mcfg.value("priority", 2);
+        SetMmcssConfig(enable, prio);
+    }
+    if (ccfg.contains("minUpdateInterval100ns")) {
+        auto interval = ccfg.value("minUpdateInterval100ns", 0LL);
+        SetMinUpdateInterval100ns(interval);
+    } else if (configuredFps > 0) {
+        long long interval = 10000000LL / configuredFps;
+        SetMinUpdateInterval100ns(interval);
+    }
+    if (ccfg.contains("skipUnchanged")) {
+        bool skip = ccfg.value("skipUnchanged", false);
+        SetSkipUnchanged(skip);
+    }
 }
 
 void ApplyAudioSettings(const nlohmann::json& config)
