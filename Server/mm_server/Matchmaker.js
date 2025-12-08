@@ -63,7 +63,16 @@ app.post('/api/match/find', async(req, res) => {
                 found: true,
                 roomId: match.roomId,
                 signalingUrl: `ws://localhost:${config.wsPort}`,
-                iceServers: []
+                iceServers: [
+                    {
+                        urls: "stun:stun.l.google.com:19032"
+                    },
+                    {
+                        urls: "turn:openrelay.metered.ca:80",
+                        username: "openrelayproject",
+                        credential: "openrelayproject"
+                    }
+                ]
             });
         }else{
             return res.status(404).json({ found: false, message: `All hosts are busy`});
