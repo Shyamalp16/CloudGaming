@@ -2,13 +2,25 @@ const express = require('express');
 const cors = require('cors');
 const { config } = require('../config');
 const { createClient } = require('redis');
+const { z } = require('zod')
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+const HeartbeatSchema = z.object({
+    hostId: z.string().uuid().or(z.string().min(1)),
+    roomId: z.string().min(1),
+    region: z.string().optional(),
+    status: z.enum(['idle', 'busy', 'allocated']).optional()
+})
+
 app.post('/api/host/heartbeat', async(req, res) => {
-    const { hostId, roomId, region, status } = req.body;
+    const result = HeartbeatSchema.safeParse(req.body);
+    if (!result.success) {
+        return res.status(400).json({ error: result.error });
+    }
+    const { hostId, roomId, region, status } = result.data;
     if( !hostId || !roomId){
         return res.status(400).json({ success: false, error: 'Missing hostId or roomId' });
     }
