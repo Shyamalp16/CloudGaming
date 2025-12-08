@@ -30,7 +30,49 @@ app.post('/api/host/heartbeat', async(req, res) => {
     }
 })
 
+app.post('/api/match/find', async(req, res) => {
+    try{
+        const { region } = req.body;
+        const keys = await redisClient.keys('host:*');
+        if(keys.length === 0){
+            return res.status(404).json({ found:false, message:'No hosts available'});
+        }
+        const hostsJSON = await redisClient.mGet(keys);
+        let match = null;
+        for(const json of hostsJSON){
+            if(!json) continue;
+            let host;
+            try{
+                host = JSON.parse(json)
+            }catch(e){
+                continue;
+            }
 
+            const isIdle = host.status === 'idle'
+            const regionsMatch = !region || host.region === region;
+
+            if(isIdle && regionsMatch){
+                host.status = 'allocated'
+                await redisClient.set(`host:${host.hostId}`, JSON.stringify(host), {EX: 30});
+                match = host;
+                break;
+            }
+        }
+        if(match){
+            return res.json({
+                found: true,
+                roomId: match.roomId,
+                signalingUrl: `ws://localhost:${config.wsPort}`,
+                iceServers: []
+            });
+        }else{
+            return res.status(404).json({ found: false, message: `All hosts are busy`});
+        }
+    }catch(err){
+        console.error('Match Error:', err)
+        res.status(500).json({ error: 'Internal server error'})
+    }
+});
 
 function createRedis(urlString){
     return createClient({
