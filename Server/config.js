@@ -1,5 +1,6 @@
 const { z } = require('zod');
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
 const schema = z.object({
 	NODE_ENV: z.string().default(process.env.NODE_ENV || 'development'),
@@ -26,6 +27,7 @@ const schema = z.object({
 	REQUIRE_WSS: z.string().optional(),
 	ALLOWED_ORIGINS: z.string().optional(),
 	SUBPROTOCOL: z.string().optional(),
+	HOST_SECRET: z.string().default('to-change-in-prod'),
 	ENABLE_AUTH: z.string().optional(),
 	JWT_ISSUER: z.string().optional(),
 	JWT_AUDIENCE: z.string().optional(),
@@ -70,6 +72,7 @@ const config = {
 	requireWss: parsed.REQUIRE_WSS === 'true',
 	allowedOrigins: (parsed.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean),
 	subprotocol: parsed.SUBPROTOCOL,
+	hostSecret: parsed.HOST_SECRET,
 	enableAuth: parsed.ENABLE_AUTH === 'true',
 	jwt: {
 		issuer: parsed.JWT_ISSUER,

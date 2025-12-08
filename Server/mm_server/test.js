@@ -1,6 +1,7 @@
 const axios = require('axios');
 
 const BASE_URL = 'http://localhost:3000'; 
+const HOST_SECRET = 'HELLO-MFS';
 
 async function testMatchmaker() {
     console.log('--- Starting Matchmaker Test ---');
@@ -12,7 +13,11 @@ async function testMatchmaker() {
     };
     try {
         console.log('1. Registering Host...');
-        await axios.post(`${BASE_URL}/api/host/heartbeat`, hostPayload);
+        await axios.post(`${BASE_URL}/api/host/heartbeat`, hostPayload, {
+            headers: {
+                'Authorization': `Bearer ${HOST_SECRET}`
+            }
+        });
         console.log('   Host registered successfully.');
     } catch (error) {
         console.error('   Failed to register host:', error.message);

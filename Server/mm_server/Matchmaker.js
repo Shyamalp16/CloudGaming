@@ -8,6 +8,27 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const authenticateHost = (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if(!authHeader || !authHeader.startsWith('Bearer ')){
+        return res.status(401).json({
+            success: false,
+            error: 'Unauthorized: Missing or invalid Authorization header'
+        });
+    }
+    const token = authHeader.split(' ')[1];
+    if(token !== config.hostSecret){
+        return res.status(403).json({
+            success: false,
+            error: 'Forbidden: Invalid host secret'
+        });
+    }
+
+    next()
+}
+
+app.use('/api/host', authenticateHost);
+
 const HeartbeatSchema = z.object({
     hostId: z.string().uuid().or(z.string().min(1)),
     roomId: z.string().min(1),
