@@ -40,7 +40,7 @@ function createRedis(urlString) {
 		socket: {
 			reconnectStrategy: (retries) => {
 				const delay = Math.min(1000 + retries * 50, 5000);
-				return delay; // retry with capped backoff
+				return delay;
 			}
 		}
 	});

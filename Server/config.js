@@ -4,6 +4,7 @@ require('dotenv').config();
 const schema = z.object({
 	NODE_ENV: z.string().default(process.env.NODE_ENV || 'development'),
 	WS_PORT: z.preprocess((v) => Number(v), z.number().int().positive()).default(3002),
+	MATCHMAKER_PORT: z.preprocess((v) => Number(v), z.number().int().positive()).default(3000),
 	REDIS_URL: z.string().url().default('redis://127.0.0.1:6379'),
 	ROOM_CAPACITY: z.preprocess((v) => Number(v), z.number().int().positive()).default(2),
 	ROOM_TTL_SECONDS: z.preprocess((v) => Number(v), z.number().int().positive()).default(120),
@@ -47,6 +48,7 @@ try {
 const config = {
 	env: parsed.NODE_ENV,
 	wsPort: parsed.WS_PORT,
+	mmPort: parsed.MATCHMAKER_PORT,
 	redisUrl: parsed.REDIS_URL,
 	roomCapacity: parsed.ROOM_CAPACITY,
 	roomTtlSeconds: parsed.ROOM_TTL_SECONDS,
