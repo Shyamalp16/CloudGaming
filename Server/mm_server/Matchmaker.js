@@ -72,6 +72,24 @@ app.post('/api/host/heartbeat', async(req, res) => {
     }
 })
 
+app.get('/api/hosts', async (req, res) => {
+    try {
+        const hostIds = await redisClient.sMembers('idle_hosts');
+        if (hostIds.length === 0) {
+            return res.json([]); 
+        }
+        const hostKeys = hostIds.map(id => `host:${id}`);
+        const hostsJSON = await redisClient.mGet(hostKeys);
+        const hosts = hostsJSON
+            .filter(json => json !== null)
+            .map(json => JSON.parse(json));
+        res.json(hosts);
+    } catch (error) {
+        console.error('Failed to list hosts:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 app.post('/api/match/find', async(req, res) => {
     try{
         const { region } = req.body;
