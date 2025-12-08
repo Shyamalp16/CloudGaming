@@ -28,6 +28,7 @@ const schema = z.object({
 	ALLOWED_ORIGINS: z.string().optional(),
 	SUBPROTOCOL: z.string().optional(),
 	HOST_SECRET: z.string().default('to-change-in-prod'),
+	HOST_SECRET_PREVIOUS: z.string().optional(),
 	ENABLE_AUTH: z.string().optional(),
 	JWT_ISSUER: z.string().optional(),
 	JWT_AUDIENCE: z.string().optional(),
@@ -73,6 +74,7 @@ const config = {
 	allowedOrigins: (parsed.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean),
 	subprotocol: parsed.SUBPROTOCOL,
 	hostSecret: parsed.HOST_SECRET,
+	hostSecretPrevious: parsed.HOST_SECRET_PREVIOUS,
 	enableAuth: parsed.ENABLE_AUTH === 'true',
 	jwt: {
 		issuer: parsed.JWT_ISSUER,
