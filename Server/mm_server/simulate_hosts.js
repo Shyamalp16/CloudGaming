@@ -12,7 +12,6 @@ const hosts = Array.from({ length: NUM_HOSTS }, (_, i) => ({
     roomId: `room-sim-${i + 1}-${crypto.randomUUID().slice(0, 8)}`,
     region: 'us-east-1',
     status: 'idle',
-    // Add some variety in specs/name if your system uses them
     gameInfo: {
         name: `Simulated Rig #${i + 1}`,
         specs: 'RTX 4090 (Simulated)'

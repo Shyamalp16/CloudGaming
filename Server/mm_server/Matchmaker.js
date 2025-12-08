@@ -92,24 +92,37 @@ app.get('/api/hosts', async (req, res) => {
 
 app.post('/api/match/find', async(req, res) => {
     try{
-        const { region } = req.body;
-        const rawCandidates = await redisClient.sRandMember('idle_hosts', 10);
-        const candidateIds = Array.isArray(rawCandidates) ? rawCandidates : [rawCandidates];
+        const { region, hostId: requestedHostId } = req.body;
+        
+        let candidateIds = [];
+
+        if (requestedHostId) {
+            // Priority 1: User requested a specific host
+            candidateIds = [requestedHostId];
+        } else {
+            // Priority 2: Random selection
+            const rawCandidates = await redisClient.sRandMember('idle_hosts', 10);
+            if (rawCandidates) {
+                candidateIds = Array.isArray(rawCandidates) ? rawCandidates : [rawCandidates];
+            }
+        }
+
         console.log('Debug - Candidates:', candidateIds);
 
         if(!candidateIds || candidateIds.length === 0){
             return res.status(404).json({found: false, message: 'No hosts available'})
         }
 
-        for(const hostId of candidateIds){
-            const key = `host:${hostId}`
+        for(const currentHostId of candidateIds){
+            const key = `host:${currentHostId}`
             await redisClient.watch(key);
             const json = await redisClient.get(key);
             
-            console.log(`Debug - Host ${hostId} JSON:`, json);
+            console.log(`Debug - Host ${currentHostId} JSON:`, json);
 
             if(!json) {
-                await redisClient.sRem('idle_hosts', hostId)
+                // Host expired or removed
+                await redisClient.sRem('idle_hosts', currentHostId)
                 await redisClient.unwatch();
                 continue;
             }
@@ -120,6 +133,7 @@ app.post('/api/match/find', async(req, res) => {
                 await redisClient.unwatch();
                 continue;
             }
+            
             const isIdle = host.status === 'idle'
             const regionsMatch = !region || host.region === region;
             
@@ -127,9 +141,14 @@ app.post('/api/match/find', async(req, res) => {
             
             if(isIdle && regionsMatch){
                 host.status = 'allocated'
-                const multi = redisClient.multi().set(key, JSON.stringify(host), {EX: 30}).sRem('idle_hosts', hostId)
+                // Atomic transaction: Update JSON status AND remove from idle set
+                const multi = redisClient.multi()
+                    .set(key, JSON.stringify(host), {EX: 30})
+                    .sRem('idle_hosts', currentHostId)
+                
                 const results = await multi.exec()
                 console.log('Debug - Transaction results:', results);
+                
                 if(results){
                     return res.json({
                         found: true,
@@ -137,7 +156,7 @@ app.post('/api/match/find', async(req, res) => {
                         signalingUrl: `ws://localhost:${config.wsPort}`,
                         iceServers: [
                             {
-                                urls: "stun:stun.l.google.com:19032"
+                                urls: "stun:stun.l.google.com:19302"
                             },
                             {
                                 urls: "turn:openrelay.metered.ca:80",
@@ -151,7 +170,7 @@ app.post('/api/match/find', async(req, res) => {
                 await redisClient.unwatch()
             }
         }
-        return res.status(404).json({ found: false, message: 'No hosts available' });
+        return res.status(404).json({ found: false, message: 'No available hosts found matching criteria' });
     }catch(err){
         console.error('Match Error:', err)
         res.status(500).json({ error: 'Internal server error'})
