@@ -84,17 +84,21 @@ function weightedPick(items) {
 }
 
 async function pruneStaleIdleHosts() {
-	const stale = [];
-	const ids = await redisClient.sMembers('idle_hosts');
-	for (const id of ids) {
-		const ttl = await redisClient.ttl(`host:${id}`);
-		if (ttl === -2) {
-			stale.push(id);
+	try {
+		const stale = [];
+		const ids = await redisClient.sMembers('idle_hosts');
+		for (const id of ids) {
+			const ttl = await redisClient.ttl(`host:${id}`);
+			if (ttl === -2) {
+				stale.push(id);
+			}
 		}
-	}
-	if (stale.length > 0) {
-		await redisClient.sRem('idle_hosts', stale);
-		log('info', 'Pruned stale idle hosts', { staleCount: stale.length, ids: stale });
+		if (stale.length > 0) {
+			await redisClient.sRem('idle_hosts', stale);
+			log('info', 'Pruned stale idle hosts', { staleCount: stale.length, ids: stale });
+		}
+	} catch (error) {
+		log('error', 'Failed to prune stale hosts', { error: String(error && error.message || error) });
 	}
 }
 
@@ -332,6 +336,10 @@ async function startServer(){
     try{
         await redisClient.connect();
         console.log('Connected to Redis');
+
+        // Clean up stale hosts on startup and periodically
+        await pruneStaleIdleHosts();
+        setInterval(pruneStaleIdleHosts, 10000);
 
         app.listen(config.mmPort, () => {
             console.log(`Matchmaker server is running on port ${config.mmPort}`);
