@@ -87,7 +87,7 @@ const corsOptions = {
 	allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
 };
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // respond 204 to all preflight requests
+app.options(/.*/, cors(corsOptions)); // respond 204 to all preflight requests
 
 app.use(express.json());
 
@@ -415,24 +415,29 @@ const redisClient = createRedis(config.redisUrl);
 redisClient.on('error', (err) => console.error('Redis Client Error', err));
 
 async function startServer(){
-    try{
+    // Bind to PORT first so Railway's health check passes immediately.
+    // Redis connection happens after — a slow Redis startup no longer kills the container.
+    const port = process.env.PORT || config.mmPort;
+    await new Promise((resolve, reject) => {
+        app.listen(port, (err) => {
+            if (err) return reject(err);
+            console.log(`Matchmaker server is running on port ${port}`);
+            resolve();
+        });
+    });
+
+    try {
         await redisClient.connect();
         console.log('Connected to Redis');
+    } catch (error) {
+        console.error('Failed to connect to Redis — retrying in background', error);
+        // Don't exit — the redis client's reconnectStrategy will keep retrying
+    }
 
-        // Clean up stale hosts on startup and periodically
+    try {
         await pruneStaleIdleHosts();
-        setInterval(pruneStaleIdleHosts, 10000);
-
-        // Railway injects PORT; fall back to config for local dev
-        const port = process.env.PORT || config.mmPort;
-        app.listen(port, () => {
-            console.log(`Matchmaker server is running on port ${port}`);
-        });
-    }
-    catch (error) {
-        console.error('Failed to start matchmaker server', error);
-        process.exit(1);
-    }
+    } catch (_) {}
+    setInterval(pruneStaleIdleHosts, 10000);
 }
 
 startServer();
