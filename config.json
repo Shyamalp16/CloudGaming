@@ -4,7 +4,7 @@
     "matchmakerUrl": "https://matchmaker-production-5b36.up.railway.app"
   },
   "host": {
-    "targetProcessName": "vlc.exe",
+    "targetProcessName": "cs2.exe",
     "signalingUrl": "wss://signaling-server-production-acd4.up.railway.app",
     "matchmaker": {
       "url": "https://matchmaker-production-5b36.up.railway.app",
@@ -17,11 +17,11 @@
       "targetHeight": 1080
     },
     "video": {
-        "fps": 120,
-        "pacingFixedUs": 8333,
-        "bitrateStart": 20000000,
+        "fps": 60,
+        "pacingFixedUs": 16666,
+        "bitrateStart": 8000000,
         "bitrateMin": 8000000,
-        "bitrateMax": 40000000,
+        "bitrateMax": 12000000,
         "hwFramePoolSize": 3,
         "fullRange": false,
         "preset": "p2",
@@ -51,7 +51,7 @@
       "mmcss": { "enable": true, "priority": 4 },
       "cursor": false,
       "borderRequired": false,
-      "minUpdateInterval100ns": 83333,
+      "minUpdateInterval100ns": 166666,
       "skipUnchanged": true,
       "adaptiveBackoff": false,
       "adaptiveWindowMs": 2000,
@@ -59,8 +59,8 @@
     },
     "audio": {
       "processLoopback": {
-        "enabled": false,
-        "includeProcessTree": false
+        "enabled": true,
+        "includeProcessTree": true
       },
       "bitrate": 80000,
       "complexity": 6,

@@ -594,6 +594,7 @@
         document.body.classList.add('immersive');
         document.getElementById('gameContainer').classList.remove('hidden');
 
+        currentIceServers = defaultIceServers;
         connectToSignalingServer(roomId);
     });
 
@@ -638,6 +639,14 @@
                 document.body.classList.add('immersive');
                 document.getElementById('gameContainer').classList.remove('hidden');
                 
+                if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+                    currentIceServers = data.iceServers;
+                    log(`Using ${data.iceServers.length} ICE server entries from matchmaker`);
+                } else {
+                    currentIceServers = defaultIceServers;
+                    log('Matchmaker returned no ICE servers; falling back to default STUN', 'warn');
+                }
+
                 // Use the signaling URL from matchmaker response
                 connectToSignalingServer(data.roomId, data.signalingUrl);
             } else {
@@ -700,6 +709,8 @@
     let debugVisible = false;
     let perfVisible = true;
     let currentRoomId = null;
+    const defaultIceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+    let currentIceServers = defaultIceServers;
     
     const keyState = new Set();
     const mouseButtonState = new Set();
@@ -1162,7 +1173,7 @@
       showLoadingOverlay('Establishing Connection', 'Setting up peer connection...');
       
       const config = {
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceServers: currentIceServers,
       };
       try {
         peerConnection = new RTCPeerConnection(config);
@@ -1254,6 +1265,19 @@
           // Ensure audio track is enabled
           event.track.enabled = true;
           log(`Audio track enabled: ${event.track.enabled}, muted: ${event.track.muted}, readyState: ${event.track.readyState}`);
+
+          const receiver = event.receiver;
+          if (receiver) {
+            if (receiver.playoutDelayHint !== undefined) {
+              receiver.playoutDelayHint = 0;
+              log('Set audio playoutDelayHint = 0');
+            }
+            if (receiver.jitterBufferTarget !== undefined) {
+              // Keep a tiny target to avoid massive audio buildup while still smoothing burst jitter.
+              receiver.jitterBufferTarget = 10;
+              log('Set audio jitterBufferTarget = 10ms');
+            }
+          }
 
           // Use ONLY a dedicated audio element
           const audioElement = createHiddenAudioElement();

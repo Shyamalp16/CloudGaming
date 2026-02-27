@@ -115,16 +115,18 @@ int main()
         std::wcerr << L"[main] Failed to create capture item." << std::endl;
         return -1;
     }
-    GraphicsAndCapture::CaptureContext cap;
-    if (!GraphicsAndCapture::InitializeCapture(cap, d3d, item)) return -1;
-    GraphicsAndCapture::Start(cap);
-    // Configure encoder defaults from config
+    // Apply config-driven pacing/encoder knobs before capture session creation so
+    // MinUpdateInterval and related settings are active from the first frame.
     int cfgFps = config.contains("host") && config["host"].contains("video") ? config["host"]["video"].value("fps", 120) : 120;
     ConfigUtils::ApplyVideoSettings(config);
     ConfigUtils::ApplyCaptureSettings(config, cfgFps);
     ConfigUtils::ApplyAudioSettings(config);
     ConfigUtils::ApplyThreadPrioritySettings(config);
     ConfigUtils::ApplyAdaptiveQualityControlSettings(config);
+
+    GraphicsAndCapture::CaptureContext cap;
+    if (!GraphicsAndCapture::InitializeCapture(cap, d3d, item)) return -1;
+    GraphicsAndCapture::Start(cap);
     StartCapture();
 
     // Read optional signaling server URL from config (host.signalingUrl).

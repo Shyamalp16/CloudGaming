@@ -381,6 +381,8 @@ test.bat
 /gortc_main/exports.txt
 /gortc_main/go.mod
 /gortc_main/go.sum
+/gortc_main/.env
+/gortc_main/env.local
 /gortc_main/webrtc.def
 /gortc_main/webrtc.dll
 /gortc_main/webrtc.exp

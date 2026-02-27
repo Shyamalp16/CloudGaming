@@ -118,6 +118,63 @@ static void EnsureAudioBuffersCapacity() {
     }
 }
 
+// Remap interleaved audio channel layout to a target channel count expected by Opus.
+// This prevents severe distortion when WASAPI supplies multi-channel mix data.
+static bool RemapInterleavedChannelsInPlace(std::vector<float>& interleaved, uint32_t inChannels, uint32_t outChannels) {
+    if (inChannels == 0 || outChannels == 0 || interleaved.empty()) return false;
+    if (inChannels == outChannels) return true;
+    if (interleaved.size() % inChannels != 0) return false;
+
+    const size_t frames = interleaved.size() / inChannels;
+    EnsureAudioBuffersCapacity();
+    g_audioTempBuffer.resize(frames * outChannels);
+
+    if (outChannels == 1) {
+        // Downmix any input layout to mono by averaging channels.
+        for (size_t f = 0; f < frames; ++f) {
+            float sum = 0.0f;
+            const size_t base = f * inChannels;
+            for (uint32_t c = 0; c < inChannels; ++c) sum += interleaved[base + c];
+            g_audioTempBuffer[f] = sum / static_cast<float>(inChannels);
+        }
+    } else if (outChannels == 2) {
+        if (inChannels == 1) {
+            // Mono -> stereo duplication.
+            for (size_t f = 0; f < frames; ++f) {
+                const float v = interleaved[f];
+                const size_t o = f * 2;
+                g_audioTempBuffer[o + 0] = v;
+                g_audioTempBuffer[o + 1] = v;
+            }
+        } else {
+            // Robust stereo fold-down for multi-channel input.
+            for (size_t f = 0; f < frames; ++f) {
+                const size_t base = f * inChannels;
+                const float left  = interleaved[base + 0];
+                const float right = interleaved[base + 1];
+                float surroundSum = 0.0f;
+                for (uint32_t c = 2; c < inChannels; ++c) surroundSum += interleaved[base + c];
+                const float surroundAvg = (inChannels > 2) ? (surroundSum / static_cast<float>(inChannels - 2)) : 0.0f;
+                const size_t o = f * 2;
+                g_audioTempBuffer[o + 0] = 0.85f * left  + 0.15f * surroundAvg;
+                g_audioTempBuffer[o + 1] = 0.85f * right + 0.15f * surroundAvg;
+            }
+        }
+    } else {
+        // Generic mapping: copy shared channels, zero-fill extras.
+        for (size_t f = 0; f < frames; ++f) {
+            const size_t inBase = f * inChannels;
+            const size_t outBase = f * outChannels;
+            const uint32_t shared = (inChannels < outChannels) ? inChannels : outChannels;
+            for (uint32_t c = 0; c < shared; ++c) g_audioTempBuffer[outBase + c] = interleaved[inBase + c];
+            for (uint32_t c = shared; c < outChannels; ++c) g_audioTempBuffer[outBase + c] = 0.0f;
+        }
+    }
+
+    interleaved.swap(g_audioTempBuffer);
+    return true;
+}
+
 AudioCapturer::AudioCapturer() :
     m_stopCapture(true),
     m_stopQueueProcessor(true),
@@ -1725,6 +1782,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                                     else {
                                                         std::wcerr << L"[AudioCapturer] Process loopback event-driven init failed; retrying in polling mode. Error: "
                                                             << _com_error(hr).ErrorMessage() << std::endl;
+                                                        targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
                                                         hr = m_pAudioClient->Initialize(
                                                             AUDCLNT_SHAREMODE_SHARED,
                                                             AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -1740,6 +1798,10 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
                                                 if (SUCCEEDED(hr))
                                                 {
+                                                    if (targetFormat) {
+                                                        // Keep runtime conversion format aligned to initialized client format.
+                                                        pwfx = targetFormat;
+                                                    }
                                                     hr = m_pAudioClient->GetBufferSize(&bufferFrameCount);
                                                     if (FAILED(hr)) {
                                                         std::wcerr << L"[AudioCapturer] Unable to get buffer size for process loopback: "
@@ -2122,6 +2184,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     } else {
                         std::wcerr << L"[AudioCapturer] Event-driven init failed; retrying in polling mode. Error: " << _com_error(hr).ErrorMessage() << std::endl;
                         // Retry without EVENTCALLBACK
+                        targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
                         hr = m_pAudioClient->Initialize(
                             AUDCLNT_SHAREMODE_SHARED,
                             AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -2138,6 +2201,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
                 // Update active format fields to match actual capture format
                 if (targetFormat) {
+                    // Ensure hot-path conversion uses the actual initialized format.
+                    pwfx = targetFormat;
                     m_activeChannels = static_cast<uint16_t>(targetFormat->nChannels);
                     m_activeSampleRate = static_cast<uint32_t>(targetFormat->nSamplesPerSec);
                     m_activeBitsPerSample = targetFormat->wBitsPerSample;
@@ -2873,7 +2938,8 @@ AfterDeviceSelection:
             // 4. Fixed-size buffers eliminate resize overhead during runtime
             // ============================================================================
 
-            size_t totalSamples = static_cast<size_t>(numFramesAvailable) * static_cast<size_t>(pwfx->nChannels);
+            uint32_t inputChannels = (pwfx && pwfx->nChannels > 0) ? pwfx->nChannels : 2;
+            size_t totalSamples = static_cast<size_t>(numFramesAvailable) * static_cast<size_t>(inputChannels);
 
             // Ensure working buffer is large enough (use capacity growth instead of dropping)
             if (totalSamples > m_floatBuffer.size()) {
@@ -2910,7 +2976,7 @@ AfterDeviceSelection:
 
             // Resample to 48kHz if source rate differs (ensure buffer capacity; never skip)
             if (pwfx->nSamplesPerSec != 48000) {
-                uint32_t channels = pwfx->nChannels;
+                uint32_t channels = inputChannels;
 
                 // Calculate expected output size (interleaved samples)
                 double ratio = 48000.0 / static_cast<double>(pwfx->nSamplesPerSec);
@@ -2952,6 +3018,30 @@ AfterDeviceSelection:
                 }
             }
 
+            // Normalize channel count to what Opus is configured to encode.
+            uint32_t targetChannels = static_cast<uint32_t>(s_audioConfig.channels > 0 ? s_audioConfig.channels : 2);
+            if (inputChannels != targetChannels) {
+                static auto lastChannelLog = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+                if (RemapInterleavedChannelsInPlace(m_floatBuffer, inputChannels, targetChannels)) {
+                    totalSamples = m_floatBuffer.size();
+                    inputChannels = targetChannels;
+                    auto nowLog = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::seconds>(nowLog - lastChannelLog).count() >= 5) {
+                        std::wcout << L"[AudioCapturer] Channel remap applied: " << pwfx->nChannels
+                                   << L" -> " << targetChannels << std::endl;
+                        lastChannelLog = nowLog;
+                    }
+                } else {
+                    std::wcerr << L"[AudioCapturer] Channel remap failed (" << inputChannels << L" -> " << targetChannels
+                               << L"), dropping current block to avoid noise" << std::endl;
+                    hr = m_pCaptureClient->ReleaseBuffer(numFramesAvailable);
+                    if (FAILED(hr)) {
+                        LogErrorWithContext(hr, L"Failed to release buffer after remap failure", m_consecutiveErrorCount);
+                    }
+                    continue;
+                }
+            }
+
             // Calculate timestamp for this audio data with a single pinned source
             int64_t timestampUs = 0;
             UINT64 audioClockPos = 0;
@@ -2978,7 +3068,7 @@ AfterDeviceSelection:
                     timestampUs = static_cast<int64_t>((audioClockPos * 1000000ULL) / m_audioClockFreq);
                 } else {
                     // Synthesize timestamp: advance by duration of this captured block
-                    uint32_t channels = (pwfx && pwfx->nChannels > 0) ? pwfx->nChannels : s_audioConfig.channels;
+                    uint32_t channels = (inputChannels > 0) ? inputChannels : static_cast<uint32_t>(s_audioConfig.channels);
                     if (channels == 0) channels = 2;
                     double secondsAdvanced = static_cast<double>(totalSamples) / (48000.0 * static_cast<double>(channels));
                     int64_t deltaUs = static_cast<int64_t>(secondsAdvanced * 1000000.0 + 0.5);
@@ -4281,8 +4371,8 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
             int target = static_cast<int>(s_currentAudioBitrate.load() * factor);
             // FIX: Proper bitrate clamping with Opus limits
             int opusMin = 6000;  // Opus minimum is 6 kbps
-            int effectiveMin = std::max(s_minAudioBitrate, opusMin);
-            int newBitrate = std::max(effectiveMin, target);
+            int effectiveMin = (std::max)(s_minAudioBitrate, opusMin);
+            int newBitrate = (std::max)(effectiveMin, target);
 
             s_currentAudioBitrate.store(newBitrate);
             s_lastAudioChange = now;
@@ -4312,8 +4402,8 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
         // Also ensure we respect configured min/max bounds
         int opusMin = 6000;  // Opus minimum is 6 kbps
         int opusMax = 510000; // Opus maximum is 510 kbps per channel (1020 kbps for stereo)
-        int effectiveMin = std::max(s_minAudioBitrate, opusMin);
-        int effectiveMax = std::min(s_maxAudioBitrate, opusMax);
+        int effectiveMin = (std::max)(s_minAudioBitrate, opusMin);
+        int effectiveMax = (std::min)(s_maxAudioBitrate, opusMax);
         int newBitrate = std::clamp(target, effectiveMin, effectiveMax);
 
         if (newBitrate > current) {

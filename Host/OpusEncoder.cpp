@@ -142,18 +142,13 @@ int OpusEncoderWrapper::encodeFrameToBuffer(const float* pcmInterleaved, uint8_t
         return -1; // Error
     }
 
-    // Debug: Check if the encoded data looks like silence (comfort noise)
-    if (ret == 3 && debugCount % 50 == 0) {  // 3 bytes is comfort noise
-        std::cout << "[OpusEncoder] WARNING: 3-byte comfort noise packet detected!" << std::endl;
-
-        // Check the actual encoded bytes
-        if (buffer && ret >= 3) {
-            std::cout << "[OpusEncoder] Encoded bytes: ";
-            for (int i = 0; i < ret; ++i) {
-                std::cout << std::hex << (int)buffer[i] << " ";
-            }
-            std::cout << std::dec << std::endl;
-        }
+    // Treat tiny 3-byte Opus packets as expected silence/CN, not warnings.
+    static int comfortNoiseCount = 0;
+    static int nonComfortNoiseCount = 0;
+    if (ret == 3) {
+        comfortNoiseCount++;
+    } else {
+        nonComfortNoiseCount++;
     }
 
     // Debug: Log encoding results every 5 seconds
@@ -165,8 +160,13 @@ int OpusEncoderWrapper::encodeFrameToBuffer(const float* pcmInterleaved, uint8_t
 
     if (elapsed >= 5000) {  // 5 seconds
         std::cout << "[OpusEncoder] Frames encoded in last 5s: " << encodeCount << ", Last frame size: " << ret << " bytes" << std::endl;
+        if (comfortNoiseCount > 0 && nonComfortNoiseCount == 0) {
+            std::cout << "[OpusEncoder] Audio appears silent (comfort-noise packets only in last 5s)." << std::endl;
+        }
         lastEncodeLog = now;
         encodeCount = 0;  // Reset counter
+        comfortNoiseCount = 0;
+        nonComfortNoiseCount = 0;
     }
 
     return ret; // Return actual encoded size

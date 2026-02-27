@@ -128,6 +128,107 @@ func normalizeToMs(v interface{}) (float64, bool) {
 	return x * 1e3, true // treat as seconds otherwise
 }
 
+func loadDotEnvFile(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(strings.TrimSuffix(rawLine, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" {
+			continue
+		}
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') ||
+				(value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+
+		// Real environment variables always take precedence over .env values.
+		if _, exists := os.LookupEnv(key); !exists {
+			_ = os.Setenv(key, value)
+		}
+	}
+
+	return true, nil
+}
+
+func loadDotEnvIfPresent() {
+	for _, path := range []string{"gortc_main/.env", ".env", "gortc_main/env.local"} {
+		loaded, err := loadDotEnvFile(path)
+		if err != nil {
+			log.Printf("[Go/Pion] Failed to load %s: %v", path, err)
+			continue
+		}
+		if loaded {
+			log.Printf("[Go/Pion] Loaded environment from %s", path)
+			return
+		}
+	}
+	log.Printf("[Go/Pion] No .env file found; using process environment variables")
+}
+
+func buildICEServersFromEnv() []webrtc.ICEServer {
+	servers := []webrtc.ICEServer{
+		{URLs: []string{"stun:stun.l.google.com:19302"}},
+	}
+
+	turnURLsRaw := strings.TrimSpace(os.Getenv("PION_TURN_URLS"))
+	if turnURLsRaw == "" {
+		turnURLsRaw = strings.TrimSpace(os.Getenv("PION_TURN_URL"))
+	}
+	if turnURLsRaw == "" {
+		log.Printf("[Go/Pion] No TURN env configured; using STUN-only ICE")
+		return servers
+	}
+
+	urls := make([]string, 0, 4)
+	for _, rawURL := range strings.Split(turnURLsRaw, ",") {
+		url := strings.TrimSpace(rawURL)
+		if url != "" {
+			urls = append(urls, url)
+		}
+	}
+	if len(urls) == 0 {
+		log.Printf("[Go/Pion] TURN URL env was empty after parsing; using STUN-only ICE")
+		return servers
+	}
+
+	username := strings.TrimSpace(os.Getenv("PION_TURN_USERNAME"))
+	credential := strings.TrimSpace(os.Getenv("PION_TURN_CREDENTIAL"))
+	if username == "" || credential == "" {
+		log.Printf("[Go/Pion] TURN URLs set but credentials missing; using STUN-only ICE")
+		return servers
+	}
+
+	servers = append(servers, webrtc.ICEServer{
+		URLs:       urls,
+		Username:   username,
+		Credential: credential,
+	})
+	log.Printf("[Go/Pion] TURN configured from env with %d URL(s)", len(urls))
+	return servers
+}
+
 var rtcpCallback C.RTCPCallback
 var pliCallback C.OnPLICallback
 var webrtcStatsCallback C.WebRTCStatsCallback
@@ -482,7 +583,7 @@ var (
 	// Audio buffering during WebRTC connection establishment
 	audioConnectionBuffer []*rtp.Packet      // Buffer audio packets until connection is ready
 	audioBufferMutex      sync.Mutex         // Protects the connection buffer
-	maxAudioBufferSize    int           = 20 // Maximum packets to buffer (~200 ms at 100 pps)
+	maxAudioBufferSize    int           = 20 // Keep initial audio backlog tiny (~40 ms at 10 ms frames)
 
 	lastAnswerSDP         string
 	currentSequenceNumber uint16
@@ -914,8 +1015,8 @@ func logBufferSizeDistribution() {
 
 // initAudioSendQueue initializes the bounded audio send queue and starts the sender goroutine
 func initAudioSendQueue() {
-	// Capacity 3: absorbs small bursts without accumulating latency (3 × 10ms = 30ms max)
-	audioSendQueue = make(chan *rtp.Packet, 3)
+	// Capacity 16: still low-latency, but can absorb transient network/pacer jitter.
+	audioSendQueue = make(chan *rtp.Packet, 16)
 	audioSendStop = make(chan struct{})
 
 	// Create buffer completion channel for safe buffer pool management
@@ -945,7 +1046,7 @@ func initVideoSendQueue() {
 	// Start the buffer completion handler goroutine
 	go videoBufferCompletionHandler()
 
-	log.Println("[Go/Pion] Audio send queue initialized with bounded channel (capacity: 3)")
+	log.Println("[Go/Pion] Audio send queue initialized with bounded channel (capacity: 16)")
 	log.Println("[Go/Pion] Video send queue initialized with bounded channel (capacity: 4)")
 	log.Println("[Go/Pion] Buffer completion mechanism initialized for use-after-free prevention")
 }
@@ -1064,17 +1165,17 @@ func videoSenderGoroutine() {
 			}
 			idleTimer.Reset(10 * time.Second)
 
-		pcMutex.RLock()
-		track := videoTrack
-		pcMutex.RUnlock()
-		if track != nil {
-			if err := track.WriteSample(sample); err != nil {
-				log.Printf("[Go/Pion] Error in video sender goroutine: %v", err)
+			pcMutex.RLock()
+			track := videoTrack
+			pcMutex.RUnlock()
+			if track != nil {
+				if err := track.WriteSample(sample); err != nil {
+					log.Printf("[Go/Pion] Error in video sender goroutine: %v", err)
+				}
+			} else {
+				log.Printf("[Go/Pion] Video track is nil, dropping sample")
 			}
-		} else {
-			log.Printf("[Go/Pion] Video track is nil, dropping sample")
-		}
-		putSampleBuf(sample.Data)
+			putSampleBuf(sample.Data)
 
 		case <-videoSendStop:
 			log.Println("[Go/Pion] Video sender goroutine stopped")
@@ -1182,6 +1283,7 @@ func testBufferCompletionMechanism() {
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
+	loadDotEnvIfPresent()
 
 	// With physical RAM at near-capacity (16 GB machine running game + browser + host),
 	// keeping GOGC=300 means the Go runtime can hold up to 3x the live heap before
@@ -1672,16 +1774,7 @@ func createPeerConnectionGo() C.int {
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithInterceptorRegistry(i))
 
 	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{
-				URLs: []string{"stun:stun.l.google.com:19302"},
-			},
-			{
-				URLs:       []string{"turn:openrelay.metered.ca:80"},
-				Username:   "openrelayproject",
-				Credential: "openrelayproject",
-			},
-		},
+		ICEServers:   buildICEServersFromEnv(),
 		SDPSemantics: webrtc.SDPSemanticsUnifiedPlan,
 	}
 
