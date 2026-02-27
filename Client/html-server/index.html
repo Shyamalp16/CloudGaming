@@ -654,9 +654,20 @@
         }
     });
 
-    const serverUrlBase = "ws://localhost:3002";
-    // const serverUrlBase = "ws://10.0.0.134:3002";
-    const matchmakerUrl = "http://localhost:3000";
+    // ─── Server URLs ────────────────────────────────────────────────────────────
+    // Swap between local dev and production automatically based on hostname.
+    // Replace the two REPLACE_ME strings with your actual Railway service URLs
+    // before deploying to Vercel.
+    const _isProd = location.hostname !== 'localhost' && location.hostname !== '127.0.0.1';
+    const matchmakerUrl  = _isProd
+        ? "https://matchmaker-production-5b36.up.railway.app"  
+        : "http://localhost:3000";
+    // signalingUrl is normally returned by the matchmaker response (data.signalingUrl).
+    // serverUrlBase is only used as a fallback when connecting without matchmaker.
+    const serverUrlBase  = _isProd
+        ? "wss://signaling-server-production-acd4.up.railway.app"      // ← your Signaling Railway URL
+        : "ws://localhost:3002";
+    // ────────────────────────────────────────────────────────────────────────────
     let ws;
     let peerConnection;
     const hiddenVideoElement = document.getElementById('hiddenVideo');

@@ -4,6 +4,77 @@ const { randomUUID } = require('crypto');
 const { config } = require('../config');
 const { createClient } = require('redis');
 const { z } = require('zod');
+const https = require('https');
+
+// ─── Metered TURN helper ─────────────────────────────────────────────────────
+// Fetches short-lived ICE server credentials from the Metered API.
+// Called once per match so credentials are always fresh and expire with the session.
+// Falls back to Google STUN-only if Metered is not configured.
+async function getIceServers() {
+	const { domain, apiKey, expirySeconds } = config.metered;
+	const fallback = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+	if (!domain || !apiKey) {
+		return fallback;
+	}
+
+	try {
+		// Step 1: create an expiring credential
+		const createRes = await fetchJson(
+			`https://${domain}.metered.live/api/v1/turn/credential?secretKey=${apiKey}`,
+			'POST',
+			{ expiryInSeconds: expirySeconds }
+		);
+		if (!createRes || !createRes.apiKey) {
+			log('warn', 'Metered credential creation returned no apiKey', { createRes });
+			return fallback;
+		}
+
+		// Step 2: fetch the full iceServers array using the one-time apiKey
+		const iceServers = await fetchJson(
+			`https://${domain}.metered.live/api/v1/turn/credentials?apiKey=${createRes.apiKey}`,
+			'GET'
+		);
+		if (!Array.isArray(iceServers) || iceServers.length === 0) {
+			log('warn', 'Metered returned empty iceServers', { iceServers });
+			return fallback;
+		}
+
+		// Always include a STUN server alongside the TURN servers
+		return [{ urls: 'stun:stun.l.google.com:19302' }, ...iceServers];
+	} catch (err) {
+		log('error', 'Failed to fetch Metered TURN credentials', { error: String(err && err.message || err) });
+		return fallback;
+	}
+}
+
+function fetchJson(url, method, body) {
+	return new Promise((resolve, reject) => {
+		const parsed = new URL(url);
+		const data = body ? JSON.stringify(body) : null;
+		const options = {
+			hostname: parsed.hostname,
+			path: parsed.pathname + parsed.search,
+			method: method || 'GET',
+			headers: {
+				'Content-Type': 'application/json',
+				...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}),
+			},
+		};
+		const req = https.request(options, (res) => {
+			let raw = '';
+			res.on('data', (chunk) => { raw += chunk; });
+			res.on('end', () => {
+				try { resolve(JSON.parse(raw)); }
+				catch (e) { reject(new Error(`JSON parse failed: ${raw.slice(0, 200)}`)); }
+			});
+		});
+		req.on('error', reject);
+		if (data) req.write(data);
+		req.end();
+	});
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 const app = express();
 app.use(cors());
@@ -291,14 +362,14 @@ app.post('/api/match/find', async(req, res) => {
 				log('info', 'Transaction results', { requestId: req.id, hostId: currentHostId, results, remainingSlots });
 
 				if (results) {
+					const signalingUrl = config.signalingPublicUrl || `ws://localhost:${config.wsPort}`;
+					const iceServers   = await getIceServers();
+
 					return res.json({
 						found: true,
 						roomId: host.roomId,
-						signalingUrl: `ws://localhost:${config.wsPort}`,
-						iceServers: [
-							{ urls: "stun:stun.l.google.com:19302" },
-							{ urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" }
-						]
+						signalingUrl,
+						iceServers,
 					});
 				} else {
 					log('info', 'Allocation race detected, retrying host', { requestId: req.id, hostId: currentHostId });

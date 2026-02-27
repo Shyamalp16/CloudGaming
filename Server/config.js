@@ -37,6 +37,14 @@ const schema = z.object({
 	JWKS_URL: z.string().optional(),
 	JWKS_CACHE_TTL: z.preprocess((v) => Number(v), z.number().int().positive()).optional(),
 	ROOMS_CLAIM: z.string().optional(),
+	// Public WSS URL returned to clients by the matchmaker so they know where to
+	// connect for WebRTC signaling. Must be set in production.
+	// Example: wss://signaling.yourdomain.com
+	SIGNALING_PUBLIC_URL: z.string().optional(),
+
+	METERED_DOMAIN:  z.string().optional(),
+	METERED_API_KEY: z.string().optional(),
+	TURN_EXPIRY_SECONDS: z.preprocess((v) => Number(v), z.number().int().positive()).default(14400), // 4 hours
 });
 
 let parsed;
@@ -84,6 +92,12 @@ const config = {
 		jwksUrl: parsed.JWKS_URL,
 		jwksTtlMs: parsed.JWKS_CACHE_TTL || 300000,
 		roomsClaim: parsed.ROOMS_CLAIM || 'rooms',
+	},
+	signalingPublicUrl: parsed.SIGNALING_PUBLIC_URL || null,
+	metered: {
+		domain:          parsed.METERED_DOMAIN  || null,
+		apiKey:          parsed.METERED_API_KEY || null,
+		expirySeconds:   parsed.TURN_EXPIRY_SECONDS,
 	},
 };
 
