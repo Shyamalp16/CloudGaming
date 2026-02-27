@@ -6,9 +6,9 @@
   "host": {
     "targetProcessName": "SandFall-Win64-Shipping.exe",
     "matchmaker": {
-      "url": "http://localhost:3000",
+      "url": "https://matchmaker-production-5b36.up.railway.app",
       "hostSecret": "HELLO-MFS",
-      "heartbeatIntervalMs": 25000
+      "heartbeatIntervalMs": 20000
     },
     "window": {
       "resizeClientAr ea": true,
