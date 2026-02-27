@@ -4,7 +4,7 @@
     "matchmakerUrl": "http://localhost:3000"
   },
   "host": {
-    "targetProcessName": "SandFall-Win64-Shipping.exe",
+    "targetProcessName": "cs2.exe",
     "matchmaker": {
       "url": "https://matchmaker-production-5b36.up.railway.app",
       "hostSecret": "HELLO-MFS",
