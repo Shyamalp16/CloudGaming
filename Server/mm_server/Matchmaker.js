@@ -90,11 +90,10 @@ app.use((req, res, next) => {
 	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 	res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Request-Id');
 	res.setHeader('Access-Control-Max-Age', '86400');
+	console.log('CORS headers set for', req.method, req.path);
 	if (req.method === 'OPTIONS') return res.sendStatus(204);
 	next();
 });
-
-console.log('CORS headers set for', req.method, req.path);
 
 app.use(express.json());
 

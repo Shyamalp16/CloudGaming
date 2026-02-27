@@ -6,7 +6,7 @@ const schema = z.object({
 	NODE_ENV: z.string().default(process.env.NODE_ENV || 'development'),
 	WS_PORT: z.preprocess((v) => Number(v), z.number().int().positive()).default(3002),
 	MATCHMAKER_PORT: z.preprocess((v) => Number(v), z.number().int().positive()).default(3000),
-	REDIS_URL: z.string().url().default('redis://127.0.0.1:6379'),
+	REDIS_URL: z.string().url().default('redis://default:kZjCvdqqYjxPMakhpeheOtDcYSGyBcjz@redis.railway.internal:6379'),
 	ROOM_CAPACITY: z.preprocess((v) => Number(v), z.number().int().positive()).default(2),
 	ROOM_TTL_SECONDS: z.preprocess((v) => Number(v), z.number().int().positive()).default(120),
 	MESSAGE_MAX_BYTES: z.preprocess((v) => Number(v), z.number().int().positive()).default(256 * 1024),
