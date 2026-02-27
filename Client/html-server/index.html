@@ -103,11 +103,15 @@
     }
 
     #gameCanvas {
+      position: absolute;
+      inset: 0;
       width: 100%;
       height: 100%;
       display: block;
       cursor: none;
-      background: #000;
+      background: transparent;
+      pointer-events: none;
+      z-index: 5;
     }
 
     #input-overlay {
@@ -284,9 +288,19 @@
     .log-level-warn { color: #ffaa00; }
     .log-level-error { color: #ff4444; }
 
-    #hiddenVideo { display: none; }
-    /* Fallback: render <video> directly when canvas path misbehaves */
-    #hiddenVideo.bg-video { display: block; position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; z-index: 0; pointer-events: none; }
+    /* Video is hidden by default; bg-video class activates direct hardware rendering */
+    #hiddenVideo { display: none; pointer-events: none; }
+    #hiddenVideo.bg-video {
+      display: block;
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000;
+      z-index: 1;
+      pointer-events: none;
+    }
 
     .fullscreen-mode {
       position: fixed !important;
@@ -546,14 +560,13 @@
         <div class="loading-subtext" id="loadingSubtext">Establishing WebRTC connection...</div>
       </div>
 
+      <video id="hiddenVideo" autoplay playsinline muted></video>
       <canvas id="gameCanvas"></canvas>
       <div id="input-overlay"></div>
     </div>
   </div>
 
   <div class="debug-log" id="debugLog"></div>
-
-  <video id="hiddenVideo" autoplay playsinline muted></video>
 
   <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
   <script>
@@ -896,18 +909,25 @@
 
     function renderVideoToCanvas() {
       if (!renderActive) return;
-      if (hiddenVideoElement.videoWidth > 0 && hiddenVideoElement.videoHeight > 0) {
-        // Preserve full frame (contain, no crop/zoom)
-        const vW = hiddenVideoElement.videoWidth;
-        const vH = hiddenVideoElement.videoHeight;
-        const scale = Math.min(canvas.width / vW, canvas.height / vH);
-        const dW = Math.floor(vW * scale);
-        const dH = Math.floor(vH * scale);
-        const dx = Math.floor((canvas.width - dW) / 2);
-        const dy = Math.floor((canvas.height - dH) / 2);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(hiddenVideoElement, 0, 0, vW, vH, dx, dy, dW, dH);
+      // Video is rendered directly by the browser (bg-video class).
+      // This rAF loop exists only to update the FPS counter.
+      frameCount++;
+      const currentTime = Date.now();
+      if (currentTime - lastFrameTime >= 1000) {
+        fps = Math.round((frameCount * 1000) / (currentTime - lastFrameTime));
+        frameCount = 0;
+        lastFrameTime = currentTime;
+        updatePerformanceDisplay();
+      }
+      animationId = requestAnimationFrame(renderVideoToCanvas);
+    }
 
+    function scheduleVideoFrameCallback() {
+      if (!renderActive || !('requestVideoFrameCallback' in hiddenVideoElement)) return;
+      // Video is rendered directly by the browser (bg-video class).
+      // rVFC fires each time the browser produces a new decoded frame — use it only to count FPS.
+      hiddenVideoElement.requestVideoFrameCallback(() => {
+        if (!renderActive) return;
         frameCount++;
         const currentTime = Date.now();
         if (currentTime - lastFrameTime >= 1000) {
@@ -916,35 +936,7 @@
           lastFrameTime = currentTime;
           updatePerformanceDisplay();
         }
-      }
-      animationId = requestAnimationFrame(renderVideoToCanvas);
-    }
-
-    function scheduleVideoFrameCallback() {
-      if (!renderActive || !('requestVideoFrameCallback' in hiddenVideoElement)) return;
-      hiddenVideoElement.requestVideoFrameCallback((_now, _metadata) => {
-        if (!renderActive) return;
-        if (hiddenVideoElement.videoWidth > 0 && hiddenVideoElement.videoHeight > 0) {
-          const vW = hiddenVideoElement.videoWidth;
-          const vH = hiddenVideoElement.videoHeight;
-          const scale = Math.min(canvas.width / vW, canvas.height / vH);
-          const dW = Math.floor(vW * scale);
-          const dH = Math.floor(vH * scale);
-          const dx = Math.floor((canvas.width - dW) / 2);
-          const dy = Math.floor((canvas.height - dH) / 2);
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(hiddenVideoElement, 0, 0, vW, vH, dx, dy, dW, dH);
-
-          frameCount++;
-          const currentTime = Date.now();
-          if (currentTime - lastFrameTime >= 1000) {
-            fps = Math.round((frameCount * 1000) / (currentTime - lastFrameTime));
-            frameCount = 0;
-            lastFrameTime = currentTime;
-            updatePerformanceDisplay();
-          }
-        }
-        if (renderActive) scheduleVideoFrameCallback();
+        scheduleVideoFrameCallback();
       });
     }
 
@@ -963,6 +955,7 @@
         cancelAnimationFrame(animationId);
         animationId = null;
       }
+      hiddenVideoElement.classList.remove('bg-video');
     }
 
     function log(message, level = 'info') {
@@ -1196,7 +1189,10 @@
 
             hiddenVideoElement.play().then(() => {
               logVideoState('after play() resolved');
-              log('Video started playing, beginning canvas rendering...');
+              log('Video started playing, activating direct hardware video rendering...');
+              // Bypass the canvas/Skia path: show the video element directly so the
+              // browser compositor uses its hardware BT.709 color pipeline.
+              hiddenVideoElement.classList.add('bg-video');
               startRenderingLoop();
               hideLoadingOverlay();
               updateConnectionStatus('connected', 'Streaming');
@@ -1204,26 +1200,11 @@
               log(`Video play() failed: ${e}. User interaction might be required.`, 'error');
             });
 
-            // Canvas resize on video dimension change
+            // Canvas no longer used as a draw surface — video renders directly.
+            // No canvas resize needed.
             hiddenVideoElement.onresize = () => {
-              const vp = document.getElementById('streamViewport');
-              const rect = vp.getBoundingClientRect();
-              canvas.width = Math.max(1, Math.floor(rect.width));
-              canvas.height = Math.max(1, Math.floor(rect.height));
-              log('Resized canvas to viewport');
+              logVideoState('onresize');
             };
-
-            // Window resize - remove old handler before adding new one
-            if (activeResizeHandler) {
-              window.removeEventListener('resize', activeResizeHandler);
-            }
-            activeResizeHandler = () => {
-              const vp = document.getElementById('streamViewport');
-              const rect = vp.getBoundingClientRect();
-              canvas.width = Math.max(1, Math.floor(rect.width));
-              canvas.height = Math.max(1, Math.floor(rect.height));
-            };
-            window.addEventListener('resize', activeResizeHandler);
 
             // Clear any previous stats timer before creating a new one
             if (activeStatsTimer) {

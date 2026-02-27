@@ -146,23 +146,19 @@ var webrtcStats struct {
 // Periodic stats monitoring goroutine
 func startStatsMonitoring() {
 	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond) // Update every 100ms
+		// Pacer queue length is a rough estimate; 500 ms resolution is plenty.
+		// Dropping from 100 ms → 500 ms cuts wakeups 5× with no observable impact.
+		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
-		// Periodic buffer pool cleanup to prevent unbounded growth
-		cleanupTicker := time.NewTicker(30 * time.Second) // Cleanup every 30 seconds
-		defer cleanupTicker.Stop()
-
 		// Audio queue health monitoring
-		audioHealthTicker := time.NewTicker(5 * time.Second) // Health check every 5 seconds
+		audioHealthTicker := time.NewTicker(5 * time.Second)
 		defer audioHealthTicker.Stop()
 
 		for {
 			select {
 			case <-ticker.C:
 				updatePacerQueueLength()
-			case <-cleanupTicker.C:
-				cleanupBufferPools()
 			case <-audioHealthTicker.C:
 				reportAudioQueueHealth()
 			}
@@ -470,7 +466,7 @@ func updatePacerQueueLength() {
 // Global variables
 var (
 	peerConnection *webrtc.PeerConnection
-	pcMutex        sync.Mutex
+	pcMutex        sync.RWMutex
 	audioMutex     sync.Mutex                     // Separate mutex for audio RTP state to reduce contention
 	videoTrack     *webrtc.TrackLocalStaticSample // switched to sample track for pacing
 	audioTrack     *webrtc.TrackLocalStaticRTP
@@ -486,7 +482,7 @@ var (
 	// Audio buffering during WebRTC connection establishment
 	audioConnectionBuffer []*rtp.Packet      // Buffer audio packets until connection is ready
 	audioBufferMutex      sync.Mutex         // Protects the connection buffer
-	maxAudioBufferSize    int           = 50 // Maximum packets to buffer (about 1 second at 50fps)
+	maxAudioBufferSize    int           = 20 // Maximum packets to buffer (~200 ms at 100 pps)
 
 	lastAnswerSDP         string
 	currentSequenceNumber uint16
@@ -688,11 +684,13 @@ var sampleBufPool = &tieredBufferPool{
 
 // Initialize preallocated buffers for common sizes (expanded for 4K support)
 func initBufferPool() {
-	// Preallocate buffers for each size tier
-	// Larger tiers (4K video) get fewer preallocated buffers to save memory
-	// Smaller tiers (audio/metadata) get more for better cache performance
-	// New tiers (64KB+) get minimal preallocation due to rarity
-	preallocCounts := [13]int{10, 10, 8, 6, 4, 3, 2, 2, 1, 1, 1, 1, 1} // Prealloc counts per tier (expanded)
+	// Preallocate buffers for each size tier.
+	// At 1080p / 20 Mbps the typical frame is ~20 KB; peaks rarely exceed 128 KB.
+	// Tiers ≥ 256 KB (indices 10-12) are only needed for IDR frames; they get 0
+	// pre-alloc so the first hit causes one allocation that is then pooled for reuse.
+	// Reducing the small-tier pre-allocs from 10 to 6 saves ~3 KB at startup — trivial
+	// — but avoids warming buffers the pool's GC will evict shortly anyway.
+	preallocCounts := [13]int{6, 6, 5, 4, 3, 2, 2, 1, 1, 1, 0, 0, 0}
 
 	for i, size := range sampleBufPool.sizes {
 		count := preallocCounts[i]
@@ -704,25 +702,16 @@ func initBufferPool() {
 	}
 	log.Println("[Go/Pion] Buffer pool initialized with tiered preallocation")
 
-	// Validate 4K video frame capacity
-	validate4KCapacity()
-
-	// Start comprehensive buffer pool monitoring
+	// Periodic buffer pool stats (5-minute reporting only; health check folded in)
 	go func() {
-		statsTicker := time.NewTicker(5 * time.Minute)   // Log stats every 5 minutes
-		healthTicker := time.NewTicker(30 * time.Second) // Health check every 30 seconds
+		statsTicker := time.NewTicker(5 * time.Minute)
 		defer statsTicker.Stop()
-		defer healthTicker.Stop()
 
-		for {
-			select {
-			case <-statsTicker.C:
-				logBufferPoolStats()
-				logBufferPoolHealth()
-				logBufferSizeDistribution()
-			case <-healthTicker.C:
-				checkBufferPoolHealth()
-			}
+		for range statsTicker.C {
+			logBufferPoolStats()
+			logBufferPoolHealth()
+			logBufferSizeDistribution()
+			checkBufferPoolHealth()
 		}
 	}()
 }
@@ -925,8 +914,8 @@ func logBufferSizeDistribution() {
 
 // initAudioSendQueue initializes the bounded audio send queue and starts the sender goroutine
 func initAudioSendQueue() {
-	// Create bounded channel with capacity 8 to better absorb transient bursts
-	audioSendQueue = make(chan *rtp.Packet, 8)
+	// Capacity 3: absorbs small bursts without accumulating latency (3 × 10ms = 30ms max)
+	audioSendQueue = make(chan *rtp.Packet, 3)
 	audioSendStop = make(chan struct{})
 
 	// Create buffer completion channel for safe buffer pool management
@@ -1075,14 +1064,17 @@ func videoSenderGoroutine() {
 			}
 			idleTimer.Reset(10 * time.Second)
 
-			if videoTrack != nil {
-				if err := videoTrack.WriteSample(sample); err != nil {
-					log.Printf("[Go/Pion] Error in video sender goroutine: %v", err)
-				}
-			} else {
-				log.Printf("[Go/Pion] Video track is nil, dropping sample")
+		pcMutex.RLock()
+		track := videoTrack
+		pcMutex.RUnlock()
+		if track != nil {
+			if err := track.WriteSample(sample); err != nil {
+				log.Printf("[Go/Pion] Error in video sender goroutine: %v", err)
 			}
-			putSampleBuf(sample.Data)
+		} else {
+			log.Printf("[Go/Pion] Video track is nil, dropping sample")
+		}
+		putSampleBuf(sample.Data)
 
 		case <-videoSendStop:
 			log.Println("[Go/Pion] Video sender goroutine stopped")
@@ -1191,9 +1183,13 @@ func testBufferCompletionMechanism() {
 func init() {
 	rand.Seed(time.Now().UnixNano())
 
-	// Reduce GC frequency to avoid periodic pauses that cause stream stutter.
-	// Default GOGC=100 triggers GC when heap doubles; 300 gives 3x headroom.
-	debug.SetGCPercent(300)
+	// With physical RAM at near-capacity (16 GB machine running game + browser + host),
+	// keeping GOGC=300 means the Go runtime can hold up to 3x the live heap before
+	// collecting, which keeps extra RAM off-limits to the OS. At GOGC=150 the runtime
+	// uses at most ~2x, halving the retained heap at a cost of ~1-2% extra GC CPU.
+	// This prevents page-file spill that causes random multi-ms stalls in D3D11 texture
+	// copies and NVENC submissions.
+	debug.SetGCPercent(150)
 
 	initBufferPool()
 	initAudioSendQueue()
@@ -1259,8 +1255,10 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	// 3. No locks held during WriteRTP() - eliminates stalls from blocking I/O
 	// This prevents audio writes from blocking control operations and vice versa
 
-	// Check connection state and track availability with minimal lock time
-	pcMutex.Lock()
+	// Check connection state and track availability with minimal lock time.
+	// RLock: we only READ peerConnection, audioTrack, connectionState, audioPayloadType, audioSSRC.
+	// Write paths (createPeerConnectionGo, closePeerConnection) use Lock().
+	pcMutex.RLock()
 	if peerConnection == nil || audioTrack == nil {
 		if peerConnection == nil {
 			log.Printf("[Go/Pion] AUDIO ERROR: PeerConnection is nil - cannot send audio packet")
@@ -1268,7 +1266,7 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		if audioTrack == nil {
 			log.Printf("[Go/Pion] AUDIO ERROR: Audio track is nil - audio track not initialized")
 		}
-		pcMutex.Unlock()
+		pcMutex.RUnlock()
 		return -1
 	}
 	if connectionState != webrtc.PeerConnectionStateConnected {
@@ -1310,7 +1308,7 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 			audioConnectionBuffer = append(audioConnectionBuffer, pkt)
 		}
 		audioBufferMutex.Unlock()
-		pcMutex.Unlock()
+		pcMutex.RUnlock()
 		return 0
 	}
 
@@ -1318,7 +1316,7 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	// track := audioTrack
 	payloadType := audioPayloadType
 	ssrc := audioSSRC
-	pcMutex.Unlock() // Release global lock immediately
+	pcMutex.RUnlock() // Release global lock immediately
 
 	// Reuse buffer from pool to avoid per-call allocation
 	n := int(size)
@@ -1427,21 +1425,18 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 
 //export sendVideoSample
 func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.int {
-	// Check connection state and track availability with minimal lock time
-	pcMutex.Lock()
+	// RLock: we only READ peerConnection, videoTrack, connectionState, videoFeedbackChannel.
+	pcMutex.RLock()
 	if peerConnection == nil || videoTrack == nil {
-		pcMutex.Unlock()
+		pcMutex.RUnlock()
 		return -1
 	}
 	if connectionState != webrtc.PeerConnectionStateConnected {
-		pcMutex.Unlock()
+		pcMutex.RUnlock()
 		return 0
 	}
 
-	// Get a copy of the track pointer and other shared state while holding the lock
-	// track := videoTrack
-	feedbackChannel := videoFeedbackChannel
-	pcMutex.Unlock() // Release global lock immediately
+	pcMutex.RUnlock() // Release global lock immediately
 
 	// Validate duration for proper pacing
 	durationValue := int64(durationUs)
@@ -1455,19 +1450,14 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 	C.memcpy(unsafe.Pointer(&buf[0]), data, C.size_t(n))
 	dur := time.Duration(durationValue) * time.Microsecond
 
-	// Create video sample for queuing
+	// Queue sample for the dedicated sender goroutine.
+	// Drop oldest if queue is full to maintain low latency.
 	sample := media.Sample{Data: buf, Duration: dur}
-
-	// Queue sample for the dedicated sender goroutine (bounded queue, size ≤ 4)
-	// This implements backpressure by dropping oldest samples rather than accumulating
-	// The sender goroutine will handle WriteSample without holding any locks
-
-	// Non-blocking send: try to queue immediately, drop oldest if full
 	select {
 	case videoSendQueue <- sample:
 		return 0
 	default:
-		// Queue is full -- drop oldest and retry once
+		// Queue is full -- drain oldest and retry once
 		select {
 		case oldestSample := <-videoSendQueue:
 			putSampleBuf(oldestSample.Data)
@@ -1483,32 +1473,6 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 			return -1
 		}
 	}
-
-	// Debug: log send rate once per second (disabled during streaming)
-	sendCount++
-	if time.Since(sendLastLog) >= time.Second {
-		// log.Printf("[Pion] send samples/s: %d", sendCount)
-		sendCount = 0
-		sendLastLog = time.Now()
-	}
-
-	// Optional RTT ping to client (unchanged):
-	if feedbackChannel != nil && feedbackChannel.ReadyState() == webrtc.DataChannelStateOpen {
-		videoFrameCounter++
-		hostSendTime := time.Now().UnixNano()
-		pingTimestampsMutex.Lock()
-		pingTimestamps[videoFrameCounter] = hostSendTime
-		pingTimestampsMutex.Unlock()
-		pingMessage := map[string]interface{}{
-			"type":           "video_frame_ping",
-			"frame_id":       videoFrameCounter,
-			"host_send_time": fmt.Sprintf("%d", hostSendTime),
-		}
-		if pingJSON, err := json.Marshal(pingMessage); err == nil {
-			_ = feedbackChannel.SendText(string(pingJSON))
-		}
-	}
-	return 0
 }
 
 func enqueueMessage(msg string) {
@@ -2341,9 +2305,9 @@ func createPeerConnectionGo() C.int {
 		defer t.Stop()
 		var lastSample float64
 		for range t.C {
-			pcMutex.Lock()
+			pcMutex.RLock()
 			pc := peerConnection
-			pcMutex.Unlock()
+			pcMutex.RUnlock()
 			if pc == nil {
 				continue
 			}
@@ -2703,8 +2667,8 @@ func sendFragmentedNALUnit(nal []byte, maxPacketSize int, isLastNAL bool) error 
 
 //export getIceConnectionState
 func getIceConnectionState() C.int {
-	pcMutex.Lock()
-	defer pcMutex.Unlock()
+	pcMutex.RLock()
+	defer pcMutex.RUnlock()
 
 	if peerConnection == nil {
 		return C.int(-1)
@@ -2738,8 +2702,8 @@ func closePeerConnection() {
 
 //export getConnectionState
 func getConnectionState() C.int {
-	pcMutex.Lock()
-	defer pcMutex.Unlock()
+	pcMutex.RLock()
+	defer pcMutex.RUnlock()
 	return C.int(connectionState)
 }
 
@@ -2755,12 +2719,12 @@ func checkAudioQueueCongestionGo() C.int {
 func diagnoseAudioStreamingGo() {
 	log.Printf("[Go/Pion] === AUDIO STREAMING DIAGNOSTICS ===")
 
-	pcMutex.Lock()
+	pcMutex.RLock()
 	pcState := "nil"
 	if peerConnection != nil {
 		pcState = connectionState.String()
 	}
-	pcMutex.Unlock()
+	pcMutex.RUnlock()
 
 	audioTrackState := "nil"
 	if audioTrack != nil {
@@ -2800,8 +2764,8 @@ func diagnoseAudioStreamingGo() {
 
 //export getPeerConnectionState
 func getPeerConnectionState() C.int {
-	pcMutex.Lock()
-	defer pcMutex.Unlock()
+	pcMutex.RLock()
+	defer pcMutex.RUnlock()
 
 	if peerConnection == nil {
 		return C.int(0)
@@ -2975,33 +2939,38 @@ func (r *rtcpReaderInterceptor) BindRTCPWriter(writer interceptor.RTCPWriter) in
 	return writer
 }
 
-// BindRTCPReader wraps the RTCPReader to intercept incoming RTCP packets
+// BindRTCPReader wraps the RTCPReader to intercept incoming RTCP packets.
+// IMPORTANT: must call reader.Read FIRST to fill the buffer, then parse.
 func (r *rtcpReaderInterceptor) BindRTCPReader(reader interceptor.RTCPReader) interceptor.RTCPReader {
+	var lastNackLog time.Time // rate-limit NACK log to once per 2 seconds
 	return interceptor.RTCPReaderFunc(func(in []byte, a interceptor.Attributes) (n int, attr interceptor.Attributes, err error) {
-		pkts, err := rtcp.Unmarshal(in)
-		if err != nil {
-			return reader.Read(in, a)
+		// Read from the underlying transport first — 'in' is empty until this call.
+		n, attr, err = reader.Read(in, a)
+		if err != nil || n == 0 {
+			return
 		}
 
-		if a == nil {
-			a = make(interceptor.Attributes)
+		// Parse what we just read.
+		pkts, parseErr := rtcp.Unmarshal(in[:n])
+		if parseErr != nil {
+			return // return the data unchanged; parsing failed
 		}
 
-		// Track comprehensive WebRTC stats
+		if attr == nil {
+			attr = make(interceptor.Attributes)
+		}
+
 		for _, pkt := range pkts {
 			switch p := pkt.(type) {
 			case *rtcp.ReceiverReport:
 				for _, report := range p.Reports {
-					// Update stats tracking
-					webrtcStats.statsMutex.Lock()
-					// Note: In a real implementation, we'd get these from Pion's internal stats
-					// For now, we'll use the RTCP report data as a proxy
 					packetLoss := float64(report.FractionLost) / 256.0
 					jitterSeconds := float64(report.Jitter) / 90000.0
+
+					webrtcStats.statsMutex.Lock()
 					webrtcStats.lastStatsUpdate = time.Now()
 					webrtcStats.statsMutex.Unlock()
 
-					// Call legacy RTCP callback if registered
 					if rtcpCallback != nil {
 						lastRttMutex.Lock()
 						rttMs := lastRttMs
@@ -3009,7 +2978,6 @@ func (r *rtcpReaderInterceptor) BindRTCPReader(reader interceptor.RTCPReader) in
 						C.callRTCPCallback(rtcpCallback, C.double(packetLoss), C.double(rttMs), C.double(jitterSeconds))
 					}
 
-					// Call enhanced stats callback if registered
 					if webrtcStatsCallback != nil {
 						lastRttMutex.Lock()
 						rttMs := lastRttMs
@@ -3029,21 +2997,18 @@ func (r *rtcpReaderInterceptor) BindRTCPReader(reader interceptor.RTCPReader) in
 							C.uint(queueLen), C.uint(bitrate))
 					}
 				}
+
 			case *rtcp.PictureLossIndication:
-				// Track PLI count for stats
 				webrtcStats.statsMutex.Lock()
 				webrtcStats.pliCount++
 				webrtcStats.statsMutex.Unlock()
 
-				// Call legacy PLI callback
 				if pliCallback != nil {
 					C.callPLICallback(pliCallback)
 				}
-
 				log.Printf("[Go/Pion] PLI received - total: %d", webrtcStats.pliCount)
 
 			case *rtcp.FullIntraRequest:
-				// Track FIR count (similar to PLI)
 				webrtcStats.statsMutex.Lock()
 				webrtcStats.pliCount++
 				webrtcStats.statsMutex.Unlock()
@@ -3051,25 +3016,26 @@ func (r *rtcpReaderInterceptor) BindRTCPReader(reader interceptor.RTCPReader) in
 				if pliCallback != nil {
 					C.callPLICallback(pliCallback)
 				}
-
 				log.Printf("[Go/Pion] FIR received - total: %d", webrtcStats.pliCount)
 
 			case *rtcp.TransportLayerNack:
-				// Track NACK count
 				webrtcStats.statsMutex.Lock()
 				webrtcStats.nackCount += uint32(len(p.Nacks))
+				total := webrtcStats.nackCount
 				webrtcStats.statsMutex.Unlock()
 
-				log.Printf("[Go/Pion] NACK received (%d packets) - total: %d",
-					len(p.Nacks), webrtcStats.nackCount)
+				// Rate-limit NACK logging to avoid log spam under packet loss
+				if now := time.Now(); now.Sub(lastNackLog) >= 2*time.Second {
+					log.Printf("[Go/Pion] NACK received (%d packets) - total: %d", len(p.Nacks), total)
+					lastNackLog = now
+				}
 
 			default:
-				// Note: TransportLayerCc (TWCC) feedback is handled internally by pion/webrtc
-				// and may not be exposed as a separate RTCP packet in the current version.
-				// TWCC feedback is still being processed by the underlying WebRTC stack.
+				// TWCC feedback is handled internally by Pion's WebRTC stack.
+				_ = p
 			}
 		}
-		return reader.Read(in, a)
+		return
 	})
 }
 

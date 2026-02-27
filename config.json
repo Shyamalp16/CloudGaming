@@ -4,7 +4,7 @@
     "matchmakerUrl": "http://localhost:3000"
   },
   "host": {
-    "targetProcessName": "cs2.exe",
+    "targetProcessName": "SandFall-Win64-Shipping.exe",
     "matchmaker": {
       "url": "http://localhost:3000",
       "hostSecret": "HELLO-MFS",
@@ -18,10 +18,10 @@
     "video": {
         "fps": 120,
         "pacingFixedUs": 8333,
-        "bitrateStart": 40000000,
-        "bitrateMin": 20000000,
-        "bitrateMax": 80000000,
-        "hwFramePoolSize": 4,
+        "bitrateStart": 20000000,
+        "bitrateMin": 8000000,
+        "bitrateMax": 40000000,
+        "hwFramePoolSize": 3,
         "fullRange": false,
         "preset": "p2",
         "rc": "cbr",
@@ -42,9 +42,9 @@
         }
     },
     "capture": {
-      "copyPoolSize": 8,
+      "copyPoolSize": 4,
       "maxQueueDepth": 2,
-      "framePoolBuffers": 4,
+      "framePoolBuffers": 2,
       "dropWindowMs": 500,
       "dropMinEvents": 12,
       "mmcss": { "enable": true, "priority": 4 },
@@ -52,7 +52,7 @@
       "borderRequired": false,
       "minUpdateInterval100ns": 83333,
       "skipUnchanged": true,
-      "adaptiveBackoff": true,
+      "adaptiveBackoff": false,
       "adaptiveWindowMs": 2000,
       "adaptiveEagainThreshold": 8
     },

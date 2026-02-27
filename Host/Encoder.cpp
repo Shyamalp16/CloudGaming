@@ -54,72 +54,6 @@ static void EnsurePacketMergeBufferCapacity() {
     }
 }
 
-// ============================================================================
-// MEMORY OPTIMIZATION: RTP Packet Object Pool
-// ============================================================================
-// This optimization reduces heap churn for frequently allocated RTP packets by:
-// 1. Maintaining a pool of pre-allocated std::vector objects
-// 2. Reusing vectors instead of creating/destroying them repeatedly
-// 3. Thread-safe pool management with mutex protection
-// 4. Automatic cleanup of excess buffers to prevent memory bloat
-//
-// Benefits:
-// - Eliminates heap allocations for RTP packet data structures
-// - Reduces GC pressure from frequent small object allocations
-// - Provides better memory locality for RTP processing
-// - Prevents memory fragmentation from variable-sized packets
-// ============================================================================
-class RTCPacketPool {
-private:
-    static const size_t MAX_POOL_SIZE = 64;
-    std::vector<std::vector<uint8_t>*> pool;
-    std::mutex poolMutex;
-
-public:
-    RTCPacketPool() {
-        pool.reserve(MAX_POOL_SIZE);
-    }
-
-    ~RTCPacketPool() {
-        std::lock_guard<std::mutex> lock(poolMutex);
-        for (auto* vec : pool) {
-            delete vec;
-        }
-        pool.clear();
-    }
-
-    std::vector<uint8_t>* acquire(size_t minCapacity = 1024) {
-        std::lock_guard<std::mutex> lock(poolMutex);
-        for (auto it = pool.begin(); it != pool.end(); ++it) {
-            if ((*it)->capacity() >= minCapacity) {
-                auto* vec = *it;
-                pool.erase(it);
-                vec->clear();
-                return vec;
-            }
-        }
-        // No suitable buffer found, allocate new one
-        auto* vec = new std::vector<uint8_t>();
-        vec->reserve(minCapacity);
-        return vec;
-    }
-
-    void release(std::vector<uint8_t>* vec) {
-        if (!vec) return;
-
-        std::lock_guard<std::mutex> lock(poolMutex);
-        if (pool.size() < MAX_POOL_SIZE) {
-            vec->clear();
-            pool.push_back(vec);
-        } else {
-            delete vec;
-        }
-    }
-};
-
-// Global RTP packet pool
-static RTCPacketPool g_rtpPacketPool;
-
 std::mutex Encoder::g_encoderMutex;
 
 // Static variables for encoder state
@@ -199,7 +133,10 @@ private:
     std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator> map_;
 };
 
-static LruCacheD3D<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView>> g_inputViewLru(64);
+// framePoolBuffers=2 means at most 2-3 live BGRA source textures from WGC.
+// A capacity-8 LRU fits them all in L1/L2 cache (vs 64-entry unordered_map
+// that pointer-chases into random heap locations on every frame).
+static LruCacheD3D<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView>> g_inputViewLru(8);
 static LruCacheD3D<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView>> g_outputViewLru(8);
 // Optional GPU timestamp queries for VideoProcessorBlt
 // WARNING: Keep disabled in production - adds GPU overhead and can cause stalls
@@ -235,7 +172,7 @@ static int g_maxBitrateBps = 50000000;   // 50 Mbps default
 static int g_minBitrateController = 10000000;
 static int g_maxBitrateController = 50000000;
 static int g_increaseStep = 5000000;         // +5 Mbps
-static int g_decreaseCooldownMs = 300;       // ms
+static int g_decreaseCooldownMs = 5000;      // ms — 5 s minimum between reductions to prevent oscillation
 static int g_cleanSamplesRequired = 3;
 static int g_increaseIntervalMs = 1000;      // ms
 static int g_currentBitrate = 25000000;      // start ~25 Mbps
@@ -243,8 +180,6 @@ static int g_cleanSamples = 0;
 static int g_congestionCeiling = 0;          // remembers bitrate that caused loss, 0 = no ceiling
 static std::chrono::steady_clock::time_point g_lastChange = std::chrono::steady_clock::now();
 static std::chrono::steady_clock::time_point g_ceilingSetTime = std::chrono::steady_clock::now();
-static std::atomic<bool> g_pendingReopen{false};
-static std::atomic<int> g_reopenTargetBitrate{0};
 static std::atomic<int> g_eagainCount{0};
 static std::chrono::steady_clock::time_point g_lastEagain = std::chrono::steady_clock::now();
 static bool g_fullRangeColor = false; // default to limited (TV) range
@@ -652,6 +587,11 @@ namespace Encoder {
     }
 
     // HDR tone mapping function using Reinhard tone mapping
+    // WARNING: CPU-side pixel processing. At 1920×1080 this loops over 2,073,600
+    // pixels per call. At 120 fps that is ~248 million pixel ops/sec on a single
+    // CPU core — will saturate the core and cause massive frame drops. This path
+    // is only safe for offline/single-shot use. For real-time tone mapping use a
+    // GPU compute shader or the VideoProcessor's built-in tonemapping pipeline.
     void ApplyHdrToneMapping(ID3D11Texture2D* texture, ID3D11DeviceContext* context) {
         if (!g_hdrToneMappingEnabled || !texture || !context) return;
 
@@ -962,7 +902,7 @@ namespace Encoder {
 
         // FIX: Don't reduce bitrate on localhost (RTT < 5ms) or when packet loss is very low
         // This prevents unnecessary bitrate reduction during local testing
-        bool isLocalhost = (rtt < 5.0); // Localhost typically has < 1ms RTT
+        bool isLocalhost = (rtt < 20.0); // WebRTC processing overhead can push RTT to 5-15ms even on localhost
         double effectiveLossThreshold = isLocalhost ? 0.25 : g_minPliLossThreshold.load(); // Higher threshold for localhost
 
         if (packetLoss >= effectiveLossThreshold) {
@@ -1168,10 +1108,15 @@ namespace Encoder {
         codecCtx->rc_max_rate = codecCtx->bit_rate;
         codecCtx->rc_buffer_size = codecCtx->bit_rate; // Tighter VBV: 1x bitrate for minimal buffering
 
-        // Signal SDR BT.709 range for desktop capture; configurable full/limited
+        // Desktop capture content uses the sRGB transfer function (IEC 61966-2-1, gamma ~2.2
+        // with linear ramp), NOT the BT.709 camera transfer (~2.0 pure power curve).
+        // Signalling AVCOL_TRC_IEC61966_2_1 lets the browser decoder pass the values straight
+        // through to the display without an incorrect gamma shift.
+        // Color primaries and matrix are identical between sRGB and BT.709 (same Rec. 709
+        // chromaticities), so AVCOL_PRI_BT709 and AVCOL_SPC_BT709 are correct.
         codecCtx->color_range     = g_fullRangeColor ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
         codecCtx->color_primaries = AVCOL_PRI_BT709;
-        codecCtx->color_trc       = AVCOL_TRC_BT709;
+        codecCtx->color_trc       = AVCOL_TRC_IEC61966_2_1; // sRGB transfer (desktop content)
         codecCtx->colorspace      = AVCOL_SPC_BT709;
 
         // Configure D3D11VA frames with NV12 sw_format (GPU path)
@@ -1201,7 +1146,10 @@ namespace Encoder {
             framesCtx->initial_pool_size = std::max(g_hwFramePoolSize, g_nvAsyncDepth + 2);
             AVD3D11VAFramesContext* framesHw = (AVD3D11VAFramesContext*)framesCtx->hwctx;
             if (framesHw) {
-                framesHw->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                // Only RENDER_TARGET: VideoProcessor writes, NVENC reads via its
+            // dedicated engine. SHADER_RESOURCE forces a shader-visible heap
+            // allocation (extra VRAM + non-paged pool) that we never use.
+                framesHw->BindFlags = D3D11_BIND_RENDER_TARGET;
                 framesHw->MiscFlags = 0;
             }
             if (av_hwframe_ctx_init(hwFramesCtx) < 0) {
@@ -1245,9 +1193,13 @@ namespace Encoder {
                 snprintf(buf, sizeof(buf), "%d", g_nvBf);
                 av_dict_set(&opts, "bf", buf, 0);
             }
-            // AQ for visual quality
+            // Spatial AQ redistributes bits toward flat/dark regions. Strength 10 (max)
+            // forces NVENC to do per-macroblock complexity analysis every frame —
+            // measurably increasing GPU utilisation and encode latency at 120 fps.
+            // Strength 4 retains perceptible quality gains at roughly half the analysis cost.
+            // To disable entirely, set spatial_aq=0 (max throughput, minimum GPU load).
             av_dict_set(&opts, "spatial_aq", "1", 0);
-            av_dict_set(&opts, "aq-strength", "10", 0);
+            av_dict_set(&opts, "aq-strength", "4", 0);
             // Queue/pool sizes for throughput
             {
                 char buf[16];
@@ -1266,10 +1218,10 @@ namespace Encoder {
             snprintf(buf2, sizeof(buf2), "%d", codecCtx->bit_rate); // Tighter: 1x bitrate for minimal latency
             av_dict_set(&opts, "maxrate", rateBuf, 0);
             av_dict_set(&opts, "bufsize", buf2, 0);
-            // Ensure color metadata is set on stream
+            // Color metadata in H.264 SPS VUI: primaries/matrix = BT.709, transfer = sRGB
             av_dict_set(&opts, "colorspace", "bt709", 0);
             av_dict_set(&opts, "color_primaries", "bt709", 0);
-            av_dict_set(&opts, "color_trc", "bt709", 0);
+            av_dict_set(&opts, "color_trc", "iec61966-2-1", 0); // sRGB transfer for desktop capture
             av_dict_set(&opts, "color_range", g_fullRangeColor ? "pc" : "tv", 0);
             // Let NVENC pick appropriate level automatically
             // Relax forced IDR (handled by gop_size)
@@ -1277,7 +1229,7 @@ namespace Encoder {
             av_dict_set(&opts, "preset", "ultrafast", 0);
             av_dict_set(&opts, "tune", "zerolatency", 0);
             av_dict_set(&opts, "colorprim", "bt709", 0);
-            av_dict_set(&opts, "transfer",  "bt709", 0);
+            av_dict_set(&opts, "transfer",  "iec61966-2-1", 0); // sRGB transfer for desktop capture
             av_dict_set(&opts, "colormatrix","bt709", 0);
             av_dict_set(&opts, "fullrange", g_fullRangeColor ? "1" : "0", 0);
             av_dict_set(&opts, "profile", "high", 0);
@@ -1386,26 +1338,6 @@ namespace Encoder {
 
         {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
-        // If a bitrate reopen was requested and we have a valid context, perform it now
-        if (g_pendingReopen.load() && codecCtx) {
-            int fpsNum = codecCtx->framerate.num > 0 ? codecCtx->framerate.num : 60;
-            int fpsDen = codecCtx->framerate.den > 0 ? codecCtx->framerate.den : 1;
-            // FIX: Proper FPS calculation with rounding and validation
-            int fps = 60; // default fallback
-            if (fpsDen > 0 && fpsNum > 0) {
-                fps = (fpsNum + fpsDen / 2) / fpsDen; // Proper integer division with rounding
-                if (fps <= 0) fps = 60;
-            }
-            int target = g_reopenTargetBitrate.load();
-            // std::wcout << L"[Encoder] Reopening encoder to apply bitrate=" << target << L" bps" << std::endl;
-            FlushEncoder();
-            FinalizeEncoder();
-            InitializeEncoder("output.mp4", currentWidth, currentHeight, fps);
-            if (target > 0) {
-                AdjustBitrate(target);
-            }
-            g_pendingReopen.store(false);
-        }
         if (!codecCtx || g_hwFrames.empty() || !g_videoProcessor) {
             std::cerr << "[Encoder] Encoder/VideoProcessor not initialized." << std::endl;
             return;
@@ -1431,7 +1363,7 @@ namespace Encoder {
             framesCtx->initial_pool_size = std::max(g_hwFramePoolSize, g_nvAsyncDepth + 2);
             AVD3D11VAFramesContext* framesHw = (AVD3D11VAFramesContext*)framesCtx->hwctx;
             if (framesHw) {
-                framesHw->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                    framesHw->BindFlags = D3D11_BIND_RENDER_TARGET;
                 framesHw->MiscFlags = 0;
             }
             if (av_hwframe_ctx_init(hwFramesCtx) < 0) return;
@@ -1658,41 +1590,30 @@ namespace Encoder {
     }
 
     void AdjustBitrate(int new_bitrate) {
-        // Core bitrate adjustment under mutex (keep this minimal)
-        bool codecSupportsRuntimeUpdate = true;
+        // Update codec context + attempt NVENC runtime reconfigure, but NEVER reopen the
+        // encoder. A full reopen (FinalizeEncoder + InitializeEncoder) on the hot encode
+        // path blocks the pipeline for 50-200 ms, which is the primary cause of lag spikes.
+        // If the runtime API doesn't support mid-stream rate changes (older NVENC drivers),
+        // we log a warning and accept the mismatch — the codec context bit_rate update still
+        // influences future VBV accounting and the encoder will converge towards the new rate.
+        bool runtimeUpdateOk = true;
         {
             std::lock_guard<std::mutex> lock(g_encoderMutex);
             if (codecCtx) {
-                codecCtx->bit_rate = new_bitrate;
-                codecCtx->rc_max_rate = new_bitrate;
-                // FIX: Use 1x bitrate for VBV buffer to match initialization (low-latency)
-                // This ensures consistent VBV buffer size throughout encoding session
-                codecCtx->rc_buffer_size = new_bitrate;
-                // Apply encoder-specific runtime controls
+                codecCtx->bit_rate      = new_bitrate;
+                codecCtx->rc_max_rate   = new_bitrate;
+                codecCtx->rc_buffer_size = new_bitrate; // 1× bitrate VBV (tight, low-latency)
                 if (codecCtx->priv_data) {
                     int r1 = av_opt_set_int(codecCtx->priv_data, "bitrate", new_bitrate, 0);
                     int r2 = av_opt_set_int(codecCtx->priv_data, "maxrate", new_bitrate, 0);
-                    // FIX: Use 1x bitrate for bufsize to match initialization
                     int r3 = av_opt_set_int(codecCtx->priv_data, "bufsize", new_bitrate, 0);
-                    if (r1 < 0 || r2 < 0 || r3 < 0) {
-                        codecSupportsRuntimeUpdate = false;
-                        g_pendingReopen.store(true);
-                        g_reopenTargetBitrate.store(new_bitrate);
-                    }
+                    runtimeUpdateOk = (r1 >= 0 && r2 >= 0 && r3 >= 0);
                 }
-                // IDR is NOT forced on bitrate changes to avoid bandwidth spikes.
-                // The decoder adapts to new bitrate on the next natural P-frame.
-                // IDR only comes from PLI requests or natural GOP interval.
             }
         }
 
-        // Logging OUTSIDE mutex (potentially slow operations)
-        if (codecCtx) {
-            std::wcout << L"[Encoder] Adjusting bitrate to " << new_bitrate << L" bps\n";
-            if (!codecSupportsRuntimeUpdate) {
-                std::wcout << L"[Encoder] Runtime bitrate update not fully supported by this codec. Scheduling reopen...\n";
-            }
-        }
+        std::wcout << L"[Encoder] Bitrate adjusted to " << new_bitrate
+                   << L" bps" << (runtimeUpdateOk ? L"" : L" (context-only; runtime API unavailable)") << L"\n";
     }
 
     bool IsBacklogged(int recent_window_ms, int min_events) {

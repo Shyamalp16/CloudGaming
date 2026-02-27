@@ -294,11 +294,9 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                         g_metadataRing[metadataHead].contentSize = contentSize;
                         g_metadataRing[metadataHead].shouldSkipUnchanged = g_skipUnchanged.load();
 
-                        // Update both ring heads
+                        // Update both ring heads, then wake the consumer
                         g_ringHead.store(nextHead, std::memory_order_release);
                         g_metadataHead.store((metadataHead + 1) % g_metadataCapacity, std::memory_order_release);
-
-                        // Notify consumer (minimal)
                         g_ringCV.notify_one();
                     }
                 }
@@ -403,162 +401,66 @@ void StartCapture() {
         static uint64_t lastBpSkips = 0;
         static uint64_t lastOutOfOrder = 0;
 
+        // Encoder fps counter
+        static int encodeCount = 0;
+        static auto encodeWindowStart = std::chrono::steady_clock::now();
+
         while (isCapturing.load()) {
             FrameData job{};
-            // Wait for available frame or shutdown
+            DeferredFrameMetadata metadata{};
+
+            // Wake immediately when a new frame lands; also wakes on shutdown.
             {
                 std::unique_lock<std::mutex> lk(g_ringMutex);
                 g_ringCV.wait(lk, []{ return (RingSize() > 0) || !isCapturing.load(); });
                 if (!isCapturing.load() && RingSize() == 0) break;
             }
 
-            // Enhanced backpressure handling with severity-based response
+            // Drain the ring: take the LATEST frame, silently discard older ones.
+            // If the game produced 3 frames while we were encoding the last one,
+            // we take frame 3 and skip frames 1-2 — eliminates burst processing.
             {
-                Encoder::BackpressureLevel bpLevel = Encoder::GetBackpressureLevel();
                 size_t head = g_ringHead.load(std::memory_order_acquire);
                 size_t tail = g_ringTail.load(std::memory_order_acquire);
-                size_t sz = (head >= tail) ? (head - tail) : (g_ringCapacity - (tail - head));
+                if (head == tail) continue; // spurious wake
 
-                // Determine how aggressively to drop based on backpressure severity
-                size_t framesToKeep = 1; // Default: keep only latest frame
-                bool shouldDrop = false;
+                size_t latest     = (head + g_ringCapacity - 1) % g_ringCapacity;
+                size_t metaHead   = g_metadataHead.load(std::memory_order_acquire);
+                size_t metaLatest = (metaHead + g_metadataCapacity - 1) % g_metadataCapacity;
 
-                if (bpLevel == Encoder::SEVERE) {
-                    // Severe backpressure: drop everything except the absolute latest
-                    framesToKeep = 1;
-                    shouldDrop = (sz > 1);
-                } else if (bpLevel == Encoder::MODERATE) {
-                    // Moderate backpressure: keep last 2 frames
-                    framesToKeep = 2;
-                    shouldDrop = (sz > framesToKeep);
-                } else if (bpLevel == Encoder::MILD) {
-                    // Mild backpressure: keep last 3 frames
-                    framesToKeep = 3;
-                    shouldDrop = (sz > framesToKeep);
-                } else if (sz >= g_maxQueuedFrames - 1 && sz > 2) {
-                    // Fallback: queue is critically full regardless of EAGAIN status
-                    framesToKeep = 1;
-                    shouldDrop = true;
-                }
+                job      = g_ring[latest];
+                metadata = g_metadataRing[metaLatest];
 
-                if (shouldDrop) {
-                    // Calculate new tail position to keep only the desired number of frames
-                    size_t newTail;
-                    if (sz <= framesToKeep) {
-                        newTail = tail; // No change needed
-                    } else {
-                        newTail = (head + g_ringCapacity - framesToKeep) % g_ringCapacity;
-                    }
+                // Drain all queued frames, keeping only the one we just took
+                size_t sz = (head >= tail) ? (head - tail) : (g_ringCapacity - tail + head);
+                if (sz > 1) g_backpressureSkips.fetch_add(sz - 1, std::memory_order_relaxed);
+                g_ringTail.store(head, std::memory_order_release);
+                g_metadataTail.store(metaHead, std::memory_order_release);
+            }
 
-                    // Count how many we skipped
-                    size_t skipped = 0;
-                    if (newTail != tail) {
-                        if (newTail > tail) {
-                            skipped = newTail - tail;
-                        } else {
-                            skipped = (g_ringCapacity - tail) + newTail;
-                        }
-                        g_ringTail.store(newTail, std::memory_order_release);
-                        g_backpressureSkips.fetch_add(skipped, std::memory_order_relaxed);
-                    }
-
-                    // Log backpressure events with severity information (throttled)
-                    static auto lastBackpressureLog = std::chrono::steady_clock::now();
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastBackpressureLog);
-                    if (elapsed.count() >= 1000) { // Log at most once per second
-                        const wchar_t* severityStr = L"UNKNOWN";
-                        switch (bpLevel) {
-                            case Encoder::NONE: severityStr = L"NONE"; break;
-                            case Encoder::MILD: severityStr = L"MILD"; break;
-                            case Encoder::MODERATE: severityStr = L"MODERATE"; break;
-                            case Encoder::SEVERE: severityStr = L"SEVERE"; break;
-                        }
-                        std::wcout << L"[Capture] Backpressure (" << severityStr << L"): dropped " << skipped
-                                  << L" frames, kept " << framesToKeep << L", queue was " << sz << L"/" << g_maxQueuedFrames << std::endl;
-                        lastBackpressureLog = now;
-                    }
+            // Encoder fps tracking
+            {
+                encodeCount++;
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - encodeWindowStart).count();
+                if (elapsed >= kOneSecondUs) {
+                    double fps = static_cast<double>(encodeCount) * 1'000'000.0 / static_cast<double>(elapsed);
+                    VideoMetrics::ewmaUpdate(VideoMetrics::captureFps(), fps);
+                    encodeCount = 0;
+                    encodeWindowStart = now;
                 }
             }
 
-            // Pop next available frame
+            // Content-size change detection
             {
-                size_t tail = g_ringTail.load(std::memory_order_acquire);
-                size_t head = g_ringHead.load(std::memory_order_acquire);
-                if (tail == head) continue; // spurious wake
-                job = g_ring[tail];
-                g_ringTail.store((tail + 1) % g_ringCapacity, std::memory_order_release);
-            }
-            // DEFERRED PROCESSING: Handle work moved from callback to reduce WGC backpressure
-            {
-                // Pop corresponding metadata from metadata ring
-                size_t metadataTail = g_metadataTail.load(std::memory_order_acquire);
-                DeferredFrameMetadata metadata = g_metadataRing[metadataTail];
-                g_metadataTail.store((metadataTail + 1) % g_metadataCapacity, std::memory_order_release);
-
-                // 1. FPS calculation (moved from callback)
-                {
-                    static int capCount = 0;
-                    static int64_t windowStartUs = 0;
-                    capCount++;
-                    if (windowStartUs == 0) windowStartUs = metadata.systemRelativeTimeUs;
-                    int64_t elapsed = metadata.systemRelativeTimeUs - windowStartUs;
-                    if (elapsed >= kOneSecondUs) { // ~1s window
-                        double fps = static_cast<double>(capCount) * 1'000'000.0 / static_cast<double>(elapsed);
-                        VideoMetrics::ewmaUpdate(VideoMetrics::captureFps(), fps);
-                        capCount = 0;
-                        windowStartUs = metadata.systemRelativeTimeUs;
-                    }
-                }
-
-                // 1.1 Periodic timestamp source reporting moved off callback thread.
-                {
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_lastTimestampReport);
-                    if (elapsed.count() >= 60) { // Report every minute
-                        uint64_t srtFrames = g_systemRelativeTimeFrames.load(std::memory_order_relaxed);
-                        uint64_t fallbackFrames = g_fallbackTimeFrames.load(std::memory_order_relaxed);
-                        uint64_t totalFrames = srtFrames + fallbackFrames;
-
-                        if (totalFrames > 0) {
-                            double srtPercentage = (static_cast<double>(srtFrames) / totalFrames) * 100.0;
-                            std::wcout << L"[VideoCapture] Timestamp source stats (last " << elapsed.count()
-                                      << L"s): " << srtFrames << L" SRT frames (" << std::fixed << std::setprecision(1)
-                                      << srtPercentage << L"%), " << fallbackFrames << L" fallback frames ("
-                                      << (100.0 - srtPercentage) << L"%)" << std::endl;
-                        }
-
-                        // Reset counters for next period
-                        g_systemRelativeTimeFrames.store(0, std::memory_order_relaxed);
-                        g_fallbackTimeFrames.store(0, std::memory_order_relaxed);
-                        g_lastTimestampReport = now;
-                    }
-                }
-
-                // 2. Content size change detection (moved from callback)
-                try {
-                    static std::atomic<int> lastLoggedW{ 0 };
-                    static std::atomic<int> lastLoggedH{ 0 };
-                    if (metadata.contentSize.Width != lastLoggedW.load() || metadata.contentSize.Height != lastLoggedH.load()) {
-                        std::wcout << L"[WGC] ContentSize changed: " << metadata.contentSize.Width << L"x" << metadata.contentSize.Height << std::endl;
-                        lastLoggedW.store(metadata.contentSize.Width);
-                        lastLoggedH.store(metadata.contentSize.Height);
-                    }
-                } catch (...) {}
-
-                // 3. Unchanged frame skipping (moved from callback)
-                if (metadata.shouldSkipUnchanged) {
-                    try {
-                        static int64_t lastSrtUs = 0;
-                        if (lastSrtUs != 0) {
-                            // If extremely small delta (< 1000us), likely no new content; skip aggressively
-                            if (metadata.systemRelativeTimeUs - lastSrtUs <= 1000) {
-                                lastSrtUs = metadata.systemRelativeTimeUs;
-                                continue; // Skip this frame entirely
-                            }
-                        }
-                        lastSrtUs = metadata.systemRelativeTimeUs;
-                    } catch (...) {}
+                static std::atomic<int> lastLoggedW{ 0 };
+                static std::atomic<int> lastLoggedH{ 0 };
+                if (metadata.contentSize.Width  != lastLoggedW.load() ||
+                    metadata.contentSize.Height != lastLoggedH.load()) {
+                    std::wcout << L"[WGC] ContentSize: "
+                               << metadata.contentSize.Width << L"x" << metadata.contentSize.Height << std::endl;
+                    lastLoggedW.store(metadata.contentSize.Width);
+                    lastLoggedH.store(metadata.contentSize.Height);
                 }
             }
 

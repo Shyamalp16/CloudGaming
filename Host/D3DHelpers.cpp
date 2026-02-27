@@ -92,11 +92,18 @@ bool SetupD3D(
             D3D_FEATURE_LEVEL_10_0
         };
 
+        // D3D11_CREATE_DEVICE_VIDEO_SUPPORT is required for ID3D11VideoDevice /
+        // ID3D11VideoContext to be available on the device. Without it the driver
+        // may silently fall back to a software or slower path for the
+        // VideoProcessorBlt (BGRA→NV12 colour conversion).
+        UINT deviceFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT
+                         | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+
         HRESULT hr = D3D11CreateDevice(
             bestAdapter.get(),              // selected adapter
             D3D_DRIVER_TYPE_UNKNOWN,
             nullptr,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            deviceFlags,
             featureLevels,
             ARRAYSIZE(featureLevels),
             D3D11_SDK_VERSION,
