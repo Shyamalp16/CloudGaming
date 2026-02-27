@@ -240,7 +240,9 @@ static int g_cleanSamplesRequired = 3;
 static int g_increaseIntervalMs = 1000;      // ms
 static int g_currentBitrate = 25000000;      // start ~25 Mbps
 static int g_cleanSamples = 0;
+static int g_congestionCeiling = 0;          // remembers bitrate that caused loss, 0 = no ceiling
 static std::chrono::steady_clock::time_point g_lastChange = std::chrono::steady_clock::now();
+static std::chrono::steady_clock::time_point g_ceilingSetTime = std::chrono::steady_clock::now();
 static std::atomic<bool> g_pendingReopen{false};
 static std::atomic<int> g_reopenTargetBitrate{0};
 static std::atomic<int> g_eagainCount{0};
@@ -275,12 +277,12 @@ static std::condition_variable g_sendCV;
 static std::deque<QueuedSample> g_sendQueue;
 static std::atomic<bool> g_senderRunning{false};
 static std::thread g_senderThread;
-static constexpr size_t kMaxSendQueue = 3; // Low-latency: drop oldest when backlogged to prevent queue growth and latency spikes
+static constexpr size_t kMaxSendQueue = 2; // 2 frames max = ~22ms at 90fps; oldest dropped on overflow
 
 static void SenderLoop() {
-    // Elevate sender thread to MMCSS 'Games' for timely packet delivery
+    // Elevate sender thread to MMCSS 'Playback' to avoid starving the game
     DWORD taskIndex = 0;
-    HANDLE mmcssTask = AvSetMmThreadCharacteristicsW(L"Games", &taskIndex);
+    HANDLE mmcssTask = AvSetMmThreadCharacteristicsW(L"Playback", &taskIndex);
     if (mmcssTask) {
         AvSetMmThreadPriority(mmcssTask, AVRT_PRIORITY_HIGH);
     }
@@ -542,6 +544,34 @@ static bool InitializeVideoProcessor(ID3D11Device* device, int width, int height
         return false;
     }
 
+    // Explicitly set BT.709 color space so the VideoProcessor uses the same
+    // matrix we signal in the H.264 SPS. Without this, drivers default to BT.601
+    // (SD matrix), which skews red/luma and produces a warmer, slightly off color.
+    //
+    // Input: full-range sRGB BGRA from WGC (RGB_Range=0, Nominal_Range=0-255)
+    // Output: BT.709 YCbCr in limited or full range matching g_fullRangeColor
+    {
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputCS{};
+        inputCS.Usage        = 0;  // playback
+        inputCS.RGB_Range    = 0;  // full-range RGB (0-255); WGC delivers uncompressed BGRA
+        inputCS.YCbCr_Matrix = 1;  // BT.709 (1=HD), not BT.601 (0=SD)
+        inputCS.YCbCr_xvYCC  = 0;
+        inputCS.Nominal_Range = 2; // D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255 (full-range input)
+        g_videoContext->VideoProcessorSetStreamColorSpace(g_videoProcessor.Get(), 0, &inputCS);
+
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE outputCS{};
+        outputCS.Usage        = 0;
+        outputCS.RGB_Range    = 0;
+        outputCS.YCbCr_Matrix = 1;  // BT.709
+        outputCS.YCbCr_xvYCC  = 0;
+        // Nominal_Range: 1 = 16-235 limited (TV), 2 = 0-255 full (PC)
+        outputCS.Nominal_Range = g_fullRangeColor ? 2 : 1;
+        g_videoContext->VideoProcessorSetOutputColorSpace(g_videoProcessor.Get(), &outputCS);
+
+        std::wcout << L"[Encoder][VP] Color space set: BT.709, "
+                   << (g_fullRangeColor ? L"full range (0-255)" : L"limited range (16-235)") << std::endl;
+    }
+
     // Pre-validate common formats to avoid per-frame checks
     PreValidateFormats();
 
@@ -731,12 +761,7 @@ namespace Encoder {
             }
             D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
 
-            // Core GPU BLT operation (fast, but keep under mutex to protect shared resources)
-            if (g_deferredContextEnabled) {
-                bltHr = g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream);
-            } else {
-                bltHr = g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream);
-            }
+            bltHr = g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream);
         }
 
         // GPU timing queries OUTSIDE mutex (potentially blocking operations)
@@ -940,39 +965,46 @@ namespace Encoder {
         bool isLocalhost = (rtt < 5.0); // Localhost typically has < 1ms RTT
         double effectiveLossThreshold = isLocalhost ? 0.25 : g_minPliLossThreshold.load(); // Higher threshold for localhost
 
-        if (packetLoss >= effectiveLossThreshold) { // configurable loss trigger
+        if (packetLoss >= effectiveLossThreshold) {
             if (since >= g_decreaseCooldownMs) {
-                // Less aggressive reduction on localhost
+                // Remember the bitrate that caused congestion (set ceiling at 90% of current)
+                g_congestionCeiling = static_cast<int>(g_currentBitrate * 0.9);
+                g_ceilingSetTime = now;
+
                 double factor = isLocalhost ? 0.9 : ((packetLoss >= 0.10) ? 0.6 : 0.8);
                 int target = static_cast<int>(g_currentBitrate * factor);
                 g_currentBitrate = std::max(g_minBitrateController, target);
                 AdjustBitrate(g_currentBitrate);
                 g_lastChange = now;
-                if (isLocalhost) {
-                    std::wcout << L"[Encoder] Localhost bitrate reduction (loss: " << (packetLoss * 100.0) 
-                              << L"%, RTT: " << rtt << L"ms) - reduced to " << g_currentBitrate << L" bps" << std::endl;
-                }
             }
             g_cleanSamples = 0;
             return;
         }
 
-        g_cleanSamples++;   
-        int requiredSamples = isLocalhost ? 1 : g_cleanSamplesRequired; // Only need 1 clean sample on localhost
-        int increaseInterval = isLocalhost ? 500 : g_increaseIntervalMs; // Faster increases on localhost (500ms vs 1000ms)
-        
+        g_cleanSamples++;
+        int requiredSamples = isLocalhost ? 1 : g_cleanSamplesRequired;
+        int increaseInterval = isLocalhost ? 500 : g_increaseIntervalMs;
+
+        // Slowly raise the congestion ceiling after 30s of stability
+        auto ceilAge = std::chrono::duration_cast<std::chrono::seconds>(now - g_ceilingSetTime).count();
+        if (g_congestionCeiling > 0 && ceilAge > 30) {
+            g_congestionCeiling = 0;
+        }
+
         if (since >= increaseInterval && g_cleanSamples >= requiredSamples) {
-            // Larger increase steps on localhost to reach target bitrate faster
             int step = isLocalhost ? (g_increaseStep * 2) : g_increaseStep;
             int target = g_currentBitrate + step;
-            if (target <= g_maxBitrateController) {
+            int effectiveMax = g_maxBitrateController;
+
+            // Don't exceed the congestion ceiling if one is set
+            if (g_congestionCeiling > 0 && g_congestionCeiling < effectiveMax) {
+                effectiveMax = g_congestionCeiling;
+            }
+
+            if (target <= effectiveMax) {
                 g_currentBitrate = target;
                 AdjustBitrate(g_currentBitrate);
                 g_lastChange = now;
-                if (isLocalhost && g_cleanSamples % 5 == 0) {
-                    std::wcout << L"[Encoder] Localhost bitrate increase - now at " << g_currentBitrate 
-                              << L" bps (target: " << g_maxBitrateController << L" bps)" << std::endl;
-                }
             }
             g_cleanSamples = 0;
         }
@@ -1054,32 +1086,6 @@ namespace Encoder {
     }
 
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps) {
-        // Set up MMCSS for encoder thread to ensure priority scheduling
-        static bool encoderThreadConfigured = false;
-        static ThreadPriorityManager::MMCSSHandle encoderMMCSS; // Make static to persist
-        if (!encoderThreadConfigured) {
-            encoderThreadConfigured = true;
-            // Configure encoder thread with MMCSS "Games" class for consistent timing
-            ThreadPriorityManager::ThreadPriorityConfig encoderConfig;
-            encoderConfig.mmcssClass = ThreadPriorityManager::MMCSSClass::Games;
-            encoderConfig.taskName = "VideoEncoder";
-            encoderConfig.enableMMCSS = true;
-            encoderConfig.enableTimeCritical = false; // Use high priority but not time critical
-            encoderConfig.threadPriority = THREAD_PRIORITY_HIGHEST;
-
-            if (encoderMMCSS.elevate(encoderConfig)) {
-                std::cout << "[Encoder] MMCSS priority configured for encoder thread (Games class)" << std::endl;
-            } else {
-                std::cout << "[Encoder] MMCSS failed, falling back to thread priority only" << std::endl;
-                // Fall back to just setting thread priority without MMCSS
-                HANDLE threadHandle = GetCurrentThread();
-                if (threadHandle != nullptr && SetThreadPriority(threadHandle, encoderConfig.threadPriority)) {
-                    std::cout << "[Encoder] Thread priority set to HIGH (fallback)" << std::endl;
-                } else {
-                    std::cout << "[Encoder] Warning: Failed to set thread priority fallback" << std::endl;
-                }
-            }
-        }
 
         // Encode and drain under mutex, but handoff outside
         // Use pre-allocated merge buffer to avoid reallocations
@@ -1192,8 +1198,7 @@ namespace Encoder {
             framesCtx->sw_format = AV_PIX_FMT_NV12;
             framesCtx->width = width;
             framesCtx->height = height;
-            framesCtx->initial_pool_size = 8;
-            // Ensure D3D11 textures are created with render target and SRV so we can CopyResource into them and the encoder can read
+            framesCtx->initial_pool_size = std::max(g_hwFramePoolSize, g_nvAsyncDepth + 2);
             AVD3D11VAFramesContext* framesHw = (AVD3D11VAFramesContext*)framesCtx->hwctx;
             if (framesHw) {
                 framesHw->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -1205,11 +1210,9 @@ namespace Encoder {
             }
             codecCtx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
 
-            // Create a ring of hardware frames
             g_hwFrames.clear();
             g_hwFrameIndex = 0;
-            // Use pool size at least as large as encoder async depth/surfaces
-            int desiredPool = std::max(g_hwFramePoolSize, 8);
+            int desiredPool = std::max(g_hwFramePoolSize, g_nvAsyncDepth + 2);
             for (int i = 0; i < desiredPool; ++i) {
                 AVFrame* f = av_frame_alloc();
                 if (!f) { std::cerr << "[Encoder] av_frame_alloc failed for hw frame." << std::endl; return; }
@@ -1271,12 +1274,14 @@ namespace Encoder {
             // Let NVENC pick appropriate level automatically
             // Relax forced IDR (handled by gop_size)
         } else if (encoderName == "libx264") {
-            // x264 names differ; set BT.709 SDR limited
+            av_dict_set(&opts, "preset", "ultrafast", 0);
+            av_dict_set(&opts, "tune", "zerolatency", 0);
             av_dict_set(&opts, "colorprim", "bt709", 0);
             av_dict_set(&opts, "transfer",  "bt709", 0);
             av_dict_set(&opts, "colormatrix","bt709", 0);
             av_dict_set(&opts, "fullrange", g_fullRangeColor ? "1" : "0", 0);
-            av_dict_set(&opts, "profile", "high", 0); // match SDP high
+            av_dict_set(&opts, "profile", "high", 0);
+            av_dict_set(&opts, "x264-params", "repeat-headers=1:no-cabac=1:nal-hrd=cbr:force-cfr=1", 0);
         }
         else if (encoderName == "h264_qsv") {
             av_dict_set(&opts, "preset", "veryfast", 0);
@@ -1288,12 +1293,6 @@ namespace Encoder {
             av_dict_set(&opts, "usage", "lowlatency_high_quality", 0);
             av_dict_set(&opts, "repeat-headers", "1", 0);
             av_dict_set(&opts, "profile", "high", 0);
-        }
-        else if (encoderName == "libx264") {
-            av_dict_set(&opts, "preset", "ultrafast", 0);
-            av_dict_set(&opts, "tune", "zerolatency", 0);
-            // Constrained Baseline: disable CABAC, ensure HRD CBR signaling, CFR, and repeat headers
-            av_dict_set(&opts, "x264-params", "repeat-headers=1:no-cabac=1:nal-hrd=cbr:force-cfr=1", 0);
         }
 
         // Ensure Annex B where supported (NVENC/libx264 use AVCodecContext flags instead of option)
@@ -1429,7 +1428,7 @@ namespace Encoder {
             framesCtx->sw_format = AV_PIX_FMT_NV12;
             framesCtx->width = currentWidth;
             framesCtx->height = currentHeight;
-            framesCtx->initial_pool_size = 8;
+            framesCtx->initial_pool_size = std::max(g_hwFramePoolSize, g_nvAsyncDepth + 2);
             AVD3D11VAFramesContext* framesHw = (AVD3D11VAFramesContext*)framesCtx->hwctx;
             if (framesHw) {
                 framesHw->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -1438,11 +1437,10 @@ namespace Encoder {
             if (av_hwframe_ctx_init(hwFramesCtx) < 0) return;
             if (codecCtx->hw_frames_ctx) av_buffer_unref(&codecCtx->hw_frames_ctx);
             codecCtx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
-            // Rebuild hw frame ring
             for (AVFrame* f : g_hwFrames) { if (f) av_frame_free(&f); }
             g_hwFrames.clear();
             g_hwFrameIndex = 0;
-            int desiredPool = std::max(g_hwFramePoolSize, 8);
+            int desiredPool = std::max(g_hwFramePoolSize, g_nvAsyncDepth + 2);
             for (int i = 0; i < desiredPool; ++i) {
                 AVFrame* f = av_frame_alloc();
                 if (!f) return;
@@ -1682,8 +1680,9 @@ namespace Encoder {
                         g_reopenTargetBitrate.store(new_bitrate);
                     }
                 }
-                // Force an IDR soon so downstream adapts to new rate quickly
-                av_opt_set(codecCtx->priv_data, "force_key_frames", "expr:gte(t,n_forced*1)", 0);
+                // IDR is NOT forced on bitrate changes to avoid bandwidth spikes.
+                // The decoder adapts to new bitrate on the next natural P-frame.
+                // IDR only comes from PLI requests or natural GOP interval.
             }
         }
 
@@ -1706,17 +1705,21 @@ namespace Encoder {
     BackpressureLevel GetBackpressureLevel() {
         auto now = std::chrono::steady_clock::now();
         auto sinceLastEagain = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastEagain).count();
+
+        // Decay: if no EAGAIN in 2+ seconds, reset counter to avoid permanent over-reactivity
+        if (sinceLastEagain > 2000) {
+            g_eagainCount.store(0, std::memory_order_relaxed);
+            return BackpressureLevel::NONE;
+        }
+
         int eagainCount = g_eagainCount.load();
 
-        // Severe: Recent EAGAIN events (last 500ms) with high count
         if (sinceLastEagain <= 500 && eagainCount >= 5) {
             return BackpressureLevel::SEVERE;
         }
-        // Moderate: Recent EAGAIN events (last 1s) with moderate count
         else if (sinceLastEagain <= 1000 && eagainCount >= 3) {
             return BackpressureLevel::MODERATE;
         }
-        // Mild: Recent EAGAIN events (last 2s) with low count
         else if (sinceLastEagain <= 2000 && eagainCount >= 2) {
             return BackpressureLevel::MILD;
         }

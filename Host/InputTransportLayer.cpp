@@ -204,7 +204,7 @@ void Layer::pionMessageLoop() {
             } else {
                 // Wait for new messages with shorter timeout for responsiveness
                 std::unique_lock<std::mutex> lock(queueMutex);
-                queueCondition.wait_for(lock, std::chrono::milliseconds(5),
+                queueCondition.wait_for(lock, std::chrono::milliseconds(1),
                     [this]() { return shouldStop.load(); });
             }
         } catch (const std::exception& e) {

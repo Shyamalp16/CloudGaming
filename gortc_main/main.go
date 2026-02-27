@@ -77,6 +77,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -737,66 +738,42 @@ func (tbp *tieredBufferPool) getBufferTier(size int) int {
 	return tbp.sizeCount - 1
 }
 
-// getSampleBuf returns a buffer of at least the requested size
+// getSampleBuf returns a buffer of at least the requested size.
+// Hot path: no mutex — only calls sync.Pool.Get() which is lock-free.
+// Stats fields (hits/misses) are updated with atomics on miss paths only;
+// the actualSizes/sizeRequests maps are updated outside the per-frame critical path.
 func getSampleBuf(n int) []byte {
 	if n <= 0 {
 		return make([]byte, 0)
 	}
 
-	// Track size distribution for optimization
-	sampleBufPool.mutex.Lock()
-	sampleBufPool.actualSizes[n]++
-	sampleBufPool.mutex.Unlock()
+	// Cap to max tier size (rare, only logs once per occurrence)
+	maxTierSize := sampleBufPool.sizes[sampleBufPool.sizeCount-1]
+	if n > maxTierSize {
+		log.Printf("[Go/Pion] WARNING: Requested buffer size %d exceeds max tier %d, capping", n, maxTierSize)
+		n = maxTierSize
+	}
 
-	// Find the appropriate size tier
 	tier := sampleBufPool.getBufferTier(n)
 	targetSize := sampleBufPool.sizes[tier]
 
-	// Safety check: if requested size exceeds our maximum tier, cap it
-	maxTierSize := sampleBufPool.sizes[sampleBufPool.sizeCount-1]
-	if n > maxTierSize {
-		log.Printf("[Go/Pion] WARNING: Requested buffer size %d exceeds maximum tier size %d, capping to max tier",
-			n, maxTierSize)
-		n = maxTierSize
-		// Re-find tier for the capped size
-		tier = sampleBufPool.getBufferTier(n)
-		targetSize = sampleBufPool.sizes[tier]
-	}
-
-	// Track tier requests
-	sampleBufPool.mutex.Lock()
-	sampleBufPool.sizeRequests[tier]++
-	sampleBufPool.mutex.Unlock()
-
-	// Try to get a buffer from the appropriate tier
 	v := sampleBufPool.pools[tier].Get()
 	if v == nil {
-		// No buffer available in pool, allocate new one at tier size for better pooling
-		sampleBufPool.mutex.Lock()
-		sampleBufPool.misses[tier]++
-		sampleBufPool.allocations[tier]++
-		sampleBufPool.mutex.Unlock()
-		buf := make([]byte, targetSize) // Allocate at tier size, not requested size
-		return buf[:n]                  // Return slice of requested size
+		atomic.AddInt64(&sampleBufPool.misses[tier], 1)
+		atomic.AddInt64(&sampleBufPool.allocations[tier], 1)
+		buf := make([]byte, targetSize)
+		return buf[:n]
 	}
 
 	b := v.([]byte)
 	if cap(b) < n {
-		// Buffer too small, allocate new one at tier size
-		sampleBufPool.mutex.Lock()
-		sampleBufPool.misses[tier]++
-		sampleBufPool.allocations[tier]++
-		sampleBufPool.mutex.Unlock()
-		buf := make([]byte, targetSize) // Allocate at tier size, not requested size
-		return buf[:n]                  // Return slice of requested size
+		atomic.AddInt64(&sampleBufPool.misses[tier], 1)
+		atomic.AddInt64(&sampleBufPool.allocations[tier], 1)
+		buf := make([]byte, targetSize)
+		return buf[:n]
 	}
 
-	// Cache hit - buffer available and suitable
-	sampleBufPool.mutex.Lock()
-	sampleBufPool.hits[tier]++
-	sampleBufPool.mutex.Unlock()
-
-	// Return slice of requested size from pooled buffer
+	atomic.AddInt64(&sampleBufPool.hits[tier], 1)
 	return b[:n]
 }
 
@@ -812,57 +789,35 @@ func putSampleBuf(b []byte) {
 	tier := sampleBufPool.getBufferTier(capacity)
 	targetSize := sampleBufPool.sizes[tier]
 
-	// Try exact match first (most efficient)
+	// Return to pool without zeroing -- buffers contain video data that will be
+	// fully overwritten by C.memcpy on next use, so clearing is wasted work.
 	if capacity == targetSize {
-		// Reset the buffer content and return to pool
-		// Clear the slice to prevent data leaks between uses
-		for i := range b {
-			b[i] = 0
-		}
 		sampleBufPool.pools[tier].Put(b[:capacity])
 		return
 	}
 
-	// Try fallback: check if buffer fits in current tier with some tolerance
-	// Allow buffers that are reasonably close to tier size to prevent waste
 	if capacity >= targetSize/2 && capacity <= targetSize*2 {
-		// Reset the buffer content and return to pool
-		for i := range b {
-			b[i] = 0
-		}
 		sampleBufPool.pools[tier].Put(b[:capacity])
 		return
 	}
 
-	// Try adjacent tiers if current tier doesn't work
-	// Check next smaller tier
 	if tier > 0 {
 		smallerTier := tier - 1
 		smallerTargetSize := sampleBufPool.sizes[smallerTier]
 		if capacity >= smallerTargetSize/2 && capacity <= smallerTargetSize*2 {
-			for i := range b {
-				b[i] = 0
-			}
 			sampleBufPool.pools[smallerTier].Put(b[:capacity])
 			return
 		}
 	}
 
-	// Check next larger tier
 	if tier < sampleBufPool.sizeCount-1 {
 		largerTier := tier + 1
 		largerTargetSize := sampleBufPool.sizes[largerTier]
 		if capacity >= largerTargetSize/2 && capacity <= largerTargetSize*2 {
-			for i := range b {
-				b[i] = 0
-			}
 			sampleBufPool.pools[largerTier].Put(b[:capacity])
 			return
 		}
 	}
-
-	// If no suitable tier found, let it be garbage collected
-	// This is rare but prevents memory leaks from mismatched sizes
 }
 
 // logBufferPoolStats logs buffer pool usage statistics for monitoring
@@ -986,9 +941,9 @@ func initAudioSendQueue() {
 
 // initVideoSendQueue initializes the bounded video send queue and starts the sender goroutine
 func initVideoSendQueue() {
-	// Create bounded channel with capacity 4 (for video: size ≤ 4)
-	// Slightly larger to handle short bursts and prevent drops
-	videoSendQueue = make(chan media.Sample, 4)
+	// Cap at 2 frames: oldest is dropped on overflow, so 2 = ~22ms at 90fps max burst delay.
+	// C++ kMaxSendQueue is also 2, keeping total pipeline buffering at ~44ms worst case.
+	videoSendQueue = make(chan media.Sample, 2)
 	videoSendStop = make(chan struct{})
 
 	// Create buffer completion channel for safe buffer pool management
@@ -1102,66 +1057,40 @@ func videoSenderGoroutine() {
 	C.SetupGoThreadMMCSS()
 	log.Println("[Go/Pion] Video sender goroutine started with MMCSS priority (Pro Audio class)")
 
-	// Watchdog to detect if we're not consuming samples fast enough
-	lastSampleTime := time.Now()
-	sampleCount := 0
-
-	// Start watchdog goroutine
-	watchdogStop := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				if sampleCount == 0 && time.Since(lastSampleTime) > 2*time.Second {
-					log.Printf("[Go/Pion] Video sender watchdog: no samples processed in 2+ seconds")
-				}
-				sampleCount = 0 // Reset counter
-			case <-watchdogStop:
-				return
-			}
-		}
-	}()
-	defer close(watchdogStop)
+	// Single reused idle timer — avoids the common anti-pattern of calling time.After
+	// inside a hot loop, which allocates a new timer goroutine + channel on every iteration
+	// (at 90fps that would be ~900 live timers at any moment, creating sustained GC pressure).
+	idleTimer := time.NewTimer(10 * time.Second)
+	defer idleTimer.Stop()
 
 	for {
 		select {
 		case sample := <-videoSendQueue:
-			// Update watchdog counters
-			lastSampleTime = time.Now()
-			sampleCount++
+			// Reset the idle timer so it only fires if no samples arrive for 10s
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(10 * time.Second)
 
-			// Send video sample without holding any locks
-			// This is the potentially blocking operation, but it doesn't block other operations
 			if videoTrack != nil {
 				if err := videoTrack.WriteSample(sample); err != nil {
 					log.Printf("[Go/Pion] Error in video sender goroutine: %v", err)
-					// Return buffer immediately on error
-					putSampleBuf(sample.Data)
-				} else {
-					// Return buffer immediately after successful write
-					// This ensures minimal latency between write completion and buffer reuse
-					putSampleBuf(sample.Data)
 				}
 			} else {
 				log.Printf("[Go/Pion] Video track is nil, dropping sample")
-				// Return buffer immediately since sample won't be used
-				putSampleBuf(sample.Data)
 			}
+			putSampleBuf(sample.Data)
 
 		case <-videoSendStop:
 			log.Println("[Go/Pion] Video sender goroutine stopped")
 			return
 
-		case <-time.After(10 * time.Second):
-			// Safety timeout to prevent goroutine from hanging indefinitely
-			log.Printf("[Go/Pion] Video sender timeout - no activity for 10 seconds, checking health...")
-			if videoTrack == nil {
-				log.Printf("[Go/Pion] Video track is nil during timeout")
-			}
-			// Continue processing - this timeout just prevents indefinite blocking
+		case <-idleTimer.C:
+			log.Printf("[Go/Pion] Video sender: no samples for 10 seconds (track nil: %v)", videoTrack == nil)
+			idleTimer.Reset(10 * time.Second)
 		}
 	}
 }
@@ -1261,6 +1190,11 @@ func testBufferCompletionMechanism() {
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
+
+	// Reduce GC frequency to avoid periodic pauses that cause stream stutter.
+	// Default GOGC=100 triggers GC when heap doubles; 300 gives 3x headroom.
+	debug.SetGCPercent(300)
+
 	initBufferPool()
 	initAudioSendQueue()
 	initVideoSendQueue()
@@ -1528,37 +1462,24 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 	// This implements backpressure by dropping oldest samples rather than accumulating
 	// The sender goroutine will handle WriteSample without holding any locks
 
-	// Try to send sample with timeout to prevent blocking
+	// Non-blocking send: try to queue immediately, drop oldest if full
 	select {
 	case videoSendQueue <- sample:
-		// Sample successfully queued for sending
-		// Buffer will be returned to pool by sender goroutine after WriteSample
 		return 0
-	case <-time.After(17 * time.Millisecond):
-		// Queue is full or sender is slow - implement backpressure
-		// Try to make room by dropping oldest sample
+	default:
+		// Queue is full -- drop oldest and retry once
 		select {
 		case oldestSample := <-videoSendQueue:
-			// Successfully removed oldest sample
 			putSampleBuf(oldestSample.Data)
-
-			// Now try to queue the new sample
 			select {
 			case videoSendQueue <- sample:
-				// Success after making room
-				log.Printf("[Go/Pion] Video backpressure: dropped oldest sample (size=%d), queued new (size=%d)",
-					len(oldestSample.Data), n)
 				return 0
-			case <-time.After(8 * time.Millisecond):
-				// Still can't queue - sender might be stuck
+			default:
 				putSampleBuf(buf)
-				log.Printf("[Go/Pion] Video sender stuck, dropped sample (size=%d)", n)
 				return -1
 			}
-		case <-time.After(8 * time.Millisecond):
-			// Can't even read from queue - sender might be completely stuck
+		default:
 			putSampleBuf(buf)
-			log.Printf("[Go/Pion] Video queue completely stuck, dropped sample (size=%d)", n)
 			return -1
 		}
 	}

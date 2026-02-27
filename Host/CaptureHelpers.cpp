@@ -244,64 +244,23 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                     // MINIMAL CALLBACK: Only essential work here to reduce WGC backpressure
                     int sequenceNumber = frameSequenceCounter++;
 
-                    // Extract timestamp with robust validation and fallback logging
+                    // Keep callback lean: capture timestamp with minimal checks and fallback.
                     int64_t timestamp = 0;
                     int64_t systemRelativeTimeUs = 0;
-                    bool usedSystemRelativeTime = true;
-
                     try {
                         auto srt = frame.SystemRelativeTime();
                         systemRelativeTimeUs = static_cast<int64_t>(srt.count() / 10);
-
-                        // Validate the timestamp is reasonable (not negative, not too far in future)
-                        auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                            std::chrono::steady_clock::now().time_since_epoch()).count();
-
-                        if (systemRelativeTimeUs > 0 && systemRelativeTimeUs <= (nowUs + 1000000)) { // Within 1 second of now
-                            timestamp = systemRelativeTimeUs;
-                            g_systemRelativeTimeFrames.fetch_add(1, std::memory_order_relaxed);
-                        } else {
-                            // Invalid SystemRelativeTime, fall back
-                            usedSystemRelativeTime = false;
-                            static bool loggedInvalidSrt = false;
-                            if (!loggedInvalidSrt) {
-                                std::wcout << L"[VideoCapture] WARNING: Invalid SystemRelativeTime (" << systemRelativeTimeUs
-                                          << L" μs), falling back to audio reference clock. This may affect A/V sync." << std::endl;
-                                loggedInvalidSrt = true;
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        // Exception getting SystemRelativeTime, fall back
-                        usedSystemRelativeTime = false;
-                        static bool loggedSrtException = false;
-                        if (!loggedSrtException) {
-                            std::wcout << L"[VideoCapture] WARNING: Exception getting SystemRelativeTime: " << e.what()
-                                      << L". Falling back to audio reference clock. This may affect A/V sync." << std::endl;
-                            loggedSrtException = true;
-                        }
                     } catch (...) {
-                        // Generic exception, fall back
-                        usedSystemRelativeTime = false;
-                        static bool loggedSrtGenericException = false;
-                        if (!loggedSrtGenericException) {
-                            std::wcout << L"[VideoCapture] WARNING: Unknown exception getting SystemRelativeTime. "
-                                      << L"Falling back to audio reference clock. This may affect A/V sync." << std::endl;
-                            loggedSrtGenericException = true;
-                        }
+                        systemRelativeTimeUs = 0;
                     }
 
-                    if (!usedSystemRelativeTime || timestamp <= 0) {
+                    if (systemRelativeTimeUs > 0) {
+                        timestamp = systemRelativeTimeUs;
+                        g_systemRelativeTimeFrames.fetch_add(1, std::memory_order_relaxed);
+                    } else {
                         timestamp = AudioCapturer::GetSharedReferenceTimeUs();
                         systemRelativeTimeUs = timestamp;
                         g_fallbackTimeFrames.fetch_add(1, std::memory_order_relaxed);
-
-                        // Log fallback usage (one-time warning)
-                        static bool loggedFallbackUsage = false;
-                        if (!loggedFallbackUsage) {
-                            std::wcout << L"[VideoCapture] INFO: Using audio reference clock fallback for video timestamps. "
-                                      << L"This ensures A/V sync but may introduce slight timing variations." << std::endl;
-                            loggedFallbackUsage = true;
-                        }
                     }
 
                     // Extract content size for deferred processing
@@ -417,11 +376,11 @@ void StartCapture() {
 
     // Single encode/transmit consumer thread
     workerThreads.emplace_back([](){
-        // Elevate this consumer thread to MMCSS 'Games' if enabled
+        // Elevate this consumer thread to MMCSS 'Capture' to avoid starving the game
         HANDLE mmcssHandle = nullptr;
         if (g_enableMmcss.load()) {
             DWORD taskIndex = 0;
-            mmcssHandle = AvSetMmThreadCharacteristicsW(L"Games", &taskIndex);
+            mmcssHandle = AvSetMmThreadCharacteristicsW(L"Capture", &taskIndex);
             if (mmcssHandle) {
                 int prio = g_mmcssPriority.load();
                 AVRT_PRIORITY mapped = AVRT_PRIORITY_NORMAL;

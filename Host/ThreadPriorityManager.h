@@ -266,8 +266,14 @@ public:
             mmcssSuccess = false;
         }
 
-        // Set Win32 thread priority (always try this as fallback)
-        if (!SetThreadPriority(threadHandle, config.threadPriority)) {
+        // Set Win32 thread priority (always try this as fallback).
+        // If MMCSS is unavailable, avoid TIME_CRITICAL fallback to reduce game contention.
+        int effectivePriority = config.threadPriority;
+        if (!mmcssSuccess && config.enableTimeCritical && effectivePriority > THREAD_PRIORITY_HIGHEST) {
+            effectivePriority = THREAD_PRIORITY_HIGHEST;
+        }
+
+        if (!SetThreadPriority(threadHandle, effectivePriority)) {
             DWORD error = GetLastError();
             std::cerr << "[ThreadPriorityManager] Failed to set thread priority (Error: " << error << ")" << std::endl;
 
@@ -276,7 +282,7 @@ public:
                 success = false;
             }
         } else {
-            if (config.enableTimeCritical) {
+            if (effectivePriority >= THREAD_PRIORITY_TIME_CRITICAL) {
                 std::cout << "[ThreadPriorityManager] Successfully set thread priority to TIME_CRITICAL" << std::endl;
             } else {
                 std::cout << "[ThreadPriorityManager] Successfully set thread priority to HIGH" << std::endl;

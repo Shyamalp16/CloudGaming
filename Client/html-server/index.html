@@ -553,7 +553,7 @@
 
   <div class="debug-log" id="debugLog"></div>
 
-  <video id="hiddenVideo" autoplay playsinline></video>
+  <video id="hiddenVideo" autoplay playsinline muted></video>
 
   <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
   <script>
@@ -684,8 +684,10 @@
     let lastFrameTime = Date.now();
     let fps = 0;
     let latency = 0;
-    let netFps = 0; // decoded frames per second (from inbound-rtp)
-    let bitrateKbps = 0; // computed from bytesReceived
+    let netFps = 0;
+    let bitrateKbps = 0;
+    let activeStatsTimer = null;
+    let activeResizeHandler = null;
 
     // Rendering control
     let renderActive = false;
@@ -1025,7 +1027,7 @@
       sendMouseEvent(mouseData);
       mousePosition.x = mouseData.x;
       mousePosition.y = mouseData.y;
-    }, 30);
+    }, 8);
 
     function connectToSignalingServer(roomId, signalingUrl = serverUrlBase) {
       currentRoomId = roomId;
@@ -1173,6 +1175,25 @@
           if (hiddenVideoElement.srcObject !== stream) {
             log(`Attaching stream ${stream.id} to hidden video element.`);
             hiddenVideoElement.srcObject = stream;
+
+            const receiver = event.receiver;
+            if (receiver) {
+              if (receiver.playoutDelayHint !== undefined) {
+                receiver.playoutDelayHint = 0;
+                log('Set playoutDelayHint = 0 for minimum jitter buffer');
+              }
+              if (receiver.jitterBufferTarget !== undefined) {
+                receiver.jitterBufferTarget = 0;
+                log('Set jitterBufferTarget = 0 for minimum jitter buffer');
+              }
+              try {
+                if (receiver.setDegradationPreference) {
+                  receiver.setDegradationPreference('maintain-framerate');
+                  log('Set degradationPreference to maintain-framerate');
+                }
+              } catch (e) { /* ignore if unsupported */ }
+            }
+
             hiddenVideoElement.play().then(() => {
               logVideoState('after play() resolved');
               log('Video started playing, beginning canvas rendering...');
@@ -1182,6 +1203,57 @@
             }).catch(e => {
               log(`Video play() failed: ${e}. User interaction might be required.`, 'error');
             });
+
+            // Canvas resize on video dimension change
+            hiddenVideoElement.onresize = () => {
+              const vp = document.getElementById('streamViewport');
+              const rect = vp.getBoundingClientRect();
+              canvas.width = Math.max(1, Math.floor(rect.width));
+              canvas.height = Math.max(1, Math.floor(rect.height));
+              log('Resized canvas to viewport');
+            };
+
+            // Window resize - remove old handler before adding new one
+            if (activeResizeHandler) {
+              window.removeEventListener('resize', activeResizeHandler);
+            }
+            activeResizeHandler = () => {
+              const vp = document.getElementById('streamViewport');
+              const rect = vp.getBoundingClientRect();
+              canvas.width = Math.max(1, Math.floor(rect.width));
+              canvas.height = Math.max(1, Math.floor(rect.height));
+            };
+            window.addEventListener('resize', activeResizeHandler);
+
+            // Clear any previous stats timer before creating a new one
+            if (activeStatsTimer) {
+              clearInterval(activeStatsTimer);
+              activeStatsTimer = null;
+            }
+            let lastFramesDecoded = 0;
+            let lastBytes = 0;
+            let lastStatsTime = performance.now();
+            activeStatsTimer = setInterval(async () => {
+              if (!peerConnection) { clearInterval(activeStatsTimer); activeStatsTimer = null; return; }
+              try {
+                const stats = await peerConnection.getStats();
+                let inbound = null;
+                stats.forEach(report => {
+                  if (report.type === 'inbound-rtp' && report.kind === 'video') inbound = report;
+                });
+                if (!inbound) return;
+                const now = performance.now();
+                const dt = Math.max(1, now - lastStatsTime);
+                const frames = inbound.framesDecoded || 0;
+                const bytes = inbound.bytesReceived || 0;
+                netFps = Math.round(((frames - lastFramesDecoded) * 1000) / dt);
+                bitrateKbps = Math.round(((bytes - lastBytes) * 8) / dt);
+                lastFramesDecoded = frames;
+                lastBytes = bytes;
+                lastStatsTime = now;
+                updatePerformanceDisplay();
+              } catch (e) {}
+            }, 1000);
           }
         } else if (event.track.kind === 'audio') {
           log('Received audio track, setting up dedicated audio playback');
@@ -1212,28 +1284,6 @@
           audioElement.onvolumechange = () => log(`Audio volume change: ${audioElement.volume}`);
           audioElement.onerror = (e) => log(`Audio element error: ${audioElement.error?.message || e.type}`, 'error');
 
-          // Lightweight audio-level meter (logs every 2s)
-          try {
-            const AC = window.AudioContext || window.webkitAudioContext;
-            if (AC) {
-              const ac = new AC();
-              const src = ac.createMediaStreamSource(audioStream);
-              const analyser = ac.createAnalyser();
-              analyser.fftSize = 256;
-              src.connect(analyser);
-              const data = new Uint8Array(analyser.frequencyBinCount);
-              setInterval(() => {
-                analyser.getByteTimeDomainData(data);
-                let sum = 0;
-                for (let i = 0; i < data.length; i++) {
-                  const v = (data[i] - 128) / 128;
-                  sum += v * v;
-                }
-                const rms = Math.sqrt(sum / data.length);
-                log(`[AUDIO METER] RMS=${rms.toFixed(3)}`);
-              }, 2000);
-            }
-          } catch (e) { /* ignore meter errors */ }
 
           // Start or resume playback (should be already primed by Join click)
           try {
@@ -1249,49 +1299,6 @@
           } catch (e) {
             log(`Audio play() threw after attach: ${e}`, 'warn');
           }
-        }
-          // Auto-resize canvas to remote frame size on first frames
-          hiddenVideoElement.onresize = () => {
-            // Keep canvas matched to viewport (not raw video size) to avoid double scaling
-            const vp = document.getElementById('streamViewport');
-            const rect = vp.getBoundingClientRect();
-            canvas.width = Math.max(1, Math.floor(rect.width));
-            canvas.height = Math.max(1, Math.floor(rect.height));
-            log('Resized canvas to viewport');
-          };
-          window.addEventListener('resize', () => {
-            const vp = document.getElementById('streamViewport');
-            const rect = vp.getBoundingClientRect();
-            canvas.width = Math.max(1, Math.floor(rect.width));
-            canvas.height = Math.max(1, Math.floor(rect.height));
-          });
-          // Poll WebRTC stats to compute decoded fps and bitrate
-          let lastFramesDecoded = 0;
-          let lastBytes = 0;
-          let lastStatsTime = performance.now();
-          const statsTimer = setInterval(async () => {
-            if (!peerConnection) { clearInterval(statsTimer); return; }
-            try {
-              const stats = await peerConnection.getStats();
-              let inbound = null;
-              stats.forEach(report => {
-                if (report.type === 'inbound-rtp' && report.kind === 'video') inbound = report;
-              });
-              if (!inbound) return;
-              const now = performance.now();
-              const dt = Math.max(1, now - lastStatsTime);
-              const frames = inbound.framesDecoded || 0;
-              const bytes = inbound.bytesReceived || 0;
-              const dFrames = frames - lastFramesDecoded;
-              const dBytes = bytes - lastBytes;
-              netFps = Math.round((dFrames * 1000) / dt);
-              bitrateKbps = Math.round((dBytes * 8) / dt);
-              lastFramesDecoded = frames;
-              lastBytes = bytes;
-              lastStatsTime = now;
-              updatePerformanceDisplay();
-            } catch (e) {}
-          }, 1000);
         }
       };
 
@@ -1343,7 +1350,7 @@
       };
 
       dataChannel = peerConnection.createDataChannel("keyPressChannel", { ordered: true });
-      mouseChannel = peerConnection.createDataChannel("mouseChannel", { ordered: true });
+      mouseChannel = peerConnection.createDataChannel("mouseChannel", { ordered: false, maxRetransmits: 0 });
       log(`Client attempting to create data channel "${dataChannel.label}", initial state: ${dataChannel.readyState}`);
       log(`Client attempting to create data channel "${mouseChannel.label}", initial state: ${mouseChannel.readyState}`);
 
@@ -1382,7 +1389,7 @@
 
       
 
-      videoFeedbackChannel = peerConnection.createDataChannel("videoFeedbackChannel", { ordered: true });
+      videoFeedbackChannel = peerConnection.createDataChannel("videoFeedbackChannel", { ordered: false, maxRetransmits: 0 });
       log(`Client attempting to create data channel "${videoFeedbackChannel.label}", initial state: ${videoFeedbackChannel.readyState}`);
 
       videoFeedbackChannel.onopen = () => {
@@ -1423,6 +1430,7 @@
       videoFeedbackChannel.onerror = (event) => {
         // Handle error
       };
+    }
 
     async function handleAnswer(answerMsg) {
       if (!peerConnection || peerConnection.signalingState !== 'have-local-offer') {
@@ -1603,22 +1611,11 @@
       }
     }
 
-    // After creating the MediaStream and attaching, set playback hints
     if (hiddenVideoElement) {
       hiddenVideoElement.setAttribute('playsinline', 'true');
       if ('contentHint' in hiddenVideoElement) {
         hiddenVideoElement.contentHint = 'motion';
       }
-    }
-    if (peerConnection && peerConnection.getReceivers) {
-      const receivers = peerConnection.getReceivers();
-      receivers.forEach(r => {
-        if (r.track && r.track.kind === 'video') {
-          try {
-            r.setDegradationPreference && r.setDegradationPreference('maintain-framerate');
-          } catch (e) { /* ignore if unsupported */ }
-        }
-      });
     }
 
     window.addEventListener('keydown', handleKeyDown);

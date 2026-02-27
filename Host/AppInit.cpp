@@ -21,10 +21,10 @@ namespace AppInit {
 
 void InitializeProcess()
 {
-    if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS)) {
-        std::wcerr << L"[AppInit] Warning: Failed to set HIGH_PRIORITY_CLASS" << std::endl;
+    if (!SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS)) {
+        std::wcerr << L"[AppInit] Warning: Failed to set NORMAL_PRIORITY_CLASS" << std::endl;
     } else {
-        std::wcout << L"[AppInit] Process priority set to HIGH" << std::endl;
+        std::wcout << L"[AppInit] Process priority set to NORMAL (avoids starving game)" << std::endl;
     }
 
     if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {

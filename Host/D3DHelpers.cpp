@@ -136,6 +136,13 @@ bool SetupDXGI(
     try
     {
         dxgiDevice = d3dDevice.as<IDXGIDevice>();
+
+        // Keep GPU thread priority at default (0). The game is protected from
+        // GPU contention via the process priority being NORMAL; throttling the
+        // GPU device to -5 was also delaying the VideoProcessor BLT (BGRA→NV12),
+        // capping stream throughput at ~60fps under load.
+        std::wcout << L"[SetupDXGI] GPU thread priority left at default (0)\n";
+
         std::wcout << L"[SetupDXGI] DXGIDevice created.\n";
         return true;
     }

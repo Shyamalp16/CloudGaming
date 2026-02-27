@@ -118,19 +118,18 @@ NetworkCondition QualityController::assessNetworkCondition() const {
 }
 
 QualityDecision QualityController::shouldDropFrame() {
-    if (!isEnabled.load()) {
+    if (!isEnabled.load(std::memory_order_relaxed)) {
         return QualityDecision{false, NetworkCondition::Excellent, 0.0, 0, "Quality control disabled"};
     }
 
-    std::lock_guard<std::mutex> lock(droppingState.mutex);
-
-    // Debug logging for stats
-    static int debugCounter = 0;
-    if (++debugCounter % 100 == 0) {  // Log every 100th frame
-        LOG_INFO("Current stats - RTT: " + std::to_string(currentStats.rttMs) +
-                "ms, Loss: " + std::to_string(currentStats.packetLoss * 100.0) +
-                "%, Queue: " + std::to_string(currentStats.pacerQueueLength));
+    // Fast path: skip the mutex entirely when we know no dropping is needed.
+    // g_dropMayBeNeeded is set by updateNetworkStats() whenever the condition
+    // degrades to Fair/Poor/Critical. On localhost this is almost always false.
+    if (!g_dropMayBeNeeded.load(std::memory_order_relaxed) && config.minFrameIntervalMs == 0) {
+        return QualityDecision{false, NetworkCondition::Excellent, 0.0, 0, "Fast path: no drop"};
     }
+
+    std::lock_guard<std::mutex> lock(droppingState.mutex);
 
     // Check minimum frame interval to prevent excessive dropping
     auto now = std::chrono::steady_clock::now();
@@ -211,6 +210,13 @@ void QualityController::updateNetworkStats(const NetworkStats& stats) {
     // Log significant changes in network conditions
     static NetworkCondition lastCondition = NetworkCondition::Excellent;
     NetworkCondition newCondition = assessNetworkCondition();
+
+    // Update fast-path flag: dropping is only possible for Fair/Poor/Critical conditions.
+    // This lets shouldDropFrame() skip the mutex entirely on healthy networks.
+    bool dropPossible = (newCondition == NetworkCondition::Fair ||
+                         newCondition == NetworkCondition::Poor ||
+                         newCondition == NetworkCondition::Critical);
+    g_dropMayBeNeeded.store(dropPossible, std::memory_order_relaxed);
 
     if (newCondition != lastCondition) {
         std::string conditionStr;

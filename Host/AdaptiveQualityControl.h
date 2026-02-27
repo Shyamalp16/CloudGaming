@@ -103,6 +103,9 @@ private:
     DroppingState droppingState;
     std::atomic<bool> isEnabled;
     std::mutex statsMutex;
+    // Fast-path flag: set to true only when network condition could require dropping.
+    // Allows shouldDropFrame() to return immediately without the mutex in the common case.
+    std::atomic<bool> g_dropMayBeNeeded{false};
 
     // WebRTC stats callback
     static void webrtcStatsCallback(double packetLoss, double rtt, double jitter,
