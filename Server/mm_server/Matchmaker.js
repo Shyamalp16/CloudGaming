@@ -91,6 +91,14 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
+// ── Health / readiness probes ─────────────────────────────────────────────────
+// Railway (and other platforms) hit these before routing real traffic.
+// Respond immediately so the container is never killed for a missing probe.
+app.get('/healthz',  (_req, res) => res.sendStatus(200));
+app.get('/readyz',   (_req, res) => res.sendStatus(200));
+app.get('/health',   (_req, res) => res.sendStatus(200));
+// ─────────────────────────────────────────────────────────────────────────────
+
 function log(level, message, meta) {
 	const entry = { level, message, ...(meta || {}) };
 	if (level === 'error') {
