@@ -5,6 +5,10 @@ const { createClient } = require('redis');
 const { z } = require('zod');
 const https = require('https');
 
+// Catch anything that would silently kill the process and log it first.
+process.on('uncaughtException',   (err) => console.error('[FATAL] uncaughtException:',   err));
+process.on('unhandledRejection',  (reason) => console.error('[FATAL] unhandledRejection:', reason));
+
 // ─── Metered TURN helper ─────────────────────────────────────────────────────
 // Fetches short-lived ICE server credentials from the Metered API.
 // Called once per match so credentials are always fresh and expire with the session.
@@ -445,7 +449,11 @@ async function startServer(){
     try {
         await pruneStaleIdleHosts();
     } catch (_) {}
-    setInterval(pruneStaleIdleHosts, 10000);
+    setInterval(() => pruneStaleIdleHosts().catch(e =>
+        console.error('[pruneInterval] error:', e)), 10000);
 }
 
-startServer();
+startServer().catch(err => {
+    console.error('[FATAL] startServer crashed:', err);
+    process.exit(1);
+});
