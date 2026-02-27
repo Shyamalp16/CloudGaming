@@ -1,11 +1,17 @@
 {
   "client": {
-    "serverUrlBase": "ws://localhost:3002"
+    "serverUrlBase": "ws://localhost:3002",
+    "matchmakerUrl": "http://localhost:3000"
   },
   "host": {
     "targetProcessName": "cs2.exe",
+    "matchmaker": {
+      "url": "http://localhost:3000",
+      "hostSecret": "HELLO-MFS",
+      "heartbeatIntervalMs": 25000
+    },
     "window": {
-      "resizeClientArea": true,
+      "resizeClientAr ea": true,
       "targetWidth": 1920,
       "targetHeight": 1080
     },

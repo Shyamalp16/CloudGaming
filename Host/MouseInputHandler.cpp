@@ -10,7 +10,6 @@
 #include <thread>
 #include <chrono>
 #include "Metrics.h"
-#include "Config.h"
 #include "WindowUtils.h"
 #include "InputSchema.h"
 #include "InputInjection.h"

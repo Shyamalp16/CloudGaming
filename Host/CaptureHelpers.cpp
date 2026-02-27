@@ -28,7 +28,6 @@ static constexpr int kDefaultFramePoolBuffers = 3;
 static constexpr int kMaxFramePoolBuffers = 16;
 static constexpr int kDefaultTargetFps = 120;
 static constexpr int kMaxQueuedFramesDefault = 2;
-static constexpr int kPacingMaxBurstFramesDefault = 8;
 static constexpr int kOneSecondUs = 1000000;
 
 using namespace std::chrono;
@@ -130,13 +129,6 @@ static std::atomic<bool> g_skipUnchanged{false};
 void SetSkipUnchanged(bool enable) { g_skipUnchanged.store(enable); }
 
 // (Removed) Texture copy pool (unused)
-// Allow temporary bursts before dropping oldest frames when encoder is not backlogged
-static std::atomic<int> g_pacingMaxBurstFrames{kPacingMaxBurstFramesDefault};
-void SetPacingMaxBurstFrames(int frames) {
-    if (frames < 1) frames = 1;
-    if (frames > 128) frames = 128;
-    g_pacingMaxBurstFrames.store(frames);
-}
 
 static DXGI_FORMAT CoerceFormatForVideoProcessor(DXGI_FORMAT fmt) {
     switch (fmt) {
@@ -309,30 +301,6 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                             std::wcout << L"[VideoCapture] INFO: Using audio reference clock fallback for video timestamps. "
                                       << L"This ensures A/V sync but may introduce slight timing variations." << std::endl;
                             loggedFallbackUsage = true;
-                        }
-                    }
-
-                    // Periodic timestamp source reporting for A/V sync debugging
-                    {
-                        auto now = std::chrono::steady_clock::now();
-                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_lastTimestampReport);
-                        if (elapsed.count() >= 60) { // Report every minute
-                            uint64_t srtFrames = g_systemRelativeTimeFrames.load(std::memory_order_relaxed);
-                            uint64_t fallbackFrames = g_fallbackTimeFrames.load(std::memory_order_relaxed);
-                            uint64_t totalFrames = srtFrames + fallbackFrames;
-
-                            if (totalFrames > 0) {
-                                double srtPercentage = (static_cast<double>(srtFrames) / totalFrames) * 100.0;
-                                std::wcout << L"[VideoCapture] Timestamp source stats (last " << elapsed.count()
-                                          << L"s): " << srtFrames << L" SRT frames (" << std::fixed << std::setprecision(1)
-                                          << srtPercentage << L"%), " << fallbackFrames << L" fallback frames ("
-                                          << (100.0 - srtPercentage) << L"%)" << std::endl;
-                            }
-
-                            // Reset counters for next period
-                            g_systemRelativeTimeFrames.store(0, std::memory_order_relaxed);
-                            g_fallbackTimeFrames.store(0, std::memory_order_relaxed);
-                            g_lastTimestampReport = now;
                         }
                     }
 
@@ -581,6 +549,30 @@ void StartCapture() {
                         VideoMetrics::ewmaUpdate(VideoMetrics::captureFps(), fps);
                         capCount = 0;
                         windowStartUs = metadata.systemRelativeTimeUs;
+                    }
+                }
+
+                // 1.1 Periodic timestamp source reporting moved off callback thread.
+                {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_lastTimestampReport);
+                    if (elapsed.count() >= 60) { // Report every minute
+                        uint64_t srtFrames = g_systemRelativeTimeFrames.load(std::memory_order_relaxed);
+                        uint64_t fallbackFrames = g_fallbackTimeFrames.load(std::memory_order_relaxed);
+                        uint64_t totalFrames = srtFrames + fallbackFrames;
+
+                        if (totalFrames > 0) {
+                            double srtPercentage = (static_cast<double>(srtFrames) / totalFrames) * 100.0;
+                            std::wcout << L"[VideoCapture] Timestamp source stats (last " << elapsed.count()
+                                      << L"s): " << srtFrames << L" SRT frames (" << std::fixed << std::setprecision(1)
+                                      << srtPercentage << L"%), " << fallbackFrames << L" fallback frames ("
+                                      << (100.0 - srtPercentage) << L"%)" << std::endl;
+                        }
+
+                        // Reset counters for next period
+                        g_systemRelativeTimeFrames.store(0, std::memory_order_relaxed);
+                        g_fallbackTimeFrames.store(0, std::memory_order_relaxed);
+                        g_lastTimestampReport = now;
                     }
                 }
 

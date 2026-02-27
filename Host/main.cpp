@@ -20,6 +20,7 @@
 #include "InputConfig.h"
 #include "ErrorUtils.h"
 #include "InputIntegrationLayer.h"
+#include "MatchmakerClient.h"
 
 int main()
 {
@@ -63,10 +64,39 @@ int main()
     }
     std::wstring wideTargetProcessName(targetProcessName.begin(), targetProcessName.end());
 
-    // --- Room ID Generation ---
+    // --- Room ID and Host ID Generation ---
     std::string roomId = generateRoomId();
+    std::string hostId = generateHostId();
     Runtime::PrintBanner(roomId);
+    std::cout << "[main] Host ID: " << hostId << std::endl;
     // --------------------------
+    
+    // --- Load Matchmaker Configuration ---
+    std::string matchmakerUrl = "";
+    std::string hostSecret = "";
+    int heartbeatIntervalMs = 25000;
+    bool matchmakerEnabled = false;
+    
+    if (config.contains("host") && config["host"].contains("matchmaker")) {
+        auto& mmCfg = config["host"]["matchmaker"];
+        if (mmCfg.contains("url") && mmCfg["url"].is_string()) {
+            matchmakerUrl = mmCfg["url"].get<std::string>();
+            matchmakerEnabled = !matchmakerUrl.empty();
+        }
+        if (mmCfg.contains("hostSecret") && mmCfg["hostSecret"].is_string()) {
+            hostSecret = mmCfg["hostSecret"].get<std::string>();
+        }
+        if (mmCfg.contains("heartbeatIntervalMs") && mmCfg["heartbeatIntervalMs"].is_number()) {
+            heartbeatIntervalMs = mmCfg["heartbeatIntervalMs"].get<int>();
+        }
+    }
+    
+    if (matchmakerEnabled) {
+        std::cout << "[main] Matchmaker URL: " << matchmakerUrl << std::endl;
+    } else {
+        std::cout << "[main] Matchmaker not configured, running in standalone mode" << std::endl;
+    }
+    // -------------------------------------
 
     GraphicsAndCapture::D3DContext d3d;
     if (!GraphicsAndCapture::InitializeDevice(d3d)) return -1;
@@ -97,6 +127,24 @@ int main()
     ConfigUtils::ApplyAdaptiveQualityControlSettings(config);
     StartCapture();
     initWebsocket(roomId);
+    
+    // --- Matchmaker Registration ---
+    if (matchmakerEnabled) {
+        if (MatchmakerClient::initialize(matchmakerUrl, hostSecret)) {
+            // Send initial heartbeat
+            if (MatchmakerClient::sendHeartbeat(hostId, roomId)) {
+                std::cout << "[main] Successfully registered with matchmaker" << std::endl;
+            } else {
+                std::cerr << "[main] Warning: Failed to register with matchmaker (will retry via heartbeat)" << std::endl;
+            }
+            // Start background heartbeat thread
+            MatchmakerClient::startHeartbeatThread(hostId, roomId, heartbeatIntervalMs);
+        } else {
+            std::cerr << "[main] Failed to initialize matchmaker client" << std::endl;
+        }
+    }
+    // -------------------------------
+    
     // Optional metrics export to signaling channel
     if (config.contains("host") && config["host"].contains("video")) {
         auto vcfg = config["host"]["video"];
@@ -163,6 +211,13 @@ int main()
     }
 
     std::wcout << L"[main] Stopping capture...\n";
+    
+    // Stop matchmaker heartbeat first
+    if (matchmakerEnabled) {
+        std::cout << "[main] Stopping matchmaker heartbeat..." << std::endl;
+        MatchmakerClient::stopHeartbeatThread();
+    }
+    
     // Order shutdown to avoid races: stop capture -> close PC -> stop ws -> flush/close encoder -> close Go
     audioCapturer.StopCapture();
     GraphicsAndCapture::Stop(cap);

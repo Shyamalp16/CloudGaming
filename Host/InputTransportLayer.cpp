@@ -178,19 +178,29 @@ void Layer::pionMessageLoop() {
 
     while (pionRunning.load() && !shouldStop.load()) {
         try {
-            // Use the safe RAII wrapper for message retrieval
-            auto msgWrapper = WebRTCWrapper::getMouseChannelMessageSafe();
-            if (msgWrapper) {
-                uint64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count();
+            uint64_t receivedCount = 0;
+            uint64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
 
-                InputMessage message("pion_data", msgWrapper.toString(), 0, timestamp);
+            // Keyboard/general input channel
+            std::string kbMsg = WebRTCWrapper::getDataChannelMessageString();
+            if (!kbMsg.empty()) {
+                InputMessage message("pion_data", std::move(kbMsg), 0, timestamp);
                 enqueueMessage(std::move(message));
+                receivedCount++;
+            }
 
-                {
-                    std::lock_guard<std::mutex> lock(statsMutex);
-                    stats.pionMessagesReceived++;
-                }
+            // Mouse channel
+            auto mouseMsg = WebRTCWrapper::getMouseChannelMessageSafe();
+            if (mouseMsg) {
+                InputMessage message("pion_data", mouseMsg.toString(), 0, timestamp);
+                enqueueMessage(std::move(message));
+                receivedCount++;
+            }
+
+            if (receivedCount > 0) {
+                std::lock_guard<std::mutex> lock(statsMutex);
+                stats.pionMessagesReceived += receivedCount;
             } else {
                 // Wait for new messages with shorter timeout for responsiveness
                 std::unique_lock<std::mutex> lock(queueMutex);
@@ -212,11 +222,13 @@ void Layer::websocketMessageLoop() {
     while (websocketRunning.load() && !shouldStop.load()) {
         try {
             // TODO: Implement legacy WebSocket message retrieval
-            // Yield instead of sleep to maintain responsiveness while avoiding busy waiting
-            std::this_thread::yield();
+            // Block briefly to avoid busy-yielding when legacy transport is enabled.
+            std::unique_lock<std::mutex> lock(queueMutex);
+            queueCondition.wait_for(lock, std::chrono::milliseconds(10),
+                [this]() { return shouldStop.load() || !websocketRunning.load(); });
         } catch (const std::exception& e) {
             LOG_INPUT_ERROR("Exception in WebSocket message loop: " + std::string(e.what()), "");
-            std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
 
@@ -230,8 +242,8 @@ void Layer::processingLoop() {
         try {
             std::unique_lock<std::mutex> lock(queueMutex);
 
-            // Wait for messages with shorter timeout for responsiveness
-            queueCondition.wait_for(lock, std::chrono::milliseconds(1), [this]() {
+            // Notify-first waiting eliminates fixed 1ms wakeups while preserving responsiveness.
+            queueCondition.wait(lock, [this]() {
                 return !messageQueue.empty() || shouldStop.load();
             });
 

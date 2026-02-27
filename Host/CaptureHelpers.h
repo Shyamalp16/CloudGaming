@@ -8,11 +8,6 @@
 
 
 winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface);
-//Create D3DFramePool (NOT USED)
-winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool
-createD3DFramePool(
-    winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice d3dDevice,
-    winrt::Windows::Graphics::SizeInt32 size);
 
 //Create FreeThreadedFramePool
 winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool
@@ -41,7 +36,6 @@ winrt::event_token FrameArrivedEventRegistration(
 void StartCapture();
 
 void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& framePool);
-void PreProcessFrameConversion(winrt::com_ptr<ID3D11Device> device, winrt::com_ptr<ID3D11Texture2D> texture, int sequenceNumber);
 
 // Configure capture/encoder target FPS used when initializing the encoder
 void SetCaptureTargetFps(int fps);
@@ -65,9 +59,6 @@ void SetBorderRequired(bool required);
 
 // Configure WGC session MinUpdateInterval in 100ns units (0 disables)
 void SetMinUpdateInterval100ns(long long interval100ns);
-
-// Configure pacing burst size before dropping oldest frames when backlogged
-void SetPacingMaxBurstFrames(int frames);
 
 // Enable/disable skipping encode on unchanged frames (heuristic)
 void SetSkipUnchanged(bool enable);

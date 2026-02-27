@@ -1,11 +1,31 @@
 #include "InputConfig.h"
 #include <iostream>
 #include <sstream>
+#include <algorithm>
+#include <cstdlib>
 
 namespace InputConfig {
 
 // Global configuration instance
 InputConfiguration globalInputConfig;
+
+namespace {
+int g_wheelScale = 120;
+int g_keyEventsPerSecond = 200;
+int g_mouseEventsPerSecond = 500;
+bool g_legacyInitialized = false;
+
+int parseIntEnv(const char* name, int defaultValue) {
+    if (const char* value = std::getenv(name)) {
+        try {
+            return std::max(1, std::stoi(value));
+        } catch (...) {
+            return defaultValue;
+        }
+    }
+    return defaultValue;
+}
+} // namespace
 
 /**
  * @brief Convert string to KeyRepeatPolicy enum
@@ -309,6 +329,33 @@ std::string getConfigurationSummary() {
     ss << "  Strict Error Handling: " << (globalInputConfig.strictErrorHandling ? "YES" : "NO") << "\n";
 
     return ss.str();
+}
+
+void initialize() {
+    if (g_legacyInitialized) {
+        return;
+    }
+
+    // Keep support for legacy environment tuning used by existing call sites.
+    g_wheelScale = parseIntEnv("INPUT_WHEEL_SCALE", g_wheelScale);
+    g_keyEventsPerSecond = parseIntEnv("INPUT_KEY_EVENTS_PER_SEC", g_keyEventsPerSecond);
+    g_mouseEventsPerSecond = parseIntEnv("INPUT_MOUSE_EVENTS_PER_SEC", g_mouseEventsPerSecond);
+    g_legacyInitialized = true;
+}
+
+int getWheelScale() {
+    initialize();
+    return g_wheelScale;
+}
+
+int getKeyEventsPerSecond() {
+    initialize();
+    return g_keyEventsPerSecond;
+}
+
+int getMouseEventsPerSecond() {
+    initialize();
+    return g_mouseEventsPerSecond;
 }
 
 } // namespace InputConfig

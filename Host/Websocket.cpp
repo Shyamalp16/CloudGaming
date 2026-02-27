@@ -6,8 +6,11 @@
 #include "ShutdownManager.h"
 #include "PacketQueue.h"
 #include "WebRTCWrapper.h"
+#include <charconv>
+#include <cctype>
+#include <optional>
+#include <string_view>
 #include <unordered_set>
-#include "Config.h"
 #include "Metrics.h"
 #include "VideoMetrics.h"
 #include "InputIntegrationLayer.h"
@@ -39,13 +42,9 @@ std::thread g_metrics_thread;
 static std::atomic<bool> g_metrics_export_enabled{ false };
 // Input poller threads to bridge Go data channels -> C++ input handlers
 static std::atomic<bool> g_input_poll_running{ false };
-static std::thread g_kb_poller;
-static std::thread g_mouse_poller;
-static std::mutex g_poller_mutex;
-static std::condition_variable g_poller_cv;
 
 // Allowed key codes (must match client-side codes and KeyInputHandler mapping)
-static const std::unordered_set<std::string> kValidKeyCodes = {
+static const std::unordered_set<std::string_view> kValidKeyCodes = {
     // Letters
     "KeyA","KeyB","KeyC","KeyD","KeyE","KeyF","KeyG","KeyH","KeyI","KeyJ","KeyK","KeyL","KeyM","KeyN","KeyO","KeyP","KeyQ","KeyR","KeyS","KeyT","KeyU","KeyV","KeyW","KeyX","KeyY","KeyZ",
     // Numbers
@@ -84,6 +83,68 @@ struct TokenBucket {
 static TokenBucket g_keyBucket; // e.g., 200 events/sec burst 200
 static TokenBucket g_mouseBucket; // e.g., 500 events/sec burst 500
 static std::once_flag g_bucketsInit;
+
+static inline bool isVerboseWebsocketLoggingEnabled() {
+    return InputConfig::globalInputConfig.enablePerEventLogging;
+}
+
+namespace JsonFastPath {
+static inline size_t skipWs(std::string_view s, size_t i) {
+    while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+    return i;
+}
+
+static inline std::optional<std::string_view> getStringField(std::string_view payload, std::string_view field) {
+    std::string token = "\"";
+    token.append(field);
+    token.push_back('"');
+    size_t keyPos = payload.find(token);
+    if (keyPos == std::string_view::npos) return std::nullopt;
+
+    size_t colon = payload.find(':', keyPos + token.size());
+    if (colon == std::string_view::npos) return std::nullopt;
+    size_t pos = skipWs(payload, colon + 1);
+    if (pos >= payload.size() || payload[pos] != '"') return std::nullopt;
+
+    size_t start = pos + 1;
+    size_t end = start;
+    while (end < payload.size()) {
+        if (payload[end] == '"' && payload[end - 1] != '\\') {
+            break;
+        }
+        ++end;
+    }
+    if (end >= payload.size()) return std::nullopt;
+    return payload.substr(start, end - start);
+}
+
+template <typename IntT>
+static inline bool getIntField(std::string_view payload, std::string_view field, IntT& out) {
+    std::string token = "\"";
+    token.append(field);
+    token.push_back('"');
+    size_t keyPos = payload.find(token);
+    if (keyPos == std::string_view::npos) return false;
+
+    size_t colon = payload.find(':', keyPos + token.size());
+    if (colon == std::string_view::npos) return false;
+    size_t pos = skipWs(payload, colon + 1);
+    if (pos >= payload.size()) return false;
+
+    size_t end = pos;
+    if (payload[end] == '-') ++end;
+    while (end < payload.size() && std::isdigit(static_cast<unsigned char>(payload[end]))) ++end;
+    if (end <= pos) return false;
+
+    const char* beginPtr = payload.data() + pos;
+    const char* endPtr = payload.data() + end;
+    IntT value{};
+    auto [ptr, ec] = std::from_chars(beginPtr, endPtr, value);
+    if (ec != std::errc() || ptr != endPtr) return false;
+    out = value;
+    return true;
+}
+} // namespace JsonFastPath
 
 void on_open(client* c, websocketpp::connection_hdl hdl);
 void on_fail(client* c, websocketpp::connection_hdl hdl);
@@ -125,6 +186,18 @@ static void startInputPollers() {
 
     // Check if new architecture is enabled in configuration
     if (InputConfig::globalInputConfig.usePionDataChannels) {
+        // Main startup can already initialize/start this layer. Avoid duplicate init/start.
+        if (InputIntegrationLayer::isRunning()) {
+            std::cout << "[WebSocket] Input integration layer already running" << std::endl;
+            if (InputConfig::globalInputConfig.enableLegacyWebSocket) {
+                std::cout << "[WebSocket] Legacy WebSocket compatibility enabled - starting legacy polling threads" << std::endl;
+                if (!LegacyWebSocketCompat::startLegacyPolling()) {
+                    std::cerr << "[WebSocket] Failed to start legacy polling threads" << std::endl;
+                }
+            }
+            return;
+        }
+
         // Initialize and start the new input integration layer
         if (!InputIntegrationLayer::initialize()) {
             std::cerr << "[WebSocket] Failed to initialize input integration layer, falling back to legacy mode" << std::endl;
@@ -186,25 +259,6 @@ static void stopInputPollers() {
         std::cout << "[WebSocket] Legacy WebSocket polling stopped" << std::endl;
     }
 
-    // Legacy compatibility: For any remaining threads, notify and join
-    // (This handles edge cases where threads might still be running)
-    {
-        std::lock_guard<std::mutex> lock(g_poller_mutex);
-        g_poller_cv.notify_all();
-    }
-
-    // Wait for any remaining legacy threads to complete
-    if (g_kb_poller.joinable()) {
-        std::cout << "[WebSocket] Waiting for legacy keyboard poller to join..." << std::endl;
-        g_kb_poller.join();
-        std::cout << "[WebSocket] Legacy keyboard poller joined successfully" << std::endl;
-    }
-
-    if (g_mouse_poller.joinable()) {
-        std::cout << "[WebSocket] Waiting for legacy mouse poller to join..." << std::endl;
-        g_mouse_poller.join();
-        std::cout << "[WebSocket] Legacy mouse poller joined successfully" << std::endl;
-    }
 }
 
 void stopMetricsExport() {
@@ -284,15 +338,30 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
             std::cerr << "[WebSocket] Dropping extremely large message (" << payload.size() << ")" << std::endl;
             return;
         }
-        json message = json::parse(payload);
-
-        if (!message.contains("type") || !message["type"].is_string()) {
-            std::cerr << "[WebSocket] Received message without a valid 'type' field: " << message.dump() << std::endl;
+        const auto typeOpt = JsonFastPath::getStringField(payload, "type");
+        if (!typeOpt) {
+            std::cerr << "[WebSocket] Received message without a valid 'type' field. payload_size="
+                      << payload.size() << std::endl;
             return; // Skip processing this message
         }
 
-        std::string type = message["type"];
-        std::cout << "[Host] Received message type: " << type << std::endl;
+        const std::string_view type = *typeOpt;
+        if (isVerboseWebsocketLoggingEnabled()) {
+            std::cout << "[Host] Received message type: " << type << std::endl;
+        }
+
+        // Lazily parse full JSON only for message types that require proper unescaping/nested fields.
+        std::optional<json> parsedMessage;
+        auto getParsedMessage = [&]() -> json* {
+            if (!parsedMessage.has_value()) {
+                json m = json::parse(payload, nullptr, false);
+                if (m.is_discarded()) {
+                    return nullptr;
+                }
+                parsedMessage = std::move(m);
+            }
+            return &parsedMessage.value();
+        };
 
         // Apply tight payload limits only to input/control events, not SDP signaling
         if (type == "keydown" || type == "keyup" || type == "mousemove" || type == "mousedown" || type == "mouseup") {
@@ -307,8 +376,12 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
         }
 
         if (type == "ping") {
-            long long client_timestamp = message["timestamp"].get<long long>();
-            int sequence_number = message["sequence_number"].get<int>();
+            long long client_timestamp = 0;
+            int sequence_number = 0;
+            if (!JsonFastPath::getIntField(payload, "timestamp", client_timestamp) ||
+                !JsonFastPath::getIntField(payload, "sequence_number", sequence_number)) {
+                return;
+            }
             auto host_receive_time_point = std::chrono::high_resolution_clock::now();
             long long host_receive_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(host_receive_time_point.time_since_epoch()).count();
 
@@ -331,73 +404,48 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
             } else {
                 if (!g_mouseBucket.consume(1.0)) { InputMetrics::inc(InputMetrics::droppedMouse()); return; }
             }
-            // Validate and rate-limit input events
-            static auto lastInputLog = std::chrono::steady_clock::now();
-            auto now = std::chrono::steady_clock::now();
-            auto msSince = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastInputLog).count();
-
-            // Validate timestamp
-            long long client_send_time = 0;
-            if (message.contains("client_send_time") && message["client_send_time"].is_number()) {
-                client_send_time = message["client_send_time"].get<long long>();
-            }
-            auto host_receive_time_point = std::chrono::high_resolution_clock::now();
-            long long host_receive_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(host_receive_time_point.time_since_epoch()).count();
-
-            long long one_way_latency = client_send_time > 0 ? (host_receive_time_ms - client_send_time) : -1;
-
-            if (msSince >= 200) { // log at most every 200ms to avoid spam
-                // std::cout << "[Host] Received " << type << " event."
-                //           << " Client send time: " << client_send_time
-                //           << ", Host receive time: " << host_receive_time_ms
-                //           << ", One-way latency: " << one_way_latency << " ms" << std::endl;
-                lastInputLog = now;
-            }
-
             // Validate key events: code must be known
             if ((type == "keydown" || type == "keyup")) {
-                if (!message.contains("code") || !message["code"].is_string()) {
+                auto code = JsonFastPath::getStringField(payload, "code");
+                if (!code) {
                     return;
                 }
-                const std::string code = message["code"].get<std::string>();
-                if (kValidKeyCodes.find(code) == kValidKeyCodes.end()) {
+                if (kValidKeyCodes.find(*code) == kValidKeyCodes.end()) {
                     // Unknown key code; ignore
                     return;
                 }
-                // Enqueue keyboard message directly to C++ queue
-                std::string msgStr = message.dump();
-                enqueueKeyboardMessage(msgStr);
+                // Enqueue original payload to avoid parse->serialize overhead.
+                enqueueKeyboardMessage(payload);
                 InputMetrics::inc(InputMetrics::enqueuedKeyboard());
                 return; // Message handled, no need to continue processing
             }
 
             // Basic field validation for mouse events
             if (type == "mousemove" || type == "mousedown" || type == "mouseup") {
-                if (!message.contains("x") || !message["x"].is_number_integer() ||
-                    !message.contains("y") || !message["y"].is_number_integer()) {
+                int x = 0;
+                int y = 0;
+                if (!JsonFastPath::getIntField(payload, "x", x) ||
+                    !JsonFastPath::getIntField(payload, "y", y)) {
                     std::cerr << "[WebSocket] Invalid mouse event payload: missing or bad x/y" << std::endl;
                     return;
                 }
-                int x = message["x"].get<int>();
-                int y = message["y"].get<int>();
                 if (x < 0 || y < 0 || x > 8192 || y > 8192) { // simple sanity clamp
                     std::cerr << "[WebSocket] Mouse coordinates out of expected range" << std::endl;
                     return;
                 }
                 if ((type == "mousedown" || type == "mouseup")) {
-                    if (!message.contains("button") || !message["button"].is_number_integer()) {
+                    int button = 0;
+                    if (!JsonFastPath::getIntField(payload, "button", button)) {
                         std::cerr << "[WebSocket] Invalid mouse click payload: missing button" << std::endl;
                         return;
                     }
-                    int button = message["button"].get<int>();
                     if (button < 0 || button > 4) {
                         std::cerr << "[WebSocket] Mouse button out of range" << std::endl;
                         return;
                     }
                 }
-                // Enqueue mouse message directly to C++ queue
-                std::string msgStr = message.dump();
-                enqueueMouseMessage(msgStr);
+                // Enqueue original payload to avoid parse->serialize overhead.
+                enqueueMouseMessage(payload);
                 InputMetrics::inc(InputMetrics::enqueuedMouse());
                 return; // Message handled, no need to continue processing
             }
@@ -407,37 +455,54 @@ void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
             try { closePeerConnection(); } catch (...) {}
         }
         else if (type == "offer") {
-            std::cout << "[WebSocket] Received offer from server: \n" << message.dump() << std::endl;
-            std::string sdp = message.value("sdp", "");
+            if (isVerboseWebsocketLoggingEnabled()) {
+                std::cout << "[WebSocket] Received offer from server" << std::endl;
+            }
+            json* message = getParsedMessage();
+            if (!message) return;
+            std::string sdp = message->value("sdp", "");
+            if (sdp.empty()) return;
             handleOffer(sdp);
         }
         else if (type == "ice-candidate") {
             // Backward-compat: older schema used nested object
-            std::cout << "[WebSocket] Received ice-candidate (legacy schema): " << message.dump() << std::endl;
-            json candidateJson = message["candidate"];
+            if (isVerboseWebsocketLoggingEnabled()) {
+                std::cout << "[WebSocket] Received ice-candidate (legacy schema)" << std::endl;
+            }
+            json* message = getParsedMessage();
+            if (!message) return;
+            json candidateJson = (*message)["candidate"];
             handleRemoteIceCandidate(candidateJson);
         }
         else if (type == "candidate") {
             // New schema: candidate is a top-level string, optional mid/index
-            std::cout << "[WebSocket] Received candidate: " << message.dump() << std::endl;
-            json candidateJson;
-            if (message.contains("candidate") && message["candidate"].is_string()) {
-                candidateJson["candidate"] = message["candidate"].get<std::string>();
-            } else {
+            if (isVerboseWebsocketLoggingEnabled()) {
+                std::cout << "[WebSocket] Received candidate" << std::endl;
+            }
+            json* message = getParsedMessage();
+            if (!message || !message->contains("candidate") || !(*message)["candidate"].is_string()) {
                 std::cerr << "[WebSocket] Invalid candidate payload from server" << std::endl;
                 return;
             }
+            json candidateJson;
+            candidateJson["candidate"] = (*message)["candidate"].get<std::string>();
             handleRemoteIceCandidate(candidateJson);
         }
         else if (type == "control") {
-            if (message.value("action", std::string()) == "schema-error") {
+            json* message = getParsedMessage();
+            std::string action = message ? message->value("action", std::string()) : std::string();
+            if (action == "schema-error") {
                 std::cerr << "[WebSocket] Server reported schema-error for a message sent by host." << std::endl;
             } else {
-                std::cout << "[WebSocket] Control message: " << message.dump() << std::endl;
+                if (isVerboseWebsocketLoggingEnabled()) {
+                    std::cout << "[WebSocket] Control message received" << std::endl;
+                }
             }
         }
         else {
-            std::cout << "[WebSocket] Received Message: " << message.dump() << std::endl;
+            if (isVerboseWebsocketLoggingEnabled()) {
+                std::cout << "[WebSocket] Received unsupported message type: " << type << std::endl;
+            }
         }
     }
     catch (const std::exception& e) {
@@ -453,7 +518,9 @@ void send_message(const json& message) {
         }
         std::string payload = message.dump();
         wsClient.send(g_connectionHandle, payload, websocketpp::frame::opcode::text);
-        std::cout << "[WebSocket] Sent message: " << payload << std::endl;
+        if (isVerboseWebsocketLoggingEnabled()) {
+            std::cout << "[WebSocket] Sent message of type: " << message.value("type", "unknown") << std::endl;
+        }
     }
     catch (const std::exception& e) {
         std::cerr << "[WebSocket] Error sending message: " << e.what() << std::endl;

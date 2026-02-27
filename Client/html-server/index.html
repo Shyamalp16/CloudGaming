@@ -286,7 +286,7 @@
 
     #hiddenVideo { display: none; }
     /* Fallback: render <video> directly when canvas path misbehaves */
-    #hiddenVideo.bg-video { display: block; position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; z-index: 0; pointer-events: none; }
+    #hiddenVideo.bg-video { display: block; position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; z-index: 0; pointer-events: none; }
 
     .fullscreen-mode {
       position: fixed !important;
@@ -419,6 +419,70 @@
       box-shadow: 0 0 15px #00ff88;
     }
 
+    #findMatchButton {
+      padding: 12px 30px;
+      font-size: 16px;
+      font-weight: 600;
+      border: none;
+      border-radius: 6px;
+      background: linear-gradient(135deg, #ff6b35 0%, #f7931e 100%);
+      color: #fff;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      margin-bottom: 15px;
+      width: 100%;
+    }
+
+    #findMatchButton:hover {
+      background: linear-gradient(135deg, #ff8555 0%, #ffa33e 100%);
+      box-shadow: 0 0 20px rgba(255, 107, 53, 0.5);
+      transform: translateY(-2px);
+    }
+
+    #findMatchButton:disabled {
+      background: #555;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .match-divider {
+      display: flex;
+      align-items: center;
+      margin: 20px 0;
+      color: #666;
+      font-size: 14px;
+    }
+
+    .match-divider::before,
+    .match-divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: #444;
+    }
+
+    .match-divider span {
+      padding: 0 15px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .match-status {
+      font-size: 13px;
+      color: #888;
+      margin-top: 10px;
+      min-height: 20px;
+    }
+
+    .match-status.error {
+      color: #ff4444;
+    }
+
+    .match-status.success {
+      color: #00ff88;
+    }
+
     .hidden {
       display: none !important;
     }
@@ -426,7 +490,10 @@
 </head>
 <body>
   <div id="roomSetup">
-    <h2>Enter Room ID</h2>
+    <h2>Cloud Gaming</h2>
+    <button id="findMatchButton">Find Match</button>
+    <div id="matchStatus" class="match-status"></div>
+    <div class="match-divider"><span>or join manually</span></div>
     <input type="text" id="roomIdInput" placeholder="Paste Room ID from Host...">
     <button id="joinButton">Join Session</button>
   </div>
@@ -517,8 +584,66 @@
         connectToSignalingServer(roomId);
     });
 
+    // Find Match button handler - queries matchmaker for an available host
+    document.getElementById('findMatchButton').addEventListener('click', async () => {
+        const findMatchBtn = document.getElementById('findMatchButton');
+        const matchStatus = document.getElementById('matchStatus');
+        
+        // Disable button while searching
+        findMatchBtn.disabled = true;
+        findMatchBtn.textContent = 'Searching...';
+        matchStatus.textContent = 'Looking for available hosts...';
+        matchStatus.className = 'match-status';
+        
+        try {
+            const response = await fetch(`${matchmakerUrl}/api/match/find`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            
+            const data = await response.json();
+            
+            if (data.found) {
+                matchStatus.textContent = `Found host! Connecting to room ${data.roomId}...`;
+                matchStatus.className = 'match-status success';
+                
+                // Create and arm audio element under user gesture
+                const audioEl = createHiddenAudioElement();
+                try {
+                    const p = audioEl.play();
+                    if (p && typeof p.then === 'function') {
+                        p.then(() => log('Primed dedicated audio element on user gesture'))
+                         .catch(e => log(`Audio priming failed: ${e}`, 'warn'));
+                    }
+                } catch (e) {
+                    log(`Audio priming threw: ${e}`, 'warn');
+                }
+                
+                document.getElementById('roomSetup').classList.add('hidden');
+                document.body.classList.add('immersive');
+                document.getElementById('gameContainer').classList.remove('hidden');
+                
+                // Use the signaling URL from matchmaker response
+                connectToSignalingServer(data.roomId, data.signalingUrl);
+            } else {
+                matchStatus.textContent = data.message || 'No hosts available. Try again later.';
+                matchStatus.className = 'match-status error';
+                findMatchBtn.disabled = false;
+                findMatchBtn.textContent = 'Find Match';
+            }
+        } catch (error) {
+            console.error('Matchmaker error:', error);
+            matchStatus.textContent = `Connection failed: ${error.message}`;
+            matchStatus.className = 'match-status error';
+            findMatchBtn.disabled = false;
+            findMatchBtn.textContent = 'Find Match';
+        }
+    });
+
     const serverUrlBase = "ws://localhost:3002";
     // const serverUrlBase = "ws://10.0.0.134:3002";
+    const matchmakerUrl = "http://localhost:3000";
     let ws;
     let peerConnection;
     const hiddenVideoElement = document.getElementById('hiddenVideo');
@@ -770,10 +895,10 @@
     function renderVideoToCanvas() {
       if (!renderActive) return;
       if (hiddenVideoElement.videoWidth > 0 && hiddenVideoElement.videoHeight > 0) {
-        // Fill the canvas (cover, no pillarbox)
+        // Preserve full frame (contain, no crop/zoom)
         const vW = hiddenVideoElement.videoWidth;
         const vH = hiddenVideoElement.videoHeight;
-        const scale = Math.max(canvas.width / vW, canvas.height / vH);
+        const scale = Math.min(canvas.width / vW, canvas.height / vH);
         const dW = Math.floor(vW * scale);
         const dH = Math.floor(vH * scale);
         const dx = Math.floor((canvas.width - dW) / 2);
@@ -800,7 +925,7 @@
         if (hiddenVideoElement.videoWidth > 0 && hiddenVideoElement.videoHeight > 0) {
           const vW = hiddenVideoElement.videoWidth;
           const vH = hiddenVideoElement.videoHeight;
-          const scale = Math.max(canvas.width / vW, canvas.height / vH);
+          const scale = Math.min(canvas.width / vW, canvas.height / vH);
           const dW = Math.floor(vW * scale);
           const dH = Math.floor(vH * scale);
           const dx = Math.floor((canvas.width - dW) / 2);
@@ -902,9 +1027,9 @@
       mousePosition.y = mouseData.y;
     }, 30);
 
-    function connectToSignalingServer(roomId) {
+    function connectToSignalingServer(roomId, signalingUrl = serverUrlBase) {
       currentRoomId = roomId;
-      const serverUrl = `${serverUrlBase}?roomId=${roomId}`;
+      const serverUrl = `${signalingUrl}?roomId=${roomId}`;
       log(`Attempting to connect to WebSocket server at ${serverUrl}...`);
       updateConnectionStatus('connecting', 'Connecting...');
       try {

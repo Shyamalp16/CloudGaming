@@ -121,4 +121,25 @@ void resetToDefaults();
  */
 std::string getConfigurationSummary();
 
+/**
+ * @brief Initialize legacy compatibility settings from environment variables.
+ * @note Idempotent. Kept for call sites that still use the old Config.h API.
+ */
+void initialize();
+
+/**
+ * @brief Legacy wheel normalization scale (default 120 / WHEEL_DELTA).
+ */
+int getWheelScale();
+
+/**
+ * @brief Legacy key event rate limit (events/second).
+ */
+int getKeyEventsPerSecond();
+
+/**
+ * @brief Legacy mouse event rate limit (events/second).
+ */
+int getMouseEventsPerSecond();
+
 } // namespace InputConfig

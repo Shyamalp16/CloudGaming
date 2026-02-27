@@ -142,6 +142,7 @@ public:
     // Elevate thread priority using MMCSS
     bool elevate(const ThreadPriorityConfig& config = globalPriorityConfig) {
         std::lock_guard<std::mutex> lock(mutex);
+        static std::atomic<bool> s_mmcssUnavailable{ false };
 
         if (isElevated) {
             return true; // Already elevated
@@ -157,8 +158,8 @@ public:
         bool success = true;
         bool mmcssSuccess = false;
 
-        // Set MMCSS priority if enabled
-        if (config.enableMMCSS) {
+        // Set MMCSS priority if enabled and runtime indicates availability.
+        if (config.enableMMCSS && !s_mmcssUnavailable.load(std::memory_order_relaxed)) {
             std::string taskClass;
             switch (config.mmcssClass) {
                 case MMCSSClass::Games:
@@ -193,14 +194,17 @@ public:
                     case 1552:
                         errorMsg = "MMCSS service not available or paging file too small";
                         showDiagnostics = true;
+                        s_mmcssUnavailable.store(true, std::memory_order_relaxed);
                         break;
                     case 5:
                         errorMsg = "Access denied - MMCSS requires admin privileges";
                         showDiagnostics = true;
+                        s_mmcssUnavailable.store(true, std::memory_order_relaxed);
                         break;
                     case 2:
                         errorMsg = "MMCSS service not running";
                         showDiagnostics = true;
+                        s_mmcssUnavailable.store(true, std::memory_order_relaxed);
                         break;
                     case 87:
                         errorMsg = "Invalid parameter - MMCSS task class may not be supported";
@@ -209,6 +213,7 @@ public:
                         break;
                     case 50:
                         errorMsg = "MMCSS not supported on this platform";
+                        s_mmcssUnavailable.store(true, std::memory_order_relaxed);
                         break;
                     default:
                         errorMsg = "Unknown MMCSS error";
@@ -255,6 +260,10 @@ public:
 
                 std::cout << "[ThreadPriorityManager] Successfully elevated thread with MMCSS class '" << taskClass << "'" << std::endl;
             }
+        } else if (config.enableMMCSS && s_mmcssUnavailable.load(std::memory_order_relaxed)) {
+            // MMCSS has already failed with non-recoverable runtime conditions.
+            // Avoid repeated attempts and rely on Win32 thread priority fallback.
+            mmcssSuccess = false;
         }
 
         // Set Win32 thread priority (always try this as fallback)
