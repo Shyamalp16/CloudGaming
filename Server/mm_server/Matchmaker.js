@@ -433,9 +433,9 @@ async function startServer(){
     // Redis connection happens after — a slow Redis startup no longer kills the container.
     const port = process.env.PORT || 8080;
     await new Promise((resolve, reject) => {
-        app.listen(port, (err) => {
+        app.listen(port, '0.0.0.0', (err) => {
             if (err) return reject(err);
-            console.log(`Matchmaker server is running on port ${port}`);
+            console.log(`Matchmaker server is running on port ${port} (0.0.0.0)`);
             resolve();
         });
     });
