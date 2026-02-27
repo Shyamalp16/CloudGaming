@@ -412,8 +412,10 @@ async function startServer(){
         await pruneStaleIdleHosts();
         setInterval(pruneStaleIdleHosts, 10000);
 
-        app.listen(config.mmPort, () => {
-            console.log(`Matchmaker server is running on port ${config.mmPort}`);
+        // Railway injects PORT; fall back to config for local dev
+        const port = process.env.PORT || config.mmPort;
+        app.listen(port, () => {
+            console.log(`Matchmaker server is running on port ${port}`);
         });
     }
     catch (error) {

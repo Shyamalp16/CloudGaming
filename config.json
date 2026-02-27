@@ -11,7 +11,7 @@
       "heartbeatIntervalMs": 20000
     },
     "window": {
-      "resizeClientAr ea": true,
+      "resizeClientArea": true,
       "targetWidth": 1920,
       "targetHeight": 1080
     },

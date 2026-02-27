@@ -86,7 +86,9 @@ function noteRedisSuccess() {
 // WebSocket Server
 // =============================
 let draining = false;
-const server = new WebSocket.Server({ port: config.wsPort, maxPayload: config.messageMaxBytes });
+// Railway injects PORT; fall back to config for local dev
+const listenPort = process.env.PORT || config.wsPort;
+const server = new WebSocket.Server({ port: listenPort, maxPayload: config.messageMaxBytes });
 
 const localRooms = new Map();
 
@@ -468,7 +470,7 @@ async function main() {
 	});
 	server.on('error', (err) => log('error', 'WebSocket server error', { err }));
 
-	log('info', 'Scalable Signaling Server listening', { port: config.wsPort });
+	log('info', 'Scalable Signaling Server listening', { port: listenPort });
 
 	// Health endpoints
 	startHealthServer({
