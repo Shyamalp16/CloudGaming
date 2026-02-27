@@ -1,5 +1,4 @@
 const express = require('express');
-const cors = require('cors');
 const { randomUUID } = require('crypto');
 const { config } = require('../config');
 const { createClient } = require('redis');
@@ -78,16 +77,17 @@ function fetchJson(url, method, body) {
 
 const app = express();
 
-// Explicit CORS config — allow all origins and pre-flight OPTIONS for every route.
-// The browser sends an OPTIONS preflight before every cross-origin POST; without
-// this the request is blocked before it even reaches our route handlers.
-const corsOptions = {
-	origin: '*',
-	methods: ['GET', 'POST', 'OPTIONS'],
-	allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
-};
-app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions)); // respond 204 to all preflight requests
+// Hard-wire CORS headers on every response.  This MUST be the very first
+// middleware so that OPTIONS preflights are answered before anything else
+// (including any error paths) can run.
+app.use((req, res, next) => {
+	res.setHeader('Access-Control-Allow-Origin', '*');
+	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+	res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Request-Id');
+	res.setHeader('Access-Control-Max-Age', '86400');
+	if (req.method === 'OPTIONS') return res.sendStatus(204);
+	next();
+});
 
 app.use(express.json());
 
