@@ -77,7 +77,18 @@ function fetchJson(url, method, body) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const app = express();
-app.use(cors());
+
+// Explicit CORS config — allow all origins and pre-flight OPTIONS for every route.
+// The browser sends an OPTIONS preflight before every cross-origin POST; without
+// this the request is blocked before it even reaches our route handlers.
+const corsOptions = {
+	origin: '*',
+	methods: ['GET', 'POST', 'OPTIONS'],
+	allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // respond 204 to all preflight requests
+
 app.use(express.json());
 
 function log(level, message, meta) {
