@@ -95,7 +95,8 @@ app.use((req, res, next) => {
 	next();
 });
 
-// app.use(express.json());
+// Parse JSON request bodies for heartbeat and match APIs.
+app.use(express.json());
 
 // ── Health / readiness probes ─────────────────────────────────────────────────
 // Railway (and other platforms) hit these before routing real traffic.

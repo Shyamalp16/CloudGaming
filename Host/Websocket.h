@@ -13,7 +13,6 @@
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 #include <websocketpp/config/asio_client.hpp>
-#include <websocketpp/config/asio_tls_client.hpp>
 #include <websocketpp/client.hpp>
 
 // Other headers

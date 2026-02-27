@@ -41,12 +41,14 @@ bool sendHeartbeat(const std::string& hostId, const std::string& roomId) {
         std::string url = g_matchmakerUrl;
         std::string host;
         int port = 80;
+        bool isHttps = false;
         
         if (url.find("http://") == 0) {
             url = url.substr(7);
         } else if (url.find("https://") == 0) {
             url = url.substr(8);
             port = 443;
+            isHttps = true;
         }
         
         size_t colonPos = url.find(':');
@@ -59,11 +61,6 @@ bool sendHeartbeat(const std::string& hostId, const std::string& roomId) {
         } else {
             host = (slashPos != std::string::npos) ? url.substr(0, slashPos) : url;
         }
-
-        httplib::Client cli(host, port);
-        cli.set_connection_timeout(5);  
-        cli.set_read_timeout(5);
-        cli.set_write_timeout(5);
 
         nlohmann::json payload;
         payload["hostId"] = hostId;
@@ -79,19 +76,48 @@ bool sendHeartbeat(const std::string& hostId, const std::string& roomId) {
         headers.emplace("Content-Type", "application/json");
         headers.emplace("Authorization", "Bearer " + g_hostSecret);
 
-        auto res = cli.Post("/api/host/heartbeat", headers, body, "application/json");
+        if (isHttps) {
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+            httplib::SSLClient cli(host, port);
+            cli.set_connection_timeout(5);
+            cli.set_read_timeout(5);
+            cli.set_write_timeout(5);
 
-        if (res) {
+            auto res = cli.Post("/api/host/heartbeat", headers, body, "application/json");
+            if (!res) {
+                std::cerr << "[MatchmakerClient] Heartbeat request failed (HTTPS): "
+                          << httplib::to_string(res.error()) << std::endl;
+                return false;
+            }
             if (res->status == 200) {
                 std::cout << "[MatchmakerClient] Heartbeat sent successfully" << std::endl;
                 return true;
-            } else {
-                std::cerr << "[MatchmakerClient] Heartbeat failed with status: " << res->status 
-                          << " body: " << res->body << std::endl;
+            }
+            std::cerr << "[MatchmakerClient] Heartbeat failed with status: " << res->status
+                      << " body: " << res->body << std::endl;
+            return false;
+#else
+            std::cerr << "[MatchmakerClient] HTTPS URL configured but OpenSSL support is not enabled in cpp-httplib build" << std::endl;
+            return false;
+#endif
+        } else {
+            httplib::Client cli(host, port);
+            cli.set_connection_timeout(5);
+            cli.set_read_timeout(5);
+            cli.set_write_timeout(5);
+
+            auto res = cli.Post("/api/host/heartbeat", headers, body, "application/json");
+            if (!res) {
+                std::cerr << "[MatchmakerClient] Heartbeat request failed (HTTP): "
+                          << httplib::to_string(res.error()) << std::endl;
                 return false;
             }
-        } else {
-            std::cerr << "[MatchmakerClient] Heartbeat request failed: connection error" << std::endl;
+            if (res->status == 200) {
+                std::cout << "[MatchmakerClient] Heartbeat sent successfully" << std::endl;
+                return true;
+            }
+            std::cerr << "[MatchmakerClient] Heartbeat failed with status: " << res->status
+                      << " body: " << res->body << std::endl;
             return false;
         }
     } catch (const std::exception& e) {
