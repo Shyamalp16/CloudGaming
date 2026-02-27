@@ -1,11 +1,12 @@
+const http = require('http');
 const WebSocket = require('ws');
 const url = require('url');
 const crypto = require('crypto');
 const { createClient } = require('redis');
 const { config } = require('./config');
 const { logger } = require('./logger');
-const { startHealthServer } = require('./health');
 const { validateSignalingMessage } = require('./validation');
+const { metricsHandler } = require('./metrics');
 const { RateLimiter } = require('./rateLimiter');
 const {
 	setActiveConnections,
@@ -83,12 +84,44 @@ function noteRedisSuccess() {
 }
 
 // =============================
-// WebSocket Server
+// Combined HTTP + WebSocket Server
 // =============================
+// Railway routes all traffic (including health checks) to a single PORT.
+// We attach both the WebSocket server and the health/metrics endpoints to one
+// HTTP server so there is no port conflict with the old separate health server.
 let draining = false;
-// Railway injects PORT; fall back to config for local dev
-const listenPort = process.env.PORT || config.wsPort;
-const server = new WebSocket.Server({ port: listenPort, maxPayload: config.messageMaxBytes });
+
+const httpServer = http.createServer(async (req, res) => {
+	if (req.url === '/healthz') {
+		res.writeHead(200, { 'Content-Type': 'text/plain' });
+		res.end('ok');
+		return;
+	}
+	if (req.url === '/readyz') {
+		try {
+			const pong = await redisClient.ping();
+			if (pong === 'PONG' && !draining) {
+				res.writeHead(200, { 'Content-Type': 'text/plain' });
+				res.end('ready');
+			} else {
+				res.writeHead(503, { 'Content-Type': 'text/plain' });
+				res.end('not-ready');
+			}
+		} catch (_) {
+			res.writeHead(503, { 'Content-Type': 'text/plain' });
+			res.end('not-ready');
+		}
+		return;
+	}
+	if (req.url === '/metrics') {
+		return metricsHandler(req, res);
+	}
+	// Non-WebSocket HTTP requests get a standard 426
+	res.writeHead(426, { 'Content-Type': 'text/plain' });
+	res.end('Upgrade Required');
+});
+
+const server = new WebSocket.Server({ server: httpServer, maxPayload: config.messageMaxBytes });
 
 const localRooms = new Map();
 
@@ -470,20 +503,10 @@ async function main() {
 	});
 	server.on('error', (err) => log('error', 'WebSocket server error', { err }));
 
-	log('info', 'Scalable Signaling Server listening', { port: listenPort });
-
-	// Health endpoints
-	startHealthServer({
-		readinessCheck: async () => {
-			// Consider both command and subscriber clients
-			try {
-				// ping returns 'PONG' if connected
-				const pong = await redisClient.ping();
-				return pong === 'PONG' && !draining;
-			} catch (_) {
-				return false;
-			}
-		}
+	// Start the combined HTTP+WS server on Railway's injected PORT (or local fallback)
+	const listenPort = process.env.PORT || config.wsPort;
+	httpServer.listen(listenPort, () => {
+		log('info', 'Scalable Signaling Server listening', { port: listenPort });
 	});
 }
 
