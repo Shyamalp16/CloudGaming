@@ -95,7 +95,7 @@ app.use((req, res, next) => {
 	next();
 });
 
-app.use(express.json());
+// app.use(express.json());
 
 // ── Health / readiness probes ─────────────────────────────────────────────────
 // Railway (and other platforms) hit these before routing real traffic.
@@ -103,6 +103,7 @@ app.use(express.json());
 app.get('/healthz',  (_req, res) => res.sendStatus(200));
 app.get('/readyz',   (_req, res) => res.sendStatus(200));
 app.get('/health',   (_req, res) => res.sendStatus(200));
+app.get('/', (_, res) => res.send('ok'));
 // ─────────────────────────────────────────────────────────────────────────────
 
 function log(level, message, meta) {
@@ -123,6 +124,11 @@ app.use((req, res, next) => {
 	res.setHeader('x-request-id', reqId);
 	next();
 });
+
+app.use((req, res, next) => {
+	console.log('Incoming request:', req.method, req.url);
+	next();
+});	
 
 function formatZodIssues(zodError) {
 	return zodError.errors.map((e) => ({
