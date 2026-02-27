@@ -30,12 +30,30 @@ namespace MouseInputHandler {
     void enqueueMessage(const std::string& message);
 }
 
-typedef websocketpp::client<websocketpp::config::asio_client> client;
+typedef websocketpp::client<websocketpp::config::asio_client>     plain_client;
+typedef websocketpp::client<websocketpp::config::asio_tls_client> tls_client;
+// Both config types share the same underlying message type (inherited from core).
+using ws_message_ptr = plain_client::message_ptr;
 using json = nlohmann::json;
 
-client wsClient;
+// Plain (ws://) client — used for local dev
+plain_client wsClient;
+// TLS (wss://) client — used for Railway / production
+tls_client   g_tlsClient;
+// Set to true when the signaling URL starts with wss://
+static bool  g_useTls = false;
+
 websocketpp::connection_hdl g_connectionHandle;
 std::string base_uri = "ws://localhost:3002/";
+
+// TLS context factory — permissive (no cert verification needed for self-signed or Railway).
+static std::shared_ptr<boost::asio::ssl::context>
+on_tls_init(websocketpp::connection_hdl) {
+    auto ctx = std::make_shared<boost::asio::ssl::context>(
+        boost::asio::ssl::context::tls_client);
+    ctx->set_verify_mode(boost::asio::ssl::verify_none);
+    return ctx;
+}
 std::thread g_websocket_thread;
 // Legacy video sender threads removed; encoder pushes directly to Pion
 std::thread g_metrics_thread;
@@ -146,10 +164,10 @@ static inline bool getIntField(std::string_view payload, std::string_view field,
 }
 } // namespace JsonFastPath
 
-void on_open(client* c, websocketpp::connection_hdl hdl);
-void on_fail(client* c, websocketpp::connection_hdl hdl);
-void on_close(client* c, websocketpp::connection_hdl hdl);
-void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg);
+void on_open(websocketpp::connection_hdl hdl);
+void on_fail(websocketpp::connection_hdl hdl);
+void on_close(websocketpp::connection_hdl hdl);
+void on_message(websocketpp::connection_hdl hdl, ws_message_ptr msg);
 void send_message(const json& message);
 
 static void metricsExportLoop() {
@@ -307,22 +325,28 @@ void handleRemoteIceCandidate(const json& candidateJson) {
     handleRemoteIceCandidate(candidateStr.c_str());
 }
 
-void on_open(client* c, websocketpp::connection_hdl hdl) {
+void on_open(websocketpp::connection_hdl hdl) {
     std::cout << "[WebSocket] Connected opened" << std::endl;
     g_connectionHandle = hdl;
 }
 
-void on_fail(client* c, websocketpp::connection_hdl hdl) {
-    client::connection_ptr con = c->get_con_from_hdl(hdl);
-    std::cerr << "[WebSocket] Connection failed: " << con->get_ec().message() << std::endl;
+void on_fail(websocketpp::connection_hdl hdl) {
+    std::string errMsg;
+    try {
+        if (g_useTls)
+            errMsg = g_tlsClient.get_con_from_hdl(hdl)->get_ec().message();
+        else
+            errMsg = wsClient.get_con_from_hdl(hdl)->get_ec().message();
+    } catch (...) { errMsg = "unknown"; }
+    std::cerr << "[WebSocket] Connection failed: " << errMsg << std::endl;
 }
 
-void on_close(client* c, websocketpp::connection_hdl hdl) {
+void on_close(websocketpp::connection_hdl hdl) {
     std::cout << "[WebSocket] Connection closed" << std::endl;
     // Do not propagate Shutdown here; allow manual Stop/Close order only
 }
 
-void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
+void on_message(websocketpp::connection_hdl hdl, ws_message_ptr msg) {
     try {
         // Initialize rate-limiters once
         std::call_once(g_bucketsInit, [](){
@@ -517,7 +541,10 @@ void send_message(const json& message) {
             return;
         }
         std::string payload = message.dump();
-        wsClient.send(g_connectionHandle, payload, websocketpp::frame::opcode::text);
+        if (g_useTls)
+            g_tlsClient.send(g_connectionHandle, payload, websocketpp::frame::opcode::text);
+        else
+            wsClient.send(g_connectionHandle, payload, websocketpp::frame::opcode::text);
         if (isVerboseWebsocketLoggingEnabled()) {
             std::cout << "[WebSocket] Sent message of type: " << message.value("type", "unknown") << std::endl;
         }
@@ -527,38 +554,61 @@ void send_message(const json& message) {
     }
 }
 
-void initWebsocket(const std::string& roomId) {
-    wsClient.init_asio();
-    wsClient.set_open_handler(std::bind(&on_open, &wsClient, std::placeholders::_1));
-    wsClient.set_message_handler(&on_message);
-    wsClient.set_fail_handler(std::bind(&on_fail, &wsClient, std::placeholders::_1));
-    wsClient.set_close_handler(std::bind(&on_close, &wsClient, std::placeholders::_1));
+void initWebsocket(const std::string& roomId, const std::string& signalingUrl) {
+    if (!signalingUrl.empty()) {
+        base_uri = signalingUrl;
+        if (base_uri.back() != '/') base_uri += '/';
+    }
+
+    // Detect scheme: wss:// → TLS client, ws:// → plain client
+    g_useTls = (base_uri.rfind("wss://", 0) == 0);
 
     std::string full_uri = base_uri + "?roomId=" + roomId;
-    std::cout << "[WebSocket] Connecting to " << full_uri << std::endl;
+    std::cout << "[WebSocket] Connecting to " << full_uri
+              << (g_useTls ? " (TLS)" : " (plain)") << std::endl;
 
     websocketpp::lib::error_code ec;
-    client::connection_ptr con = wsClient.get_connection(full_uri, ec);
-    if (ec) {
-        std::cerr << "[WebSocket] Error getting connection: " << ec.message() << std::endl;
-        return;
-    }
-    wsClient.connect(con);
 
-    g_websocket_thread = std::thread([&]() {
-        try {
-            wsClient.run();
+    if (g_useTls) {
+        g_tlsClient.init_asio();
+        g_tlsClient.set_open_handler(&on_open);
+        g_tlsClient.set_message_handler(&on_message);
+        g_tlsClient.set_fail_handler(&on_fail);
+        g_tlsClient.set_close_handler(&on_close);
+        g_tlsClient.set_tls_init_handler(&on_tls_init);
+
+        tls_client::connection_ptr con = g_tlsClient.get_connection(full_uri, ec);
+        if (ec) {
+            std::cerr << "[WebSocket] Error getting TLS connection: " << ec.message() << std::endl;
+            return;
         }
-        catch (const std::exception& ex) {
-            std::cerr << "[WebSocket] run() Threw Exception: " << ex.what() << std::endl;
-        }
+        g_tlsClient.connect(con);
+        g_websocket_thread = std::thread([]() {
+            try { g_tlsClient.run(); }
+            catch (const std::exception& ex) {
+                std::cerr << "[WebSocket] TLS run() threw: " << ex.what() << std::endl;
+            }
         });
+    } else {
+        wsClient.init_asio();
+        wsClient.set_open_handler(&on_open);
+        wsClient.set_message_handler(&on_message);
+        wsClient.set_fail_handler(&on_fail);
+        wsClient.set_close_handler(&on_close);
 
-    // Video is sent from Encoder::pushPacketToWebRTC -> EnqueueEncodedSample -> SenderLoop -> sendVideoSample (paced path).
-    // The sendVideoPacket function exists only for debugging/testing and is gated in production builds.
-    // Disable legacy queue-based sender threads to avoid duplicate RTP sends.
-    // g_frame_thread = std::thread(&sendFrames);
-    // g_sender_thread = std::thread(&senderThread);
+        plain_client::connection_ptr con = wsClient.get_connection(full_uri, ec);
+        if (ec) {
+            std::cerr << "[WebSocket] Error getting connection: " << ec.message() << std::endl;
+            return;
+        }
+        wsClient.connect(con);
+        g_websocket_thread = std::thread([]() {
+            try { wsClient.run(); }
+            catch (const std::exception& ex) {
+                std::cerr << "[WebSocket] run() threw: " << ex.what() << std::endl;
+            }
+        });
+    }
 }
 
 void stopWebsocket() {
@@ -585,7 +635,8 @@ void stopWebsocket() {
 
     std::wcout << L"[Shutdown] Stopping websocket client...\n";
     try {
-        wsClient.stop();
+        if (g_useTls) g_tlsClient.stop();
+        else          wsClient.stop();
     } catch (...) {
         std::wcout << L"[Shutdown] Exception during wsClient.stop() (ignored).\n";
     }

@@ -80,6 +80,7 @@ function fetchJson(url, method, body) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const app = express();
+app.enable('trust proxy');
 
 // Hard-wire CORS headers on every response.  This MUST be the very first
 // middleware so that OPTIONS preflights are answered before anything else
@@ -92,6 +93,8 @@ app.use((req, res, next) => {
 	if (req.method === 'OPTIONS') return res.sendStatus(204);
 	next();
 });
+
+console.log('CORS headers set for', req.method, req.path);
 
 app.use(express.json());
 
@@ -429,7 +432,7 @@ redisClient.on('error', (err) => console.error('Redis Client Error', err));
 async function startServer(){
     // Bind to PORT first so Railway's health check passes immediately.
     // Redis connection happens after — a slow Redis startup no longer kills the container.
-    const port = process.env.PORT || config.mmPort;
+    const port = process.env.PORT || 8080;
     await new Promise((resolve, reject) => {
         app.listen(port, (err) => {
             if (err) return reject(err);

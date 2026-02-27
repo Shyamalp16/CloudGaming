@@ -126,7 +126,16 @@ int main()
     ConfigUtils::ApplyThreadPrioritySettings(config);
     ConfigUtils::ApplyAdaptiveQualityControlSettings(config);
     StartCapture();
-    initWebsocket(roomId);
+
+    // Read optional signaling server URL from config (host.signalingUrl).
+    // Falls back to the hardcoded ws://localhost:3002 default in Websocket.cpp.
+    std::string signalingUrl = "";
+    if (config.contains("host") && config["host"].contains("signalingUrl")
+        && config["host"]["signalingUrl"].is_string()) {
+        signalingUrl = config["host"]["signalingUrl"].get<std::string>();
+        std::cout << "[main] Signaling URL (from config): " << signalingUrl << std::endl;
+    }
+    initWebsocket(roomId, signalingUrl);
     
     // --- Matchmaker Registration ---
     if (matchmakerEnabled) {
