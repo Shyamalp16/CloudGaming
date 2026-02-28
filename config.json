@@ -4,7 +4,7 @@
     "matchmakerUrl": "https://matchmaker-production-5b36.up.railway.app"
   },
   "host": {
-    "targetProcessName": "cs2.exe",
+    "targetProcessName": "vlc.exe",
     "signalingUrl": "wss://signaling-server-production-acd4.up.railway.app",
     "matchmaker": {
       "url": "https://matchmaker-production-5b36.up.railway.app",

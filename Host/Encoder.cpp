@@ -20,6 +20,7 @@
 #include <deque>
 #include <cstring>
 #include <list>
+#include <algorithm>  // std::find_if
 #include <cmath>  // For std::abs in UpdatePacingFromTimestamp
 #include <avrt.h>
 #pragma comment(lib, "Avrt.lib")
@@ -182,6 +183,7 @@ static std::atomic<long long> g_smoothedDurUs{0};
 struct QueuedSample {
     std::vector<uint8_t> data;
     int64_t durationUs;
+    bool isKeyframe = false;  // Never drop keyframes on overflow; decoder needs them
 };
 static std::mutex g_sendMutex;
 static std::condition_variable g_sendCV;
@@ -298,33 +300,43 @@ static inline int64_t UpdatePacingFromTimestamp(int64_t currentTsUs) {
     return sm > 0 ? sm : ComputeFrameDurationUsLocked();
 }
 
-static inline void EnqueueEncodedSample(std::vector<uint8_t>&& bytes, int64_t durationUs) {
+static inline void EnqueueEncodedSample(std::vector<uint8_t>&& bytes, int64_t durationUs, bool isKeyframe) {
     if (bytes.empty()) return;
 
-    // Check with adaptive quality controller before queuing
+    // Check with adaptive quality controller before queuing (never drop keyframes for AQC)
     auto qualityDecision = AdaptiveQualityControl::checkFrameDropping();
-
-    if (qualityDecision.shouldDropFrame) {
-        // Log the dropping decision for monitoring (temporarily more verbose for debugging)
+    if (qualityDecision.shouldDropFrame && !isKeyframe) {
         static int dropCounter = 0;
-        if (++dropCounter % 10 == 0) {  // Log every 10th drop for debugging
+        if (++dropCounter % 10 == 0) {
             std::cout << "[AdaptiveQC] Frame dropped: " << qualityDecision.reason
                       << " (condition: " << static_cast<int>(qualityDecision.condition)
                       << ", ratio: " << qualityDecision.dropRatio
                       << ", total dropped: " << dropCounter << ")" << std::endl;
         }
         VideoMetrics::inc(VideoMetrics::sendQueueDrops());
-        return; // Drop the frame without queuing
+        return;
     }
 
     {
         std::lock_guard<std::mutex> lk(g_sendMutex);
         if (g_sendQueue.size() >= kMaxSendQueue) {
-            // drop oldest to prevent growth and large latency spikes
-            g_sendQueue.pop_front();
-            VideoMetrics::inc(VideoMetrics::sendQueueDrops());
+            if (isKeyframe) {
+                // Never drop keyframes: remove a non-keyframe to make room, or clear if all are keyframes
+                auto it = std::find_if(g_sendQueue.begin(), g_sendQueue.end(),
+                    [](const QueuedSample& s) { return !s.isKeyframe; });
+                if (it != g_sendQueue.end()) {
+                    g_sendQueue.erase(it);
+                    VideoMetrics::inc(VideoMetrics::sendQueueDrops());
+                } else {
+                    g_sendQueue.clear();  // All keyframes; clear and enqueue new one
+                }
+            } else {
+                // Incoming is non-keyframe and queue full: drop incoming
+                VideoMetrics::inc(VideoMetrics::sendQueueDrops());
+                return;
+            }
         }
-        g_sendQueue.push_back(QueuedSample{ std::move(bytes), durationUs });
+        g_sendQueue.push_back(QueuedSample{ std::move(bytes), durationUs, isKeyframe });
         VideoMetrics::sendQueueDepth().store(static_cast<uint64_t>(g_sendQueue.size()), std::memory_order_relaxed);
     }
     g_sendCV.notify_one();
@@ -335,12 +347,37 @@ static inline void EnqueueEncodedSample(std::vector<uint8_t>&& bytes, int64_t du
 struct PendingSample {
     std::vector<uint8_t> data;
     int64_t durationUs;
+    bool isKeyframe = false;
 };
+
+// H.264 Annex B: detect IDR (NAL type 5) when packet flags don't provide it
+static bool IsIdrFromNalBytes(const uint8_t* data, size_t size) {
+    size_t pos = 0;
+    while (pos + 3 < size) {
+        if (data[pos] == 0 && data[pos + 1] == 0) {
+            size_t startCodeLen = (data[pos + 2] == 1) ? 3 : 0;
+            if (startCodeLen == 0 && pos + 4 <= size && data[pos + 2] == 0 && data[pos + 3] == 1)
+                startCodeLen = 4;
+            if (startCodeLen > 0) {
+                size_t nalStart = pos + startCodeLen;
+                if (nalStart < size && (data[nalStart] & 0x1F) == 5)
+                    return true;  // NAL type 5 = IDR
+                pos = nalStart;
+            } else
+                pos++;
+        } else
+            pos++;
+    }
+    return false;
+}
 
 static PendingSample MakePendingSampleFromPacket(AVPacket* pkt, AVCodecContext* ctx, int64_t fallbackTsUs) {
     PendingSample out;
     if (!pkt || !pkt->data || pkt->size <= 0) return out;
     out.data.assign(pkt->data, pkt->data + pkt->size);
+    out.isKeyframe = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
+    if (!out.isKeyframe)
+        out.isKeyframe = IsIdrFromNalBytes(out.data.data(), out.data.size());
     int64_t pktTsUs = fallbackTsUs;
     if (pkt->pts != AV_NOPTS_VALUE && pkt->pts >= 0 && ctx) {
         pktTsUs = av_rescale_q(pkt->pts, ctx->time_base, AVRational{ 1, 1000000 });
@@ -807,7 +844,7 @@ namespace Encoder {
             VideoMetrics::ewmaUpdate(VideoMetrics::packetsPerFrameAvg(), static_cast<double>(pendingSamples.size()));
         }
         for (auto& s : pendingSamples) {
-            EnqueueEncodedSample(std::move(s.data), s.durationUs);
+            EnqueueEncodedSample(std::move(s.data), s.durationUs, s.isKeyframe);
         }
         return true;
     }
@@ -1003,7 +1040,7 @@ namespace Encoder {
         auto sample = MakePendingSampleFromPacket(packet, codecCtx, 0);
         if (!sample.data.empty()) {
             ETW_MARK("Encoder_Send_Start");
-            EnqueueEncodedSample(std::move(sample.data), sample.durationUs);
+            EnqueueEncodedSample(std::move(sample.data), sample.durationUs, sample.isKeyframe);
             ETW_MARK("Encoder_Send_End");
         }
     }
@@ -1293,7 +1330,7 @@ namespace Encoder {
             }
 
             std::wcout << L"[Encoder] EAGAIN handling: Enhanced backpressure detection with severity-based upstream dropping" << std::endl;
-            std::wcout << L"[Encoder]   - Send queue depth: " << kMaxSendQueue << L" (drops oldest on overflow)" << std::endl;
+            std::wcout << L"[Encoder]   - Send queue depth: " << kMaxSendQueue << L" (keyframe-aware: never drop keyframes)" << std::endl;
             std::wcout << L"[Encoder]   - Backpressure levels: MILD/MODERATE/SEVERE with adaptive dropping" << std::endl;
         }
 
@@ -1473,7 +1510,7 @@ namespace Encoder {
         }
         }
         for (auto& s : pendingSamples) {
-            EnqueueEncodedSample(std::move(s.data), s.durationUs);
+            EnqueueEncodedSample(std::move(s.data), s.durationUs, s.isKeyframe);
         }
     }
 
