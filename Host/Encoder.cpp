@@ -143,16 +143,17 @@ static int g_hwFrameIndex = 0;
 static int g_hwFramePoolSize = 4; // default to NVENC surfaces; >= async_depth
 
 // Encoder runtime configuration (overridable from host config)
-static int g_startBitrateBps = 20000000; // 20 Mbps default
-static int g_minBitrateBps = 10000000;   // 10 Mbps default
-static int g_maxBitrateBps = 50000000;   // 50 Mbps default
-static int g_minBitrateController = 10000000;
-static int g_maxBitrateController = 50000000;
-static int g_increaseStep = 5000000;         // +5 Mbps
-static int g_decreaseCooldownMs = 5000;      // ms — 5 s minimum between reductions to prevent oscillation
+// WAN-friendly defaults: 20M/50M punishes real internet; 8–15 Mbps for 1080p60 is realistic
+static int g_startBitrateBps = 8000000;   // 8 Mbps default
+static int g_minBitrateBps = 4000000;     // 4 Mbps default
+static int g_maxBitrateBps = 12000000;    // 12 Mbps default
+static int g_minBitrateController = 4000000;
+static int g_maxBitrateController = 12000000;
+static int g_increaseStep = 1000000;          // +1 Mbps (was +5 Mbps; gentler for WAN)
+static int g_decreaseCooldownMs = 1000;      // ms — 500–1000ms for WAN; 5s was too slow on real loss
 static int g_cleanSamplesRequired = 3;
 static int g_increaseIntervalMs = 1000;      // ms
-static int g_currentBitrate = 25000000;      // start ~25 Mbps
+static int g_currentBitrate = 8000000;      // start 8 Mbps (WAN-friendly)
 static int g_cleanSamples = 0;
 static int g_congestionCeiling = 0;          // remembers bitrate that caused loss, 0 = no ceiling
 static std::chrono::steady_clock::time_point g_lastChange = std::chrono::steady_clock::now();

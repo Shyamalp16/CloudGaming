@@ -66,15 +66,29 @@ void ApplyVideoSettings(const nlohmann::json& config)
     if (!(config.contains("host") && config["host"].contains("video"))) return;
     auto vcfg = config["host"]["video"];
     int cfgFps = vcfg.value("fps", 120);
-    int brStart = vcfg.value("bitrateStart", 20000000);
-    int brMin = vcfg.value("bitrateMin", 10000000);
-    int brMax = vcfg.value("bitrateMax", 50000000);
+    // WAN-friendly defaults: 8–15 Mbps for 1080p60; 20M/50M punishes real internet
+    int brStart = vcfg.value("bitrateStart", 8000000);
+    int brMin = vcfg.value("bitrateMin", 4000000);
+    int brMax = vcfg.value("bitrateMax", 12000000);
     Encoder::SetBitrateConfig(brStart, brMin, brMax);
+
+    // Bitrate controller: decreaseCooldown 500–1000ms for WAN; 5s was too slow on real loss
+    int increaseStep = 1000000;       // +1 Mbps
+    int decreaseCooldownMs = 1000;     // 500–1000ms until stable
+    int cleanSamplesRequired = 3;
+    int increaseIntervalMs = 1000;
+    if (vcfg.contains("bitrateController")) {
+        auto bc = vcfg["bitrateController"];
+        increaseStep = bc.value("increaseStepBps", increaseStep);
+        decreaseCooldownMs = bc.value("decreaseCooldownMs", decreaseCooldownMs);
+        cleanSamplesRequired = bc.value("cleanSamplesRequired", cleanSamplesRequired);
+        increaseIntervalMs = bc.value("increaseIntervalMs", increaseIntervalMs);
+    }
     Encoder::ConfigureBitrateController(brMin, brMax,
-                                       5'000'000,
-                                       300,
-                                       3,
-                                       1000);
+                                       increaseStep,
+                                       decreaseCooldownMs,
+                                       cleanSamplesRequired,
+                                       increaseIntervalMs);
     SetCaptureTargetFps(cfgFps);
 
     bool fullRange = vcfg.value("fullRange", true);

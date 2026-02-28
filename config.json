@@ -4,7 +4,7 @@
     "matchmakerUrl": "https://matchmaker-production-5b36.up.railway.app"
   },
   "host": {
-    "targetProcessName": "vlc.exe",
+    "targetProcessName": "SandFall-Win64-Shipping.exe",
     "signalingUrl": "wss://signaling-server-production-acd4.up.railway.app",
     "matchmaker": {
       "url": "https://matchmaker-production-5b36.up.railway.app",
@@ -33,6 +33,12 @@
         "ignorePli": false,
         "minPliIntervalMs": 3000,
         "minPliLossThreshold": 0.15,
+        "bitrateController": {
+            "increaseStepBps": 1000000,
+            "decreaseCooldownMs": 1000,
+            "cleanSamplesRequired": 3,
+            "increaseIntervalMs": 1000
+        },
         "gpuTiming": false,
         "hdrToneMapping": {
             "enabled": false,
@@ -165,9 +171,9 @@
         "queuePoorThreshold": 12,
         "excellentDropRatio": 0.0,
         "goodDropRatio": 0.0,
-        "fairDropRatio": 0.10,
-        "poorDropRatio": 0.25,
-        "criticalDropRatio": 0.50,
+        "fairDropRatio": 0.0,
+        "poorDropRatio": 0.0,
+        "criticalDropRatio": 0.0,
         "minFrameIntervalMs": 0,
         "statsUpdateIntervalMs": 100
       }

@@ -837,11 +837,12 @@ func getSampleBuf(n int) []byte {
 		return make([]byte, 0)
 	}
 
-	// Cap to max tier size (rare, only logs once per occurrence)
+	// Never truncate video samples. Oversize frames happen (often IDRs).
+	// Allocate exact-size buffer outside pool when exceeding max tier.
 	maxTierSize := sampleBufPool.sizes[sampleBufPool.sizeCount-1]
 	if n > maxTierSize {
-		log.Printf("[Go/Pion] WARNING: Requested buffer size %d exceeds max tier %d, capping", n, maxTierSize)
-		n = maxTierSize
+		log.Printf("[Go/Pion] WARNING: Oversize sample %d > max tier %d; allocating outside pool", n, maxTierSize)
+		return make([]byte, n)
 	}
 
 	tier := sampleBufPool.getBufferTier(n)
@@ -874,6 +875,12 @@ func putSampleBuf(b []byte) {
 	}
 
 	capacity := cap(b)
+
+	// Don't pool oversize allocations (allocated outside pool in getSampleBuf).
+	maxTierSize := sampleBufPool.sizes[sampleBufPool.sizeCount-1]
+	if capacity > maxTierSize {
+		return
+	}
 
 	// Find the appropriate tier for this buffer capacity
 	tier := sampleBufPool.getBufferTier(capacity)
