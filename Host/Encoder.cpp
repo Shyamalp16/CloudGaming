@@ -10,6 +10,7 @@
 #include "PacketQueue.h"
 #include "D3DHelpers.h" // For GetGpuVendorId
 #include <libavutil/hwcontext_d3d11va.h>
+#include <libavutil/avutil.h>  // AV_NOPTS_VALUE
 #include <d3d11.h>
 #include <wrl.h>
 #include <unordered_map>
@@ -28,31 +29,6 @@
 // Removed unused software conversion components
 int Encoder::currentWidth = 0;
 int Encoder::currentHeight = 0;
-
-// ============================================================================
-// MEMORY OPTIMIZATION: Encoder Packet Merging
-// ============================================================================
-// This optimization eliminates vector reallocations during packet merging by:
-// 1. Using thread-local pre-allocated buffers (no heap allocation per frame)
-// 2. Reserving maximum capacity upfront (1MB covers 4K frames)
-// 3. Reusing buffers across frames (clear() instead of reconstruct)
-// 4. Avoiding heap churn in hot encoding path
-//
-// Benefits:
-// - Eliminates GC pressure from vector reallocations
-// - Reduces memory fragmentation
-// - Provides predictable memory usage
-// - Improves cache locality and performance
-// ============================================================================
-static thread_local std::vector<uint8_t> g_packetMergeBuffer;
-static const size_t MAX_ENCODED_FRAME_SIZE = 1024 * 1024; // 1MB covers 4K frames
-
-// Initialize packet merge buffer with pre-reserved capacity
-static void EnsurePacketMergeBufferCapacity() {
-    if (g_packetMergeBuffer.capacity() < MAX_ENCODED_FRAME_SIZE) {
-        g_packetMergeBuffer.reserve(MAX_ENCODED_FRAME_SIZE);
-    }
-}
 
 std::mutex Encoder::g_encoderMutex;
 
@@ -352,6 +328,27 @@ static inline void EnqueueEncodedSample(std::vector<uint8_t>&& bytes, int64_t du
         VideoMetrics::sendQueueDepth().store(static_cast<uint64_t>(g_sendQueue.size()), std::memory_order_relaxed);
     }
     g_sendCV.notify_one();
+}
+
+// Per-packet sample: used to enqueue each AVPacket as its own WebRTC sample (avoids merging
+// multiple frames into one sample, which causes decode corruption and jitter-buffer confusion).
+struct PendingSample {
+    std::vector<uint8_t> data;
+    int64_t durationUs;
+};
+
+static PendingSample MakePendingSampleFromPacket(AVPacket* pkt, AVCodecContext* ctx, int64_t fallbackTsUs) {
+    PendingSample out;
+    if (!pkt || !pkt->data || pkt->size <= 0) return out;
+    out.data.assign(pkt->data, pkt->data + pkt->size);
+    int64_t pktTsUs = fallbackTsUs;
+    if (pkt->pts != AV_NOPTS_VALUE && pkt->pts >= 0 && ctx) {
+        pktTsUs = av_rescale_q(pkt->pts, ctx->time_base, AVRational{ 1, 1000000 });
+    }
+    out.durationUs = UpdatePacingFromTimestamp(pktTsUs);
+    if (out.durationUs <= 0) out.durationUs = ComputeFrameDurationUsLocked();
+    if (out.durationUs <= 0) out.durationUs = 8333;
+    return out;
 }
 
 // Pre-validate common texture formats to cache results and avoid per-frame checks
@@ -757,11 +754,9 @@ namespace Encoder {
     }
 
     bool SubmitHwFrame(int slotIndex, int64_t timestampUs) {
-        // Encode and drain under mutex, but do NOT call FFI/network while holding it
-        // Use pre-allocated merge buffer to avoid reallocations
-        EnsurePacketMergeBufferCapacity();
-        auto& merged = g_packetMergeBuffer;
-        merged.clear(); // Reset but keep capacity
+        // Encode and drain under mutex; collect per-packet samples (do NOT merge multiple
+        // frames into one WebRTC sample - causes decode corruption and jitter-buffer confusion).
+        std::vector<PendingSample> pendingSamples;
 
         {
             std::lock_guard<std::mutex> lock(g_encoderMutex);
@@ -789,11 +784,8 @@ namespace Encoder {
                     int r = avcodec_receive_packet(codecCtx, packet);
                     if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) break;
                     else if (r < 0) break;
-                    if (packet && packet->data && packet->size > 0) {
-                        size_t off = merged.size();
-                        merged.resize(off + packet->size);
-                        std::memcpy(merged.data() + off, packet->data, packet->size);
-                    }
+                    auto sample = MakePendingSampleFromPacket(packet, codecCtx, timestampUs);
+                    if (!sample.data.empty()) pendingSamples.push_back(std::move(sample));
                     av_packet_unref(packet);
                 }
                 ret = avcodec_send_frame(codecCtx, hw);
@@ -803,25 +795,19 @@ namespace Encoder {
                 int r = avcodec_receive_packet(codecCtx, packet);
                 if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) break;
                 else if (r < 0) return false;
-                if (packet && packet->data && packet->size > 0) {
-                    size_t off = merged.size();
-                    merged.resize(off + packet->size);
-                    std::memcpy(merged.data() + off, packet->data, packet->size);
-                }
+                auto sample = MakePendingSampleFromPacket(packet, codecCtx, timestampUs);
+                if (!sample.data.empty()) pendingSamples.push_back(std::move(sample));
                 av_packet_unref(packet);
             }
             auto tSendEnd = std::chrono::steady_clock::now();
             double ms = std::chrono::duration<double, std::milli>(tSendEnd - tSendStart).count();
             VideoMetrics::ewmaUpdate(VideoMetrics::avSendMsAvg(), ms);
         }
-        if (!merged.empty()) {
-            // Track average packets per frame by counting Annex B NAL join segments
-            double pkts = 1.0; // treat merged chunk as 1 unless split observed earlier
-            VideoMetrics::ewmaUpdate(VideoMetrics::packetsPerFrameAvg(), pkts);
-            // This EncodeFrame variant does not receive capture timestamp; use smoothed/default pacing
-            int64_t frameDurationUs = UpdatePacingFromTimestamp(timestampUs);
-            if (frameDurationUs <= 0) frameDurationUs = 8333;
-            EnqueueEncodedSample(std::move(merged), frameDurationUs);
+        if (!pendingSamples.empty()) {
+            VideoMetrics::ewmaUpdate(VideoMetrics::packetsPerFrameAvg(), static_cast<double>(pendingSamples.size()));
+        }
+        for (auto& s : pendingSamples) {
+            EnqueueEncodedSample(std::move(s.data), s.durationUs);
         }
         return true;
     }
@@ -1013,26 +999,16 @@ namespace Encoder {
     }
 
     void pushPacketToWebRTC(AVPacket* packet) {
-        // Compute pacing once and enqueue a copy to sender queue
-        int64_t frameDurationUs = ComputeFrameDurationUsLocked();
-        if (frameDurationUs <= 0) frameDurationUs = 8333;
-        std::vector<uint8_t> bytes;
-        if (packet && packet->data && packet->size > 0) {
+        // Use packet->pts for duration when available (per-packet enqueue, no merging)
+        auto sample = MakePendingSampleFromPacket(packet, codecCtx, 0);
+        if (!sample.data.empty()) {
             ETW_MARK("Encoder_Send_Start");
-            bytes.assign(packet->data, packet->data + packet->size);
-            EnqueueEncodedSample(std::move(bytes), frameDurationUs);
+            EnqueueEncodedSample(std::move(sample.data), sample.durationUs);
             ETW_MARK("Encoder_Send_End");
         }
     }
 
     void InitializeEncoder(const std::string& fileName, int width, int height, int fps) {
-
-        // Encode and drain under mutex, but handoff outside
-        // Use pre-allocated merge buffer to avoid reallocations
-        EnsurePacketMergeBufferCapacity();
-        auto& merged = g_packetMergeBuffer;
-        merged.clear(); // Reset but keep capacity
-
         std::lock_guard<std::mutex> lock(g_encoderMutex);
 
         // Clear caches when (re)initializing encoder
@@ -1331,10 +1307,8 @@ namespace Encoder {
             ApplyHdrToneMapping(texture, context);
         }
 
-        // Use pre-allocated merge buffer to avoid reallocations
-        EnsurePacketMergeBufferCapacity();
-        auto& merged = g_packetMergeBuffer;
-        merged.clear(); // Reset but keep capacity
+        // Collect per-packet samples (do NOT merge multiple frames into one WebRTC sample)
+        std::vector<PendingSample> pendingSamples;
 
         {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
@@ -1467,11 +1441,8 @@ namespace Encoder {
                     std::cerr << "[Encoder] Drain on EAGAIN failed: " << errBuf << "\n";
                     break;
                 }
-                if (packet && packet->data && packet->size > 0) {
-                    size_t off = merged.size();
-                    merged.resize(off + packet->size);
-                    std::memcpy(merged.data() + off, packet->data, packet->size);
-                }
+                auto sample = MakePendingSampleFromPacket(packet, codecCtx, pts);
+                if (!sample.data.empty()) pendingSamples.push_back(std::move(sample));
                 av_packet_unref(packet);
             }
             // Retry once after draining
@@ -1496,18 +1467,13 @@ namespace Encoder {
                 std::cerr << "[Encoder] Failed to receive packet from encoder: " << errBuf << "\n";
                 break;
             }
-            if (packet && packet->data && packet->size > 0) {
-                size_t off = merged.size();
-                merged.resize(off + packet->size);
-                std::memcpy(merged.data() + off, packet->data, packet->size);
-            }
+            auto sample = MakePendingSampleFromPacket(packet, codecCtx, pts);
+            if (!sample.data.empty()) pendingSamples.push_back(std::move(sample));
             av_packet_unref(packet);
         }
         }
-        if (!merged.empty()) {
-            int64_t frameDurationUs = UpdatePacingFromTimestamp(pts);
-            if (frameDurationUs <= 0) frameDurationUs = 8333;
-            EnqueueEncodedSample(std::move(merged), frameDurationUs);
+        for (auto& s : pendingSamples) {
+            EnqueueEncodedSample(std::move(s.data), s.durationUs);
         }
     }
 
