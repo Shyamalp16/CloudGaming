@@ -29,8 +29,8 @@ static std::atomic<bool> statsReportingRunning{false};
  */
 static void newArchitectureMessageHandler(const std::string& eventType, const std::string& eventData) {
     try {
-        // Forward to existing handlers for compatibility
-        if (eventType == "keydown" || eventType == "keyup") {
+        if (eventType == "keydown" || eventType == "keyup" ||
+            eventType == "emergency_keyup" || eventType == "stuck_key_recovery") {
             KeyInputHandler::enqueueMessage(eventData);
         } else if (eventType == "mousedown" || eventType == "mouseup" ||
                    eventType == "mousemove" || eventType == "wheel") {
@@ -86,10 +86,13 @@ bool initialize() {
                         // Extract type from JSON for routing
                         nlohmann::json eventData = nlohmann::json::parse(msg.data);
                         std::string eventType = eventData.value("type", std::string());
-                        newArchitectureMessageHandler(eventType, msg.data);
-                        // Also forward to state manager if available
                         if (auto* sm = InputStateManager::getGlobalStateManager()) {
-                            sm->processInputMessage(msg);
+                            if (eventType == "input_reset") {
+                                sm->emergencyReleaseAllKeys(eventData.value("reason", std::string("transport_reset")));
+                            } else {
+                                // State validation forwards each accepted event exactly once.
+                                sm->processInputMessage(msg);
+                            }
                         }
                     } catch (const std::exception& e) {
                         LOG_INPUT_ERROR("Transport handler exception: " + std::string(e.what()), msg.data);

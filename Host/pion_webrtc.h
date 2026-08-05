@@ -227,10 +227,6 @@ extern "C" {
     void freeDataChannelMessage(char* msg);
     void freeMouseChannelMessage(char* msg);
 
-    // Wake functions for blocking queue signaling (Go -> C++)
-    void wakeKeyboardThread();
-    void wakeMouseThread();
-
 #ifdef __cplusplus
 } // end extern "C"
 

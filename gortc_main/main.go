@@ -41,16 +41,12 @@ static inline void callWebRTCStatsCallback(WebRTCStatsCallback f, double p, doub
     }
 }
 
-// Provide no-op wake functions so cgo can resolve C.wakeKeyboardThread / C.wakeMouseThread
-// at Go DLL build time. The C++ host exports real versions; if you later want to
-// forward to them from inside this DLL, replace these with proper imports via LDFLAGS.
-static inline void wakeKeyboardThread(void) { }
-static inline void wakeMouseThread(void) { }
-
 // MMCSS is thread-affine. Each locked Go sender thread owns its own handle.
 static HANDLE SetupGoAudioThreadMMCSS(void) {
     DWORD taskIndex = 0;
-    return AvSetMmThreadCharacteristicsA("Pro Audio", &taskIndex);
+    HANDLE handle = AvSetMmThreadCharacteristicsA("Pro Audio", &taskIndex);
+    if (handle != NULL) AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH);
+    return handle;
 }
 
 static HANDLE SetupGoVideoThreadMMCSS(void) {
@@ -437,31 +433,23 @@ func updateAudioQueueDepth(depth int) {
 	}
 }
 
-// getAverageAudioQueueDepth returns the average queue depth over recent samples
-func getAverageAudioQueueDepth() float64 {
+// checkAudioQueueCongestion determines if bitrate reduction is needed based on queue depth
+func checkAudioQueueCongestion() bool {
 	audioQueueDepthMutex.RLock()
-	defer audioQueueDepthMutex.RUnlock()
-
-	if audioQueueDepthCount == 0 {
-		return 0
-	}
-
-	sum := 0
 	count := audioQueueDepthCount
+	sum := 0
 	for i := 0; i < count; i++ {
 		sum += audioQueueDepthSamples[i]
 	}
-
-	return float64(sum) / float64(count)
-}
-
-// checkAudioQueueCongestion determines if bitrate reduction is needed based on queue depth
-func checkAudioQueueCongestion() bool {
-	avgDepth := getAverageAudioQueueDepth()
+	audioQueueDepthMutex.RUnlock()
+	if count == 0 {
+		return false
+	}
+	avgDepth := float64(sum) / float64(count)
 
 	// If average queue depth is consistently high (>2.5 packets), trigger bitrate adaptation
 	// This indicates the encoder is producing packets faster than WebRTC can send them
-	if audioQueueDepthCount >= len(audioQueueDepthSamples) && avgDepth > 2.5 {
+	if count >= len(audioQueueDepthSamples) && avgDepth > 2.5 {
 		return true
 	}
 
@@ -484,13 +472,7 @@ func flushAudioConnectionBuffer() {
 			// Ensure buffered packets use the negotiated PayloadType and SSRC
 			pkt.Header.PayloadType = audioPayloadType
 			pkt.Header.SSRC = audioSSRC
-			select {
-			case audioSendQueue <- pkt:
-				// Successfully queued for sending
-			default:
-				log.Printf("[Go/Pion] AUDIO FLUSH: Failed to queue buffered packet (seq=%d) - send queue full", pkt.Header.SequenceNumber)
-				putSampleBuf(pkt.Payload)
-			}
+			enqueueLatestAudioPacket(pkt)
 		}
 	}
 }
@@ -498,19 +480,16 @@ func flushAudioConnectionBuffer() {
 // reportAudioQueueHealth provides detailed health metrics for audio queue monitoring
 func reportAudioQueueHealth() {
 	audioQueueDepthMutex.RLock()
-	defer audioQueueDepthMutex.RUnlock()
-
-	if audioQueueDepthCount == 0 {
+	count := audioQueueDepthCount
+	if count == 0 {
+		audioQueueDepthMutex.RUnlock()
 		return // Not enough data yet
 	}
-
-	avgDepth := getAverageAudioQueueDepth()
-	currentDepth := len(audioSendQueue)
 
 	// Calculate statistics
 	var minDepth, maxDepth int = 999, 0
 	sum := 0
-	for i := 0; i < audioQueueDepthCount; i++ {
+	for i := 0; i < count; i++ {
 		depth := audioQueueDepthSamples[i]
 		sum += depth
 		if depth < minDepth {
@@ -520,6 +499,10 @@ func reportAudioQueueHealth() {
 			maxDepth = depth
 		}
 	}
+	audioQueueDepthMutex.RUnlock()
+
+	avgDepth := float64(sum) / float64(count)
+	currentDepth := len(audioSendQueue)
 
 	// Determine health status
 	healthStatus := "GOOD"
@@ -531,7 +514,7 @@ func reportAudioQueueHealth() {
 	}
 
 	log.Printf("[Go/Pion] Audio Queue Health [%s]: current=%d, avg=%.1f, min=%d, max=%d, samples=%d",
-		healthStatus, currentDepth, avgDepth, minDepth, maxDepth, audioQueueDepthCount)
+		healthStatus, currentDepth, avgDepth, minDepth, maxDepth, count)
 
 	// Additional diagnostics for concerning patterns
 	if avgDepth > 2.5 {
@@ -563,7 +546,6 @@ var (
 	pcMutex          sync.RWMutex
 	pcLifecycleMutex sync.Mutex
 	signalingMutex   sync.Mutex
-	audioMutex       sync.Mutex                     // Separate mutex for audio RTP state to reduce contention
 	videoTrack       *webrtc.TrackLocalStaticSample // switched to sample track for pacing
 	audioTrack       *webrtc.TrackLocalStaticRTP
 	trackSSRC        uint32
@@ -576,19 +558,11 @@ var (
 	audioQueueDepthMutex   sync.RWMutex // Protects queue depth statistics
 
 	// Audio buffering during WebRTC connection establishment
-	audioConnectionBuffer []*rtp.Packet      // Buffer audio packets until connection is ready
-	audioBufferMutex      sync.Mutex         // Protects the connection buffer
-	maxAudioBufferSize    int           = 20 // Keep initial audio backlog tiny (~40 ms at 10 ms frames)
+	audioConnectionBuffer []*rtp.Packet     // Buffer audio packets until connection is ready
+	audioBufferMutex      sync.Mutex        // Protects the connection buffer
+	maxAudioBufferSize    int           = 3 // Keep only the latest 30 ms while connecting.
 
-	lastAnswerSDP         string
-	currentSequenceNumber uint16
-	currentTimestamp      uint32
-	currentAudioSeq       uint16
-	currentAudioTS        uint32
-	// RTP timestamp baseline tracking for consistent frame deltas
-	audioRTPBaseline     uint32       // Initial RTP timestamp established from first PTS
-	audioPTSBaseline     int64        // Initial PTS value for reference
-	audioBaselineSet     bool         // Whether baseline has been established
+	lastAnswerSDP        string
 	audioFrameDuration   uint32 = 480 // RTP timestamp increment per frame (10ms at 48kHz)
 	videoFrameCounter    uint64
 	dataChannel          *webrtc.DataChannel
@@ -627,13 +601,12 @@ var (
 	// Granular audio send path: bounded queue and dedicated sender goroutine
 	audioSendQueue chan *rtp.Packet // Bounded channel for RTP packets (size ≤ 3)
 	audioSendStop  chan struct{}    // Stop signal for sender goroutine
+	mediaSendWG    sync.WaitGroup
 
 	// Granular video send path: bounded queue and dedicated sender goroutine
 	videoSendQueue chan queuedVideoSample // Bounded channel for encoded video frames
 	videoSendStop  chan struct{}          // Stop signal for video sender goroutine
 
-	// Buffer completion mechanism to prevent use-after-free
-	audioBufferCompletion chan []byte // Channel to signal buffer completion
 )
 
 type queuedVideoSample struct {
@@ -661,10 +634,30 @@ func (s *AudioRTPState) GetNextSequence() uint16 {
 	return uint16(seq - 1) // Return the value before increment
 }
 
-// GetNextTimestamp atomically increments and returns the next timestamp
-func (s *AudioRTPState) GetNextTimestamp() uint32 {
-	ts := atomic.AddUint32(&s.timestamp, audioFrameDuration)
-	return ts - audioFrameDuration // Return the value before increment
+// TimestampForPTS quantizes the capture clock onto the Opus frame grid. If a
+// frame was discarded before reaching Go, the RTP timestamp still advances,
+// so the receiver does not accumulate A/V drift or play stale audio slowly.
+func (s *AudioRTPState) TimestampForPTS(pts int64) uint32 {
+	if !s.IsBaselineSet() {
+		s.SetBaseline(pts)
+	}
+
+	basePTS := atomic.LoadInt64(&s.ptsBaseline)
+	baseRTP := atomic.LoadUint32(&s.rtpBaseline)
+	frameUs := int64(audioFrameDuration) * 1000000 / 48000
+	if pts <= 0 || pts < basePTS || frameUs <= 0 {
+		ts := atomic.AddUint32(&s.timestamp, audioFrameDuration)
+		return ts - audioFrameDuration
+	}
+
+	elapsedFrames := (pts - basePTS + frameUs/2) / frameUs
+	candidate := baseRTP + uint32(elapsedFrames)*audioFrameDuration
+	next := atomic.LoadUint32(&s.timestamp)
+	if int32(candidate-next) < 0 {
+		candidate = next
+	}
+	atomic.StoreUint32(&s.timestamp, candidate+audioFrameDuration)
+	return candidate
 }
 
 // IsBaselineSet atomically checks if baseline is set
@@ -1021,18 +1014,14 @@ func logBufferSizeDistribution() {
 
 // initAudioSendQueue initializes the bounded audio send queue and starts the sender goroutine
 func initAudioSendQueue() {
-	// Capacity 16: still low-latency, but can absorb transient network/pacer jitter.
-	audioSendQueue = make(chan *rtp.Packet, 16)
+	// Three 10 ms packets absorb brief scheduler jitter without building a
+	// perceptible stale-audio backlog.
+	audioSendQueue = make(chan *rtp.Packet, 3)
 	audioSendStop = make(chan struct{})
 
-	// Create buffer completion channel for safe buffer pool management
-	audioBufferCompletion = make(chan []byte, 16) // Small buffer for completion signals
-
 	// Start the dedicated audio sender goroutine
+	mediaSendWG.Add(1)
 	go audioSenderGoroutine()
-
-	// Start the buffer completion handler goroutine
-	go audioBufferCompletionHandler()
 }
 
 // initVideoSendQueue initializes the bounded video send queue and starts the sender goroutine
@@ -1043,52 +1032,17 @@ func initVideoSendQueue() {
 	videoSendStop = make(chan struct{})
 
 	// Start the dedicated video sender goroutine
+	mediaSendWG.Add(1)
 	go videoSenderGoroutine()
 
-	log.Println("[Go/Pion] Audio send queue initialized with bounded channel (capacity: 16)")
+	log.Println("[Go/Pion] Audio send queue initialized with bounded channel (capacity: 3)")
 	log.Println("[Go/Pion] Video send queue initialized with bounded channel (capacity: 2)")
-}
-
-// audioBufferCompletionHandler safely manages buffer pool returns to prevent use-after-free
-// This goroutine ensures buffers are only returned to the pool after WriteRTP has finished reading them
-func audioBufferCompletionHandler() {
-	log.Println("[Go/Pion] Audio buffer completion handler started")
-
-	completionCount := 0
-	startTime := time.Now()
-
-	for {
-		select {
-		case buffer := <-audioBufferCompletion:
-			// Safe to return buffer to pool now that WriteRTP has finished with it
-			putSampleBuf(buffer)
-			completionCount++
-
-			// Periodic logging (every 1000 completions)
-			if completionCount%1000 == 0 {
-				elapsed := time.Since(startTime)
-				rate := float64(completionCount) / elapsed.Seconds()
-				log.Printf("[Go/Pion] Buffer completion: %d buffers processed (%.1f buffers/sec)",
-					completionCount, rate)
-			}
-
-		case <-time.After(5 * time.Second):
-			// Periodic health check
-			if len(audioBufferCompletion) > 8 { // More than half capacity
-				log.Printf("[Go/Pion] Buffer completion queue getting full: %d/%d",
-					len(audioBufferCompletion), cap(audioBufferCompletion))
-			}
-
-		case <-audioSendStop:
-			log.Printf("[Go/Pion] Audio buffer completion handler stopped after processing %d buffers", completionCount)
-			return
-		}
-	}
 }
 
 // audioSenderGoroutine runs in a separate goroutine to send RTP packets without holding locks
 // This prevents head-of-line blocking and keeps the send path lock-granular
 func audioSenderGoroutine() {
+	defer mediaSendWG.Done()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	mmcssHandle := C.SetupGoAudioThreadMMCSS()
@@ -1100,7 +1054,10 @@ func audioSenderGoroutine() {
 		case pkt := <-audioSendQueue:
 			// Send RTP packet without holding any locks
 			// This is the potentially blocking operation, but it doesn't block other operations
-			if audioTrack != nil {
+			pcMutex.RLock()
+			track := audioTrack
+			pcMutex.RUnlock()
+			if track != nil {
 				// Debug: Check payload data occasionally (5-second intervals)
 				if pkt.Header.SequenceNumber%2500 == 0 {
 					hasData := false
@@ -1114,7 +1071,7 @@ func audioSenderGoroutine() {
 						pkt.Header.SequenceNumber, len(pkt.Payload), hasData)
 				}
 
-				if err := audioTrack.WriteRTP(pkt); err != nil {
+				if err := track.WriteRTP(pkt); err != nil {
 					log.Printf("[Go/Pion] AUDIO ERROR: Failed to write RTP packet to audio track: %v", err)
 					// Return buffer immediately on error
 					putSampleBuf(pkt.Payload)
@@ -1143,6 +1100,7 @@ func audioSenderGoroutine() {
 // videoSenderGoroutine runs in a separate goroutine to send video samples without holding locks
 // This prevents head-of-line blocking and keeps the video send path lock-granular
 func videoSenderGoroutine() {
+	defer mediaSendWG.Done()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	mmcssHandle := C.SetupGoVideoThreadMMCSS()
@@ -1229,35 +1187,6 @@ func testBufferPool() {
 	log.Println("[Go/Pion] Buffer pool test completed")
 }
 
-// testBufferCompletionMechanism tests the use-after-free prevention system
-// This can be called during development to verify buffer safety
-func testBufferCompletionMechanism() {
-	log.Println("[Go/Pion] Testing buffer completion mechanism...")
-
-	if audioBufferCompletion == nil {
-		log.Println("[Go/Pion] Buffer completion channel not initialized")
-		return
-	}
-
-	// Test buffer completion signaling
-	testBuffer := getSampleBuf(512)
-	// testSequence := 0
-
-	// Simulate sending a packet and signaling completion
-	select {
-	case audioBufferCompletion <- testBuffer:
-		log.Println("[Go/Pion] Buffer completion test: signal sent successfully")
-	case <-time.After(100 * time.Millisecond):
-		log.Println("[Go/Pion] Buffer completion test: timeout (this may indicate issues)")
-		putSampleBuf(testBuffer) // Fallback
-	}
-
-	// Wait a moment for completion handler to process
-	time.Sleep(50 * time.Millisecond)
-
-	log.Println("[Go/Pion] Buffer completion mechanism test completed")
-}
-
 func init() {
 	rand.Seed(time.Now().UnixNano())
 	loadDotEnvIfPresent()
@@ -1311,6 +1240,9 @@ var audioPacketCounter int64
 
 //export sendAudioPacket
 func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
+	if data == nil || size <= 0 {
+		return -2
+	}
 	// Debug: Check incoming audio data (5-second intervals)
 	counter := atomic.AddInt64(&audioPacketCounter, 1)
 	if counter%2500 == 0 { // 2500 frames at 500fps = 5 seconds
@@ -1360,7 +1292,7 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 			audioRTPState.SetBaseline(int64(pts))
 		}
 		packetSequence := audioRTPState.GetNextSequence()
-		packetRTPTimestamp := audioRTPState.GetNextTimestamp()
+		packetRTPTimestamp := audioRTPState.TimestampForPTS(int64(pts))
 
 		pkt := &rtp.Packet{
 			Header: rtp.Header{
@@ -1369,7 +1301,7 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 				SequenceNumber: packetSequence,
 				Timestamp:      packetRTPTimestamp,
 				SSRC:           audioSSRC,
-				Marker:         true,
+				Marker:         packetSequence == 0,
 			},
 			Payload: payload,
 		}
@@ -1395,6 +1327,7 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	// track := audioTrack
 	payloadType := audioPayloadType
 	ssrc := audioSSRC
+	latencyDC := latencyChannel
 	pcMutex.RUnlock() // Release global lock immediately
 
 	// Reuse buffer from pool to avoid per-call allocation
@@ -1414,43 +1347,38 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 
 	// Get next sequence and timestamp atomically (lock-free)
 	packetSequence := audioRTPState.GetNextSequence()
-	packetRTPTimestamp := audioRTPState.GetNextTimestamp()
+	packetRTPTimestamp := audioRTPState.TimestampForPTS(int64(pts))
 
 	// Handle RTP timestamp wraparound (uint32 wraps at ~13.27 hours at 48kHz)
 	if packetRTPTimestamp < audioRTPState.GetBaseline() {
 		// This is a rare event - log it and handle gracefully
 		log.Printf("[Go/Pion] RTP timestamp wraparound detected: baseline=%d, timestamp=%d",
 			audioRTPState.GetBaseline(), packetRTPTimestamp)
-		// Note: The AudioRTPState handles wraparound internally in GetNextTimestamp
+		// uint32 RTP timestamps wrap naturally.
 	}
 
-	// Check if we should insert an audio ping marker (every 100 packets)
-	isAudioPing := (uint32(packetSequence) % 100) == 0
-	var audioPingID uint64
-
-	if isAudioPing {
+	// Check if we should insert an audio ping marker (every 100 packets).
+	if uint32(packetSequence)%100 == 0 && latencyDC != nil &&
+		latencyDC.ReadyState() == webrtc.DataChannelStateOpen {
 		audioPingMutex.Lock()
 		audioPingCounter++
-		audioPingID = audioPingCounter
-		audioPingTimestamps[audioPingID] = time.Now().UnixNano()
+		audioPingID := audioPingCounter
+		hostSendTime := time.Now().UnixNano()
+		audioPingTimestamps[audioPingID] = hostSendTime
 		audioPingMutex.Unlock()
 
-		// Send audio ping via data channel
-		if latencyChannel != nil && latencyChannel.ReadyState() == webrtc.DataChannelStateOpen {
-			hostSendTime := time.Now().UnixNano()
-			audioPingMutex.Lock()
-			audioPingTimestamps[audioPingID] = hostSendTime
-			audioPingMutex.Unlock()
-
-			pingMessage := map[string]interface{}{
-				"type":           "audio_ping",
-				"ping_id":        audioPingID,
-				"host_send_time": fmt.Sprintf("%d", hostSendTime),
-				"sequence":       packetSequence,
-				"timestamp":      packetRTPTimestamp,
-			}
-			if pingJSON, err := json.Marshal(pingMessage); err == nil {
-				_ = latencyChannel.SendText(string(pingJSON))
+		pingMessage := map[string]interface{}{
+			"type":           "audio_ping",
+			"ping_id":        audioPingID,
+			"host_send_time": fmt.Sprintf("%d", hostSendTime),
+			"sequence":       packetSequence,
+			"timestamp":      packetRTPTimestamp,
+		}
+		if pingJSON, err := json.Marshal(pingMessage); err == nil {
+			if err = latencyDC.SendText(string(pingJSON)); err != nil {
+				audioPingMutex.Lock()
+				delete(audioPingTimestamps, audioPingID)
+				audioPingMutex.Unlock()
 			}
 		}
 	}
@@ -1465,7 +1393,7 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 			SequenceNumber: packetSequence,
 			Timestamp:      packetRTPTimestamp, // RTP timestamp for this specific packet
 			SSRC:           ssrc,
-			Marker:         true, // Mark each audio frame boundary for better jitter buffer behavior
+			Marker:         packetSequence == 0, // Continuous Opus stream; marker only starts the talkspurt.
 		},
 		Payload: payload,
 	}
@@ -1478,27 +1406,43 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	currentQueueDepth := len(audioSendQueue)
 	updateAudioQueueDepth(currentQueueDepth)
 
-	select {
-	case audioSendQueue <- pkt:
+	if enqueueLatestAudioPacket(pkt) {
 		// Packet successfully queued for sending
-		// RTP timestamp is maintained as: currentAudioTS = last_queued_packet_timestamp
-		// Next packet will use: currentAudioTS + audioFrameDuration
-		// This ensures stable inter-packet intervals and smooth sender timing
-
-		// Log successful queuing occasionally (every 200 packets)
-		if packetSequence%200 == 0 {
-			log.Printf("[Go/Pion] Audio RTP queued successfully: seq=%d, ts=%d", packetSequence, packetRTPTimestamp)
-		}
-
 		// Note: Buffer will be returned to pool by sender goroutine after WriteRTP
 		return 0
+	}
 
+	return -1
+}
+
+// enqueueLatestAudioPacket keeps latency bounded by evicting stale queued audio.
+// RTP sequence/timestamp gaps correctly communicate the discarded packet as loss.
+func enqueueLatestAudioPacket(pkt *rtp.Packet) bool {
+	queue := audioSendQueue
+	if queue == nil {
+		putSampleBuf(pkt.Payload)
+		return false
+	}
+	select {
+	case queue <- pkt:
+		return true
 	default:
-		// Queue is full - implement backpressure by dropping the NEWEST packet
-		// This avoids reordering artifacts from dropping older packets already queued
-		log.Printf("[Go/Pion] Audio backpressure: dropping newest packet (seq=%d), queue depth=%d", packetSequence, len(audioSendQueue))
-		putSampleBuf(payload)
-		return -1
+	}
+
+	select {
+	case stale := <-queue:
+		if stale != nil {
+			putSampleBuf(stale.Payload)
+		}
+	default:
+	}
+
+	select {
+	case queue <- pkt:
+		return true
+	default:
+		putSampleBuf(pkt.Payload)
+		return false
 	}
 }
 
@@ -1587,6 +1531,25 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong, isK
 func enqueueMessage(msg string) {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
+	const maxKeyboardMessages = 128
+	if len(messageQueue) >= maxKeyboardMessages {
+		var event struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal([]byte(msg), &event)
+		if event.Type != "keyup" && event.Type != "input_reset" {
+			return
+		}
+
+		// A saturated reliable/ordered key channel means releases may already be
+		// trapped behind stale presses. Reset the pending stream and force the host
+		// to release every tracked key before applying the newest release.
+		for i := range messageQueue {
+			messageQueue[i] = ""
+		}
+		messageQueue = messageQueue[:0]
+		messageQueue = append(messageQueue, `{"type":"input_reset","reason":"keyboard_queue_overflow"}`)
+	}
 	messageQueue = append(messageQueue, msg)
 	msgEnqueueCount++
 	if time.Since(lastEnqueueLog) >= time.Second {
@@ -1595,13 +1558,16 @@ func enqueueMessage(msg string) {
 		mouseEnqueueCount = 0
 		lastEnqueueLog = time.Now()
 	}
-	// Wake the keyboard thread after enqueueing
-	C.wakeKeyboardThread()
 }
 
 func enqueueMouseEvent(msg string) {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
+	const maxMouseMessages = 256
+	if len(mouseQueue) >= maxMouseMessages {
+		copy(mouseQueue, mouseQueue[len(mouseQueue)-maxMouseMessages+1:])
+		mouseQueue = mouseQueue[:maxMouseMessages-1]
+	}
 	mouseQueue = append(mouseQueue, msg)
 	mouseEnqueueCount++
 	if time.Since(lastEnqueueLog) >= time.Second {
@@ -1610,8 +1576,6 @@ func enqueueMouseEvent(msg string) {
 		mouseEnqueueCount = 0
 		lastEnqueueLog = time.Now()
 	}
-	// Wake the mouse thread after enqueueing
-	C.wakeMouseThread()
 }
 
 //export getDataChannelMessage
@@ -1622,12 +1586,9 @@ func getDataChannelMessage() *C.char {
 		return nil
 	}
 	msg := messageQueue[0]
-	messageQueue = messageQueue[1:]
-	log.Printf(
-		"[Go/Pion] <-- getDataChannelMessage: Dequeued: '%s'. Queue size AFTER: %d",
-		msg,
-		len(messageQueue),
-	)
+	copy(messageQueue, messageQueue[1:])
+	messageQueue[len(messageQueue)-1] = ""
+	messageQueue = messageQueue[:len(messageQueue)-1]
 	return C.CString(msg)
 }
 
@@ -1645,7 +1606,9 @@ func getMouseChannelMessage() *C.char {
 		return nil
 	}
 	msg := mouseQueue[0]
-	mouseQueue = mouseQueue[1:]
+	copy(mouseQueue, mouseQueue[1:])
+	mouseQueue[len(mouseQueue)-1] = ""
+	mouseQueue = mouseQueue[:len(mouseQueue)-1]
 	// log.Printf(
 	// 	"[Go/Pion] <-- getMouseChannelMessage: Dequeued: '%s'. Queue size AFTER: %d",
 	// 	msg,
@@ -1905,6 +1868,7 @@ func createPeerConnectionGo() C.int {
 					dataChannel = nil
 				}
 				pcMutex.Unlock()
+				enqueueMessage(`{"type":"input_reset","reason":"keyboard_channel_closed"}`)
 			})
 
 			dc.OnError(func(err error) {
@@ -1914,6 +1878,7 @@ func createPeerConnectionGo() C.int {
 					idStr,
 					err,
 				)
+				enqueueMessage(`{"type":"input_reset","reason":"keyboard_channel_error"}`)
 			})
 			log.Printf(
 				"[Go/Pion] OnDataChannel: All handlers (OnOpen, OnMessage, OnClose, OnError) attached for DC '%s'.\n",
@@ -2327,10 +2292,10 @@ func createPeerConnectionGo() C.int {
 	// Removed: previous code queried RTPSender params, which is unnecessary for TrackLocalStaticSample pacing.
 
 	// Create and add Opus audio track with fmtp aligned to host encoder
-	opusFmtp := "minptime=20;stereo=1;useinbandfec=1" // default 20ms, stereo, FEC enabled
+	opusFmtp := "minptime=10;stereo=1;useinbandfec=1" // host default: 10 ms stereo with FEC
 	if val := os.Getenv("AUDIO_PTIME_MS"); val != "" {
 		if n, err := strconv.Atoi(val); err == nil && n > 0 {
-			opusFmtp = strings.ReplaceAll(opusFmtp, "minptime=20", fmt.Sprintf("minptime=%d", n))
+			opusFmtp = strings.ReplaceAll(opusFmtp, "minptime=10", fmt.Sprintf("minptime=%d", n))
 		}
 	}
 	if s := os.Getenv("AUDIO_STEREO"); s == "0" || strings.EqualFold(s, "false") {
@@ -2342,7 +2307,7 @@ func createPeerConnectionGo() C.int {
 
 	// Derive RTP timestamp increment (48 kHz clock) from minptime in fmtp
 	// audioFrameDuration must equal samples per packet so jitter buffer sees consistent timing
-	ptimeMs := 20
+	ptimeMs := 10
 	if idx := strings.Index(opusFmtp, "minptime="); idx >= 0 {
 		start := idx + len("minptime=")
 		end := start
@@ -2949,17 +2914,18 @@ func initGo() C.int {
 func closeGo() {
 	log.Println("[Go/Pion] closeGo: Closing Go WebRTC module.")
 
-	// Stop the audio sender goroutine and buffer completion handler
+	// Stop the media sender goroutines.
 	if audioSendStop != nil {
 		close(audioSendStop)
-		audioSendStop = nil
 		log.Println("[Go/Pion] Audio sender goroutine stop signal sent")
 	}
 	if videoSendStop != nil {
 		close(videoSendStop)
-		videoSendStop = nil
 		log.Println("[Go/Pion] Video sender goroutine stop signal sent")
 	}
+	mediaSendWG.Wait()
+	audioSendStop = nil
+	videoSendStop = nil
 	if videoSendQueue != nil {
 		drained := 0
 		for len(videoSendQueue) > 0 {
@@ -2993,25 +2959,6 @@ func closeGo() {
 		log.Printf("[Go/Pion] Drained %d packets from audio send queue", drained)
 	}
 
-	// Drain any pending buffer completion signals
-	if audioBufferCompletion != nil {
-		timeout := time.After(500 * time.Millisecond)
-		completed := 0
-		for len(audioBufferCompletion) > 0 {
-			select {
-			case buffer := <-audioBufferCompletion:
-				putSampleBuf(buffer)
-				completed++
-			case <-timeout:
-				log.Printf("[Go/Pion] Timeout draining buffer completion queue, %d buffers remaining",
-					len(audioBufferCompletion))
-				break
-			}
-		}
-		audioBufferCompletion = nil
-		log.Printf("[Go/Pion] Processed %d buffer completion signals", completed)
-	}
-
 	// Clear any remaining buffered audio packets
 	audioBufferMutex.Lock()
 	for _, pkt := range audioConnectionBuffer {
@@ -3040,38 +2987,6 @@ func SetPLICallback(callback C.OnPLICallback) {
 func SetWebRTCStatsCallback(callback C.WebRTCStatsCallback) {
 	webrtcStatsCallback = callback
 	log.Printf("[Go/Pion] Enhanced WebRTC stats callback registered")
-}
-
-// validateAudioTimestampConsistency checks RTP timestamp progression for debugging
-// This function can be called periodically to verify timestamp consistency
-func validateAudioTimestampConsistency() {
-	if !audioRTPState.IsBaselineSet() {
-		log.Println("[Go/Pion] Timestamp validation: No baseline established yet")
-		return
-	}
-
-	// Get current RTP state atomically (no locks needed!)
-	currentSeq := atomic.LoadUint32(&audioRTPState.sequence)
-	currentTS := atomic.LoadUint32(&audioRTPState.timestamp)
-	baseline := audioRTPState.GetBaseline()
-
-	// Calculate expected RTP timestamp based on sequence number
-	expectedRTP := baseline + (currentSeq * audioFrameDuration)
-
-	// Calculate expected PTS progression
-	expectedPTSDelta := int64(currentSeq) * (int64(audioFrameDuration) * 1000000 / 48000) // Convert to microseconds
-
-	// Check for discrepancies
-	rtpDiff := int64(currentTS) - int64(expectedRTP)
-	ptsDiff := (int64(currentSeq) * 10000) - expectedPTSDelta // 10ms per frame in microseconds
-
-	if rtpDiff != 0 || ptsDiff != 0 {
-		log.Printf("[Go/Pion] Timestamp validation WARNING: seq=%d, RTP diff=%d, PTS diff=%d us",
-			currentSeq, rtpDiff, ptsDiff)
-	} else {
-		log.Printf("[Go/Pion] Timestamp validation OK: seq=%d, RTP=%d, baseline=%d",
-			currentSeq, currentTS, baseline)
-	}
 }
 
 func main() {

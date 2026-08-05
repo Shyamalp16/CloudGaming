@@ -41,9 +41,23 @@ Start components in this order:
 
 ```bash
 cd Client/html-server
-npx http-server . -p 8080
+npx http-server . -p 8080 -c-1
 # open http://localhost:8080
 ```
+
+The host and browser share `Client/html-server/network-config.json`. Change only
+its `mode` field when switching environments:
+
+| Mode | Browser URL | Signaling and matchmaker |
+|---|---|---|
+| `local` | `http://localhost:8080` | Loopback on the same PC |
+| `lan` | `http://HOST_PC_IP:8080` | Automatically uses `HOST_PC_IP` from the page URL |
+| `production` | Your deployed client URL | Uses the public endpoints in `network-config.json` |
+
+For a two-laptop LAN test, set `"mode": "lan"`, run the client server on the
+hosting laptop, and open `http://<hosting-laptop-ip>:8080` on the other laptop.
+No source URLs need to be changed. Windows Firewall must allow TCP ports 8080,
+3000, and 3002 on private networks.
 
 ### 2. Redis
 
@@ -81,14 +95,19 @@ x64\Release\DisplayCaptureProject.exe
 
 ---
 
-## config.json Reference
+## Configuration Reference
 
-### `client`
+### `Client/html-server/network-config.json`
 
 | Key | Default | Description |
 |---|---|---|
-| `serverUrlBase` | `ws://localhost:3002` | Signaling server WebSocket URL |
-| `matchmakerUrl` | `http://localhost:3000` | Matchmaker HTTP URL |
+| `mode` | `local` | One switch: `local`, `lan`, or `production` |
+| `ports.signaling` | `3002` | Local/LAN signaling port |
+| `ports.matchmaker` | `3000` | Local/LAN matchmaker port |
+| `production.signalingUrl` | — | Public `wss://` signaling endpoint |
+| `production.matchmakerUrl` | — | Public `https://` matchmaker endpoint |
+
+### `config.json`
 
 ### `host.video`
 
@@ -139,6 +158,5 @@ x64\Release\DisplayCaptureProject.exe
 
 | Key | Default | Description |
 |---|---|---|
-| `url` | `http://localhost:3000` | Matchmaker endpoint |
 | `hostSecret` | `HELLO-MFS` | Shared secret for host registration |
 | `heartbeatIntervalMs` | `25000` | Host keepalive interval |

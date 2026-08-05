@@ -268,8 +268,7 @@ static void startInputPollers() {
 }
 
 static void stopInputPollers() {
-    bool expected = true;
-    if (!g_input_poll_running.compare_exchange_strong(expected, false)) return;
+    g_input_poll_running.store(false);
 
     // Stop the new input integration layer if it was started
     if (InputIntegrationLayer::isRunning()) {
@@ -282,6 +281,9 @@ static void stopInputPollers() {
         LegacyWebSocketCompat::stopLegacyPolling();
         std::cout << "[WebSocket] Legacy WebSocket polling stopped" << std::endl;
     }
+
+    stopKeyInputHandler();
+    stopMouseInputHandler();
 
 }
 

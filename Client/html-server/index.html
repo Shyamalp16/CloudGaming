@@ -570,8 +570,14 @@
 
   <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
   <script>
-    document.getElementById('joinButton').addEventListener('click', () => {
-        const roomId = document.getElementById('roomIdInput').value;
+    document.getElementById('joinButton').addEventListener('click', async () => {
+      try {
+        await networkConfigReady;
+      } catch (error) {
+        alert(`Network configuration failed: ${error.message}`);
+        return;
+      }
+      const roomId = document.getElementById('roomIdInput').value;
         if (!roomId) {
             alert('Please enter a Room ID.');
             return;
@@ -610,6 +616,7 @@
         matchStatus.className = 'match-status';
         
         try {
+            await networkConfigReady;
             const response = await fetch(`${matchmakerUrl}/api/match/find`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -647,8 +654,10 @@
                     log('Matchmaker returned no ICE servers; falling back to default STUN', 'warn');
                 }
 
-                // Use the signaling URL from matchmaker response
-                connectToSignalingServer(data.roomId, data.signalingUrl);
+                // The shared network profile is authoritative. In LAN mode the
+                // matchmaker runs on the host machine but cannot infer which LAN
+                // address the browser used to reach it.
+                connectToSignalingServer(data.roomId, serverUrlBase);
             } else {
                 matchStatus.textContent = data.message || 'No hosts available. Try again later.';
                 matchStatus.className = 'match-status error';
@@ -664,19 +673,60 @@
         }
     });
 
-    // ─── Server URLs ────────────────────────────────────────────────────────────
-    // Swap between local dev and production automatically based on hostname.
-    // Replace the two REPLACE_ME strings with your actual Railway service URLs
-    // before deploying to Vercel.
-    const _isProd = location.hostname !== 'localhost' && location.hostname !== '127.0.0.1';
-    const matchmakerUrl  = _isProd
-        ? "https://matchmaker-production-5b36.up.railway.app"  
-        : "http://localhost:3000";
-    // signalingUrl is normally returned by the matchmaker response (data.signalingUrl).
-    // serverUrlBase is only used as a fallback when connecting without matchmaker.
-    const serverUrlBase  = _isProd
-        ? "wss://signaling-server-production-acd4.up.railway.app"      // ← your Signaling Railway URL
-        : "ws://localhost:3002";
+    // ─── Shared network profile ─────────────────────────────────────────────────
+    // Change only `mode` in network-config.json:
+    //   local      browser and host are this machine
+    //   lan        browser uses the hostname/IP from this page's URL
+    //   production use the public HTTPS/WSS endpoints in that file
+    let networkMode = '';
+    let matchmakerUrl = '';
+    let serverUrlBase = '';
+
+    function urlHost(hostname) {
+      return hostname.includes(':') ? `[${hostname}]` : hostname;
+    }
+
+    const networkConfigReady = fetch('./network-config.json', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`network-config.json returned HTTP ${response.status}`);
+        }
+        return response.json();
+      })
+      .then(config => {
+        networkMode = config.mode;
+        if (networkMode === 'local' || networkMode === 'lan') {
+          const signalingPort = Number(config.ports?.signaling ?? 3002);
+          const matchmakerPort = Number(config.ports?.matchmaker ?? 3000);
+          if (!Number.isInteger(signalingPort) || signalingPort < 1 || signalingPort > 65535 ||
+              !Number.isInteger(matchmakerPort) || matchmakerPort < 1 || matchmakerPort > 65535) {
+            throw new Error('Local service ports must be integers between 1 and 65535');
+          }
+          const endpointHost = networkMode === 'local' ? '127.0.0.1' : location.hostname;
+          if (!endpointHost) {
+            throw new Error('LAN mode requires serving this page over HTTP, not opening it as a file');
+          }
+          const host = urlHost(endpointHost);
+          matchmakerUrl = `http://${host}:${matchmakerPort}`;
+          serverUrlBase = `ws://${host}:${signalingPort}`;
+        } else if (networkMode === 'production') {
+          matchmakerUrl = config.production?.matchmakerUrl ?? '';
+          serverUrlBase = config.production?.signalingUrl ?? '';
+          if (!matchmakerUrl.startsWith('https://') || !serverUrlBase.startsWith('wss://')) {
+            throw new Error('Production endpoints must use https:// and wss://');
+          }
+        } else {
+          throw new Error(`Invalid mode '${networkMode}' (expected local, lan, or production)`);
+        }
+
+        log(`Network mode: ${networkMode}; signaling: ${serverUrlBase}; matchmaker: ${matchmakerUrl}`);
+      })
+      .catch(error => {
+        console.error('Failed to load network configuration:', error);
+        document.getElementById('joinButton').disabled = true;
+        document.getElementById('findMatchButton').disabled = true;
+        throw error;
+      });
     // ────────────────────────────────────────────────────────────────────────────
     let ws;
     let peerConnection;
@@ -712,6 +762,9 @@
     let currentIceServers = defaultIceServers;
     
     const keyState = new Set();
+    const pendingKeyEvents = new Map();
+    const KEY_CHANNEL_HIGH_WATER = 16384;
+    let keySequenceId = 0;
     const mouseButtonState = new Set();
     const mousePosition = {x: 0, y: 0};
 
@@ -1359,7 +1412,14 @@
 
       dataChannel.onopen = () => {
         log(`Data Channel Opened: "${dataChannel.label}", ReadyState: ${dataChannel.readyState}`);
+        dataChannel.bufferedAmountLowThreshold = 4096;
+        // Re-establish keys that are physically still held after a reconnect.
+        for (const code of keyState) {
+          pendingKeyEvents.set(code, { key: code, code, type: 'keydown', client_send_time: Date.now() });
+        }
+        flushPendingKeyEvents();
       };
+      dataChannel.onbufferedamountlow = flushPendingKeyEvents;
       dataChannel.onmessage = (event) => {
         log(`Received Message on Data Channel "${dataChannel.label}": ${event.data}`);
       };
@@ -1471,12 +1531,45 @@
     }
 
     function sendKeyPress(keyData) {
-      if (dataChannel && dataChannel.readyState === 'open' && dataChannel.bufferedAmount < 65536) {
-        const message = JSON.stringify(keyData);
-        dataChannel.send(message);
-      } else {
-        console.warn('Data channel not open or buffer full, cannot send key event: ' + JSON.stringify(keyData));
+      if (!keyData.code) return;
+      if (!dataChannel || dataChannel.readyState !== 'open' ||
+          dataChannel.bufferedAmount >= KEY_CHANNEL_HIGH_WATER || pendingKeyEvents.size > 0) {
+        // Coalesce by physical key. The latest state is all that matters, and a
+        // pending key-up can never be lost behind a flood of stale key-downs.
+        pendingKeyEvents.set(keyData.code, keyData);
+        flushPendingKeyEvents();
+        return;
       }
+
+      transmitKeyEvent(keyData);
+    }
+
+    function transmitKeyEvent(keyData) {
+      if (!dataChannel || dataChannel.readyState !== 'open') return false;
+      try {
+        dataChannel.send(JSON.stringify({ ...keyData, sequenceId: ++keySequenceId }));
+        return true;
+      } catch (error) {
+        pendingKeyEvents.set(keyData.code, keyData);
+        return false;
+      }
+    }
+
+    function flushPendingKeyEvents() {
+      if (!dataChannel || dataChannel.readyState !== 'open') return;
+      for (const [code, keyData] of pendingKeyEvents) {
+        if (dataChannel.bufferedAmount >= KEY_CHANNEL_HIGH_WATER) break;
+        pendingKeyEvents.delete(code);
+        if (!transmitKeyEvent(keyData)) break;
+      }
+    }
+
+    function releaseAllPressedKeys(reason) {
+      const now = Date.now();
+      for (const code of keyState) {
+        sendKeyPress({ key: code, code, type: 'keyup', client_send_time: now, reason });
+      }
+      keyState.clear();
     }
 
     function sendMouseEvent(mouseData) {
@@ -1621,6 +1714,11 @@
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', () => releaseAllPressedKeys('window_blur'));
+    window.addEventListener('pagehide', () => releaseAllPressedKeys('page_hide'));
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) releaseAllPressedKeys('document_hidden');
+    });
 
     const inputOverlay = document.getElementById('input-overlay');
     inputOverlay.addEventListener('mousemove', handleMouseMove);

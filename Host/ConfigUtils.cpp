@@ -7,9 +7,41 @@
 #include "AdaptiveQualityControl.h"
 
 #include <fstream>
+#include <filesystem>
+#include <vector>
 #include <Windows.h>
 
 namespace ConfigUtils {
+
+namespace {
+bool openNetworkConfig(std::ifstream& stream, std::filesystem::path& selectedPath)
+{
+    const std::filesystem::path relativePath =
+        std::filesystem::path("Client") / "html-server" / "network-config.json";
+
+    std::vector<std::filesystem::path> candidates = {
+        relativePath,
+        "network-config.json"
+    };
+
+    char exePath[MAX_PATH]{};
+    if (GetModuleFileNameA(nullptr, exePath, MAX_PATH)) {
+        const auto exeDir = std::filesystem::path(exePath).parent_path();
+        candidates.push_back(exeDir / "network-config.json");
+        candidates.push_back(exeDir / ".." / ".." / relativePath);
+    }
+
+    for (const auto& candidate : candidates) {
+        stream.open(candidate);
+        if (stream.is_open()) {
+            selectedPath = std::filesystem::absolute(candidate).lexically_normal();
+            return true;
+        }
+        stream.clear();
+    }
+    return false;
+}
+}
 
 bool LoadConfig(nlohmann::json& outConfig)
 {
@@ -171,6 +203,64 @@ void ApplyCaptureSettings(const nlohmann::json& config, int configuredFps)
     if (configuredFps > 0) {
         long long interval = 10000000LL / configuredFps;
         SetMinUpdateInterval100ns(interval);
+    }
+}
+
+bool LoadNetworkEndpoints(NetworkEndpoints& outEndpoints)
+{
+    try {
+        std::ifstream configFile;
+        std::filesystem::path configPath;
+        if (!openNetworkConfig(configFile, configPath)) {
+            std::cerr << "[network] Cannot find Client/html-server/network-config.json" << std::endl;
+            return false;
+        }
+
+        nlohmann::json networkConfig;
+        configFile >> networkConfig;
+
+        if (!networkConfig.contains("mode") || !networkConfig["mode"].is_string()) {
+            std::cerr << "[network] network-config.json requires a string 'mode'" << std::endl;
+            return false;
+        }
+
+        outEndpoints.mode = networkConfig["mode"].get<std::string>();
+        if (outEndpoints.mode == "local" || outEndpoints.mode == "lan") {
+            const auto ports = networkConfig.value("ports", nlohmann::json::object());
+            const int signalingPort = ports.value("signaling", 3002);
+            const int matchmakerPort = ports.value("matchmaker", 3000);
+            if (signalingPort < 1 || signalingPort > 65535 ||
+                matchmakerPort < 1 || matchmakerPort > 65535) {
+                std::cerr << "[network] Local service ports must be between 1 and 65535" << std::endl;
+                return false;
+            }
+            outEndpoints.signalingUrl = "ws://127.0.0.1:" + std::to_string(signalingPort);
+            outEndpoints.matchmakerUrl = "http://127.0.0.1:" + std::to_string(matchmakerPort);
+        } else if (outEndpoints.mode == "production") {
+            if (!networkConfig.contains("production") || !networkConfig["production"].is_object()) {
+                std::cerr << "[network] Production mode requires a 'production' object" << std::endl;
+                return false;
+            }
+            const auto& production = networkConfig["production"];
+            outEndpoints.signalingUrl = production.value("signalingUrl", std::string{});
+            outEndpoints.matchmakerUrl = production.value("matchmakerUrl", std::string{});
+            if (outEndpoints.signalingUrl.rfind("wss://", 0) != 0 ||
+                outEndpoints.matchmakerUrl.rfind("https://", 0) != 0) {
+                std::cerr << "[network] Production endpoints must use wss:// and https://" << std::endl;
+                return false;
+            }
+        } else {
+            std::cerr << "[network] Invalid mode '" << outEndpoints.mode
+                      << "' (expected local, lan, or production)" << std::endl;
+            return false;
+        }
+
+        std::cout << "[network] Loaded " << configPath.string()
+                  << " (mode=" << outEndpoints.mode << ")" << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "[network] Failed to load network configuration: " << e.what() << std::endl;
+        return false;
     }
 }
 

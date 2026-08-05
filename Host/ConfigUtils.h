@@ -4,8 +4,19 @@
 #include <nlohmann/json.hpp>
 
 namespace ConfigUtils {
+    struct NetworkEndpoints {
+        std::string mode;
+        std::string signalingUrl;
+        std::string matchmakerUrl;
+    };
+
     // Loads JSON from config.json into provided object; returns false on error
     bool LoadConfig(nlohmann::json& outConfig);
+
+    // Loads the shared Client/html-server/network-config.json. The host always
+    // reaches local/LAN test services over loopback; the browser derives the
+    // server machine address from the page URL.
+    bool LoadNetworkEndpoints(NetworkEndpoints& outEndpoints);
 
     // Extract target process name from config (host.targetProcessName)
     bool GetTargetProcessName(const nlohmann::json& config, std::string& outName);

@@ -182,17 +182,19 @@ void Layer::pionMessageLoop() {
             uint64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
 
-            // Keyboard/general input channel
-            std::string kbMsg = WebRTCWrapper::getDataChannelMessageString();
-            if (!kbMsg.empty()) {
+            // Drain the keyboard queue completely before sleeping so bursts do
+            // not accumulate one millisecond of latency per event.
+            for (;;) {
+                std::string kbMsg = WebRTCWrapper::getDataChannelMessageString();
+                if (kbMsg.empty()) break;
                 InputMessage message("pion_data", std::move(kbMsg), 0, timestamp);
                 enqueueMessage(std::move(message));
                 receivedCount++;
             }
 
-            // Mouse channel
-            auto mouseMsg = WebRTCWrapper::getMouseChannelMessageSafe();
-            if (mouseMsg) {
+            for (;;) {
+                auto mouseMsg = WebRTCWrapper::getMouseChannelMessageSafe();
+                if (!mouseMsg) break;
                 InputMessage message("pion_data", mouseMsg.toString(), 0, timestamp);
                 enqueueMessage(std::move(message));
                 receivedCount++;
@@ -258,6 +260,7 @@ void Layer::processingLoop() {
                 // Fast-path message processing with minimal validation
                 if (message.type.empty()) {
                     // Skip invalid messages without full validation
+                    lock.lock();
                     continue;
                 }
 
@@ -290,13 +293,26 @@ void Layer::processingLoop() {
 void Layer::enqueueMessage(InputMessage&& message) {
     std::lock_guard<std::mutex> lock(queueMutex);
 
-    // Check queue size limit
+    // Check queue size limit. Never silently lose a key-up: reset pending input
+    // state first, then deliver the latest release.
     if (messageQueue.size() >= config.maxPendingMessages) {
-        std::lock_guard<std::mutex> statsLock(statsMutex);
-        stats.messagesDropped++;
-        LOG_WARNING(ErrorUtils::ErrorCategory::INPUT,
-                   "Message queue full, dropping message. Queue size: " + std::to_string(messageQueue.size()));
-        return;
+        const bool isRelease = message.data.find("\"type\":\"keyup\"") != std::string::npos ||
+                               message.data.find("\"type\":\"input_reset\"") != std::string::npos;
+        if (!isRelease) {
+            std::lock_guard<std::mutex> statsLock(statsMutex);
+            stats.messagesDropped++;
+            return;
+        }
+
+        std::queue<InputMessage> empty;
+        messageQueue.swap(empty);
+        const uint64_t timestamp = message.timestamp;
+        messageQueue.emplace("pion_data",
+            "{\"type\":\"input_reset\",\"reason\":\"transport_queue_overflow\"}", 0, timestamp);
+        {
+            std::lock_guard<std::mutex> statsLock(statsMutex);
+            stats.messagesDropped += empty.size();
+        }
     }
 
     // Detect sequence gaps if enabled

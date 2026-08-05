@@ -65,7 +65,7 @@ struct InputConfiguration {
     std::chrono::milliseconds stuckKeyTimeout = std::chrono::milliseconds(2000);
 
     // Recovery and safety
-    bool enableStuckKeyRecovery = true;         // Enable automatic stuck key recovery
+    bool enableStuckKeyRecovery = false;        // Prefer disconnect/sequence recovery; timeouts break held game keys
     bool enableSequenceRecovery = true;         // Enable sequence-based desynchronization recovery
     bool enableMouseSequencing = false;         // Enable sequence processing for mouse events
     int maxRecoveryAttempts = 3;                // Max recovery attempts before giving up

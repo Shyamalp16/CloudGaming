@@ -783,7 +783,4 @@ CoalescedMouseMove globalCoalescedMouseMove;
 	MouseInputHandler::cleanup();
 }
 
-extern "C" void wakeMouseThread() {
-	MouseInputHandler::wakeMouseThreadInternal();
-}
 }

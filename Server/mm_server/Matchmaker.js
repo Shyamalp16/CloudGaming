@@ -438,7 +438,7 @@ redisClient.on('error', (err) => console.error('Redis Client Error', err));
 async function startServer(){
     // Bind to PORT first so Railway's health check passes immediately.
     // Redis connection happens after — a slow Redis startup no longer kills the container.
-    const port = process.env.PORT || 8080;
+    const port = process.env.PORT || config.mmPort;
     await new Promise((resolve, reject) => {
         app.listen(port, '0.0.0.0', (err) => {
             if (err) return reject(err);

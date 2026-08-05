@@ -20,6 +20,7 @@
 #include "InputStats.h"
 #include "InputSequenceManager.h"
 #include "KeyMappingTest.h"
+#include "InputConfig.h"
 
 
 using json = nlohmann::json;
@@ -72,6 +73,7 @@ namespace KeyInputHandler {
 		config.regularKeyTimeout = std::chrono::milliseconds(30000); // 30 seconds for regular keys
 		config.enableRegularKeyTimeout = false; // Disable regular key timeout by default
 		config.onlyRecoverModifiers = true; // Only recover modifier keys
+		config.enableRecovery = false; // Legitimate held modifiers must not be released by elapsed time.
 		return config;
 	}();
 	static InputStateMachine::KeyStateFSM keyStateFSM{fsmConfig};
@@ -355,14 +357,6 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 		return 0;
 	}
 
-	// Blocking queue functions
-	void enqueueKeyboardMessage(const std::string& message) {
-		std::unique_lock<std::mutex> lock(queueMutex);
-		keyboardMessageQueue.push(message);
-		lock.unlock();
-		queueCondition.notify_one();
-	}
-
 	void wakeKeyboardThreadInternal() {
 		std::unique_lock<std::mutex> lock(queueMutex);
 		shutdownRequested = true;
@@ -372,9 +366,27 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 
 	// Public function to enqueue messages from WebSocket handler
 	void enqueueMessage(const std::string& message) {
+		bool overflowed = false;
 		std::unique_lock<std::mutex> lock(queueMutex);
+		const size_t maxPending = static_cast<size_t>((std::max)(16, InputConfig::globalInputConfig.maxPendingMessages));
+		if (keyboardMessageQueue.size() >= maxPending) {
+			std::queue<std::string> empty;
+			keyboardMessageQueue.swap(empty);
+			overflowed = true;
+		}
 		keyboardMessageQueue.push(message);
 		lock.unlock();
+
+		if (overflowed) {
+			// A bounded reset is safer than losing a key-up and leaving the game in
+			// a permanently pressed state.
+			keyStateFSM.releaseAllKeys();
+			std::lock_guard<std::mutex> stateLock(clientKeysMutex);
+			clientReportedKeysDown.clear();
+			vkDownToJsCode.clear();
+			scanIdDownToJs.clear();
+			LOG_WARN("Keyboard queue overflow: cleared stale events and released all keys");
+		}
 		queueCondition.notify_one();
 	}
 
@@ -540,8 +552,6 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 
 			if (!message.empty()) {
 				try {
-					LOG_DEBUG("Processing message from queue: " + message);
-
 					json j = json::parse(message);
 					if (j.is_object() && j.contains(InputSchema::kCode) && j.contains(InputSchema::kType)) {
 						// Extract sequence ID if present
@@ -748,8 +758,9 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 							break;
 
 						case InputSequenceManager::RecoveryAction::REQUEST_SNAPSHOT:
-							std::cout << "[InputSequenceManager] Executing recovery: REQUEST_SNAPSHOT" << std::endl;
-							// TODO: Send snapshot request to client
+							// No snapshot protocol exists on the browser channel. Releasing
+							// tracked keys is the only safe recovery from a large gap.
+							keyStateFSM.releaseAllKeys();
 							break;
 
 						case InputSequenceManager::RecoveryAction::RESET_STATE:
@@ -817,10 +828,6 @@ extern "C" const char* getInputStatsSummary() {
 
 extern "C" void resetInputStats() {
 	InputStats::resetAllStats();
-}
-
-extern "C" void wakeKeyboardThread() {
-	KeyInputHandler::wakeKeyboardThreadInternal();
 }
 
 // Sequence management API implementation

@@ -1,0 +1,11 @@
+{
+  "mode": "local",
+  "ports": {
+    "matchmaker": 3000,
+    "signaling": 3002
+  },
+  "production": {
+    "matchmakerUrl": "https://matchmaker-production-5b36.up.railway.app",
+    "signalingUrl": "wss://signaling-server-production-acd4.up.railway.app"
+  }
+}

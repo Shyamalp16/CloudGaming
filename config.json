@@ -1,13 +1,7 @@
 {
-  "client": {
-    "serverUrlBase": "wss://signaling-server-production-acd4.up.railway.app",
-    "matchmakerUrl": "https://matchmaker-production-5b36.up.railway.app"
-  },
   "host": {
     "targetProcessName": "vlc.exe",
-    "signalingUrl": "wss://signaling-server-production-acd4.up.railway.app",
     "matchmaker": {
-      "url": "https://matchmaker-production-5b36.up.railway.app",
       "hostSecret": "HELLO-MFS",
       "heartbeatIntervalMs": 20000
     },
@@ -122,7 +116,7 @@
       "maxInjectHz": 10000,
       "inputQueueTimeoutMs": 10,
       "stuckKeyTimeoutMs": 2000,
-      "enableStuckKeyRecovery": true,
+      "enableStuckKeyRecovery": false,
       "enableSequenceRecovery": true,
       "enableMouseSequencing": false,
       "maxRecoveryAttempts": 3,

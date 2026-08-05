@@ -187,7 +187,6 @@ AudioCapturer::AudioCapturer() :
     m_pAudioClient(nullptr),
     m_pCaptureClient(nullptr),
     m_nextFrameTime(0),
-    m_rtpTimestamp(0),
     m_frameSizeSamples(480), // 10ms at 48kHz (will be updated based on config)
     m_samplesPerFrame(960), // 10ms at 48kHz stereo (will be updated based on config)
     m_accumulatedCount(0),   // Initialize accumulation counter
@@ -384,7 +383,6 @@ bool AudioCapturer::StartCapture(DWORD processId, const std::string& processName
     // Initialize timing
     m_startTime = std::chrono::high_resolution_clock::now();
     m_nextFrameTime = 0;
-    m_rtpTimestamp = 0;
     // settings.frameSize is samples per channel (e.g., 960 at 20ms, 48kHz)
     m_frameSizeSamples = settings.frameSize;                  // per-channel samples
     m_samplesPerFrame = settings.frameSize * settings.channels; // total interleaved samples
@@ -410,16 +408,6 @@ bool AudioCapturer::StartCapture(DWORD processId, const std::string& processName
 
     std::wcout << L"[AudioCapturer] DEBUG: Starting capture thread for PID=" << processId << std::endl;
     m_captureThread = std::thread(&AudioCapturer::CaptureThread, this, processId);
-
-    // Run audio streaming diagnostics after a short delay to allow WebRTC connection to establish
-    std::wcout << L"[AudioCapturer] Scheduling audio streaming diagnostics..." << std::endl;
-    std::thread([this]() {
-        std::this_thread::sleep_for(std::chrono::seconds(2)); // Wait 2 seconds for connection
-        if (!m_stopCapture) {
-            std::wcout << L"[AudioCapturer] Running audio streaming diagnostics..." << std::endl;
-            diagnoseAudioStreamingGo();
-        }
-    }).detach();
 
     // Start periodic audio streaming health check
     m_audioHealthCheckThread = std::thread([this]() {
@@ -482,7 +470,6 @@ void AudioCapturer::StopCapture()
     // Reset timing state
     m_initialAudioClockTime = 0;
     m_nextFrameTime = 0;
-    m_rtpTimestamp = 0;
 
     // Stop WAV recording if active
     StopWAVRecording();
@@ -933,7 +920,7 @@ void AudioCapturer::StartEncoderThread()
             }
 
             if (m_hEncoderMmcssTask != nullptr) {
-                BOOL prioritySet = AvSetMmThreadPriority(m_hEncoderMmcssTask, AVRT_PRIORITY_HIGH);
+                AvSetMmThreadPriority(m_hEncoderMmcssTask, AVRT_PRIORITY_HIGH);
                 AUDIO_LOG_INFO(L"[AudioEncoder] MMCSS registered successfully (task index: " << m_encoderMmcssTaskIndex
                              << L", priority: HIGH)");
             } else {
@@ -946,8 +933,9 @@ void AudioCapturer::StartEncoderThread()
                 AUDIO_LOG_ERROR(L"[AudioEncoder] Failed to set thread affinity mask: " << GetLastError());
             }
 
-            // Set thread priority for real-time audio processing
-            AUDIO_SET_THREAD_PRIORITY_TIME_CRITICAL();
+            if (m_hEncoderMmcssTask == nullptr) {
+                AUDIO_SET_THREAD_PRIORITY_HIGH();
+            }
             EncoderThread();
         });
         AUDIO_LOG_INFO(L"[AudioEncoder] Started with thread affinity mask: 0x" << std::hex
@@ -962,7 +950,7 @@ void AudioCapturer::StartEncoderThread()
             }
 
             if (m_hEncoderMmcssTask != nullptr) {
-                BOOL prioritySet = AvSetMmThreadPriority(m_hEncoderMmcssTask, AVRT_PRIORITY_HIGH);
+                AvSetMmThreadPriority(m_hEncoderMmcssTask, AVRT_PRIORITY_HIGH);
                 AUDIO_LOG_INFO(L"[AudioEncoder] MMCSS registered successfully (task index: " << m_encoderMmcssTaskIndex
                              << L", priority: HIGH)");
             } else {
@@ -970,8 +958,9 @@ void AudioCapturer::StartEncoderThread()
                                << L" (encoding may be affected by system load)");
             }
 
-            // Set thread priority for real-time audio processing
-            AUDIO_SET_THREAD_PRIORITY_TIME_CRITICAL();
+            if (m_hEncoderMmcssTask == nullptr) {
+                AUDIO_SET_THREAD_PRIORITY_HIGH();
+            }
             EncoderThread();
         });
         AUDIO_LOG_INFO(L"[AudioEncoder] Started with MMCSS (no thread affinity)");
@@ -982,11 +971,8 @@ void AudioCapturer::StopEncoderThread()
 {
     if (m_stopEncoder) return;
 
-    {
-        std::lock_guard<std::mutex> lock(m_rawFrameMutex);
-        m_stopEncoder = true;
-        m_rawFrameCondition.notify_all();
-    }
+    m_stopEncoder = true;
+    m_ringBufferCondition.notify_all();
 
     if (m_encoderThread.joinable()) {
         try {
@@ -1017,31 +1003,22 @@ void AudioCapturer::EncoderThread()
 
     AUDIO_LOG_INFO(L"[AudioEncoder] Encoder thread entering main loop");
 
+    RawAudioFrame rawFrame;
+    rawFrame.samples.reserve(m_samplesPerFrame);
     while (!m_stopEncoder) {
-        // Check for frames in ring buffer (polling approach for now)
-        std::vector<float> frame;
-        int64_t timestamp;
-
-        // AUDIO_LOG_INFO(L"[AudioEncoder] Encoder thread polling ring buffer");
-
-        if (PopFrameFromRingBuffer(frame, timestamp)) {
-            // We have a frame to encode
-            AUDIO_LOG_DEBUG(L"[AudioEncoder] Processing frame: " << frame.size() << L" samples, timestamp: " << timestamp);
-            // AUDIO_LOG_INFO(L"[AudioEncoder] FRAME RECEIVED FROM RING BUFFER - Size: " << frame.size() << L" samples");
-            RawAudioFrame rawFrame;
-            rawFrame.samples = std::move(frame);
-            rawFrame.timestampUs = timestamp;
-            EncodeAndQueueFrame(rawFrame);
-        } else {
-            // No frames available, sleep briefly to avoid busy waiting
-            // AUDIO_LOG_INFO(L"[AudioEncoder] No frames in ring buffer, sleeping");
-
-            // Use shorter sleep in ultra-low-latency mode for more responsive processing
-            if (s_audioConfig.latency.ultraLowLatencyProfile) {
-                Sleep(0); // Yield to other threads immediately in ultra-low-latency mode
-            } else {
-                Sleep(1); // Standard 1ms sleep for normal operation
+        {
+            std::unique_lock<std::mutex> lock(m_ringBufferMutex);
+            m_ringBufferCondition.wait(lock, [this]() {
+                return m_stopEncoder.load() || m_ringBufferCount > 0;
+            });
+            if (m_stopEncoder.load()) {
+                break;
             }
+        }
+
+        if (PopFrameFromRingBuffer(rawFrame.samples, rawFrame.timestampUs)) {
+            AUDIO_LOG_DEBUG(L"[AudioEncoder] Processing frame: " << rawFrame.samples.size() << L" samples, timestamp: " << rawFrame.timestampUs);
+            EncodeAndQueueFrame(rawFrame);
         }
 
         // Check for parameter updates
@@ -1049,36 +1026,25 @@ void AudioCapturer::EncoderThread()
     }
 
     // Process any remaining frames in ring buffer before shutdown
-    std::vector<float> frame;
-    int64_t timestamp;
-    while (PopFrameFromRingBuffer(frame, timestamp)) {
-        RawAudioFrame rawFrame;
-        rawFrame.samples = std::move(frame);
-        rawFrame.timestampUs = timestamp;
+    while (PopFrameFromRingBuffer(rawFrame.samples, rawFrame.timestampUs)) {
         EncodeAndQueueFrame(rawFrame);
     }
 
     std::wcout << L"[AudioEncoder] Dedicated encoder thread stopped" << std::endl;
 }
 
-void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
+void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame& frame)
 {
     // Debug: Check input audio levels before encoding (every frame for first 10, then every 100)
     static int encodeDebugCount = 0;
     encodeDebugCount++;
-    bool shouldLog = (encodeDebugCount <= 10) || (encodeDebugCount % 100 == 0);
+    bool shouldLog = s_enableBufferMonitoring &&
+                     ((encodeDebugCount <= 10) || (encodeDebugCount % 3000 == 0));
 
-
-    // Calculate RMS level to check if audio is too quiet for Opus
-    float rmsLevel = 0.0f;
-    for (size_t i = 0; i < frame.samples.size(); ++i) {
-        rmsLevel += frame.samples[i] * frame.samples[i];
-    }
-    rmsLevel = sqrtf(rmsLevel / frame.samples.size());
 
     // Optional DC removal and auto-gain (disabled by default)
     float dcOffset = 0.0f;
-    float rmsAfterDc = rmsLevel;
+    float rmsAfterDc = 0.0f;
     if (s_audioConfig.processing.enableDCRemoval) {
         for (size_t i = 0; i < frame.samples.size(); ++i) {
             dcOffset += frame.samples[i];
@@ -1090,6 +1056,11 @@ void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
         rmsAfterDc = 0.0f;
         for (size_t i = 0; i < frame.samples.size(); ++i) {
             rmsAfterDc += frame.samples[i] * frame.samples[i];
+        }
+        rmsAfterDc = sqrtf(rmsAfterDc / frame.samples.size());
+    } else if (s_audioConfig.processing.enableAutoGain) {
+        for (float sample : frame.samples) {
+            rmsAfterDc += sample * sample;
         }
         rmsAfterDc = sqrtf(rmsAfterDc / frame.samples.size());
     }
@@ -1134,7 +1105,7 @@ void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
     if (encodedSize > 0) {
         // Debug: Check if encoded data is valid (not all zeros) - reduced frequency
         static int debugFrameCount = 0;
-        if (++debugFrameCount % 500 == 0) {
+        if (s_enableBufferMonitoring && ++debugFrameCount % 3000 == 0) {
             bool hasNonZeroData = false;
             size_t checkSize = (encodedSize < 10) ? encodedSize : 10;
             for (size_t i = 0; i < checkSize; ++i) {
@@ -1164,26 +1135,16 @@ void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
             return; // Don't queue corrupted packet
         }
 
-        // Calculate RTP timestamp
-        uint32_t rtpTimestamp = 0;
-        if (frame.timestampUs > 0 && this->m_initialAudioClockTime > 0) {
-            int64_t relativeTimeUs = frame.timestampUs - this->m_initialAudioClockTime;
-            rtpTimestamp = static_cast<uint32_t>((relativeTimeUs * 48LL) / 1000LL);
-        } else {
-            this->m_rtpTimestamp += static_cast<uint32_t>(this->m_frameSizeSamples);
-            rtpTimestamp = this->m_rtpTimestamp;
-        }
-
         // Queue encoded packet for WebRTC transmission (zero-copy approach)
         // Pass buffer data directly without intermediate vector allocation
-        if (!this->QueueAudioPacket(m_encodedBuffer.data(), encodedSize, frame.timestampUs, rtpTimestamp)) {
+        if (!this->QueueAudioPacket(m_encodedBuffer.data(), encodedSize, frame.timestampUs)) {
             AUDIO_LOG_DEBUG(L"[AudioEncoder] Failed to queue encoded packet - WebRTC congestion detected");
             // Don't retry immediately - let WebRTC congestion control work
             // The encoder thread will continue processing new frames
         } else {
             // Log successful encoding/queuing occasionally (reduced frequency)
             static int encodeCount = 0;
-            if (++encodeCount % 250 == 0) {
+            if (s_enableBufferMonitoring && ++encodeCount % 3000 == 0) {
                 AUDIO_LOG_INFO(L"[AudioEncoder] Audio pipeline active: " << encodeCount << " packets encoded");
             }
         }
@@ -1192,85 +1153,6 @@ void AudioCapturer::EncodeAndQueueFrame(RawAudioFrame frame)
     }
 }
 
-
-bool AudioCapturer::QueueRawFrame(std::vector<float>& samples, int64_t timestampUs)
-{
-    std::lock_guard<std::mutex> lock(m_rawFrameMutex);
-
-    // Check for buffering violations in strict latency mode (capture → encode path)
-    if (s_audioConfig.latency.enforceSingleFrameBuffering && m_rawFrameQueue.size() >= MAX_RAW_FRAME_QUEUE_SIZE) {
-        if (s_audioConfig.latency.warnOnBuffering) {
-            std::wcerr << L"[AudioLatency] WARNING: Single frame buffering violated on capture→encode path! Queue size: "
-                      << m_rawFrameQueue.size() << L"/" << MAX_RAW_FRAME_QUEUE_SIZE
-                      << L" - Encoder congestion may increase latency beyond target "
-                      << s_audioConfig.latency.targetOneWayLatencyMs << L"ms" << std::endl;
-        }
-        return false; // Signal congestion to capture thread
-    }
-
-    // With minimal queue depth (1), we should rarely have queue full situations
-    // If queue is full, this indicates encoder thread congestion
-    if (m_rawFrameQueue.size() >= MAX_RAW_FRAME_QUEUE_SIZE) {
-        if (s_enableBufferMonitoring) {
-            std::wcerr << L"[AudioEncoder] Raw frame queue full - encoder thread congested. Size: "
-                      << m_rawFrameQueue.size() << L"/" << MAX_RAW_FRAME_QUEUE_SIZE << std::endl;
-        }
-        return false; // Signal congestion to capture thread
-    }
-
-    // Optional buffer monitoring for performance analysis
-    if (s_enableBufferMonitoring) {
-        static int operationCount = 0;
-        if (++operationCount % s_bufferMonitorInterval == 0) {
-            std::wcout << L"[AudioEncoder] Raw frame queue monitoring: current="
-                      << m_rawFrameQueue.size() << L", max=" << MAX_RAW_FRAME_QUEUE_SIZE << std::endl;
-        }
-    }
-
-    // Create frame and add to queue
-    RawAudioFrame frame;
-    frame.samples = std::move(samples); // Move data to avoid copy
-    frame.timestampUs = timestampUs;
-
-    m_rawFrameQueue.push(std::move(frame));
-    m_rawFrameCondition.notify_one(); // Wake encoder thread
-
-    return true;
-}
-
-bool AudioCapturer::QueueRawFrameRef(const std::vector<float>& samples, int64_t timestampUs)
-{
-    std::lock_guard<std::mutex> lock(m_rawFrameMutex);
-
-    // With minimal queue depth (1), we should rarely have queue full situations
-    // If queue is full, this indicates encoder thread congestion
-    if (m_rawFrameQueue.size() >= MAX_RAW_FRAME_QUEUE_SIZE) {
-        if (s_enableBufferMonitoring) {
-            std::wcerr << L"[AudioEncoder] Raw frame queue full - encoder thread congested. Size: "
-                      << m_rawFrameQueue.size() << L"/" << MAX_RAW_FRAME_QUEUE_SIZE << std::endl;
-        }
-        return false; // Signal congestion to capture thread
-    }
-
-    // Optional buffer monitoring for performance analysis
-    if (s_enableBufferMonitoring) {
-        static int operationCount = 0;
-        if (++operationCount % s_bufferMonitorInterval == 0) {
-            std::wcout << L"[AudioEncoder] Raw frame queue monitoring: current="
-                      << m_rawFrameQueue.size() << L", max=" << MAX_RAW_FRAME_QUEUE_SIZE << std::endl;
-        }
-    }
-
-    // Create frame and copy data (necessary since we have const reference)
-    RawAudioFrame frame;
-    frame.samples = samples; // Copy data to avoid reference issues
-    frame.timestampUs = timestampUs;
-
-    m_rawFrameQueue.push(std::move(frame));
-    m_rawFrameCondition.notify_one(); // Wake encoder thread
-
-    return true;
-}
 
 // Queue parameter update for encoder thread
 void AudioCapturer::QueueParameterUpdate(int bitrate, int expectedLossPerc, int complexity, int fecEnabled) {
@@ -1307,14 +1189,16 @@ bool AudioCapturer::CheckForParameterUpdates() {
 
     // Apply bitrate update
     if (update.bitrate > 0 && update.bitrate != s_currentAudioBitrate.load()) {
-        // Update the Opus encoder bitrate
         if (m_opusEncoder) {
-            // Note: Opus encoder doesn't support runtime bitrate changes in all configurations
-            // This would need to be implemented based on specific Opus library capabilities
-            // For now, we'll log the intent and update our tracking variable
-            s_currentAudioBitrate.store(update.bitrate);
-            std::wcout << L"[AudioEncoder] Updated target bitrate to " << update.bitrate << L" bps" << std::endl;
-            updated = true;
+            int result = opus_encoder_ctl(reinterpret_cast<OpusEncoder*>(m_opusEncoder->GetEncoder()),
+                                          OPUS_SET_BITRATE(update.bitrate));
+            if (result == OPUS_OK) {
+                s_currentAudioBitrate.store(update.bitrate);
+                std::wcout << L"[AudioEncoder] Updated target bitrate to " << update.bitrate << L" bps" << std::endl;
+                updated = true;
+            } else {
+                std::wcerr << L"[AudioEncoder] Failed to update bitrate, error: " << result << std::endl;
+            }
         }
     }
 
@@ -1377,69 +1261,18 @@ bool AudioCapturer::CheckForParameterUpdates() {
     return updated;
 }
 
-bool AudioCapturer::QueueAudioPacket(std::vector<uint8_t>& data, int64_t timestampUs, uint32_t rtpTimestamp)
-{
-    std::lock_guard<std::mutex> lock(m_queueMutex);
-
-    // Check for buffering violations in strict latency mode
-    if (s_audioConfig.latency.enforceSingleFrameBuffering && m_audioQueue.size() >= MAX_QUEUE_SIZE) {
-        if (s_audioConfig.latency.warnOnBuffering) {
-            std::wcerr << L"[AudioLatency] WARNING: Single frame buffering violated! Queue size: "
-                      << m_audioQueue.size() << L"/" << MAX_QUEUE_SIZE
-                      << L" - WebRTC congestion may increase latency beyond target "
-                      << s_audioConfig.latency.targetOneWayLatencyMs << L"ms" << std::endl;
-        }
-        return false; // Signal congestion to encoder thread
-    }
-
-    // With minimal queue size (1), we should rarely have queue full situations
-    // If queue is full, this indicates WebRTC congestion - let WebRTC handle it
-    if (m_audioQueue.size() >= MAX_QUEUE_SIZE) {
-        // Instead of dropping, signal congestion to encoder thread
-        // This allows WebRTC's congestion control to work optimally
-        if (s_enableBufferMonitoring) {
-            std::wcerr << L"[AudioQueue] Queue full - WebRTC congestion detected. Size: "
-                      << m_audioQueue.size() << L"/" << MAX_QUEUE_SIZE << std::endl;
-        }
-        return false; // Signal congestion to encoder thread
-    }
-
-    // Optional buffer monitoring for performance analysis
-    if (s_enableBufferMonitoring) {
-        static int operationCount = 0;
-        if (++operationCount % s_bufferMonitorInterval == 0) {
-            std::wcout << L"[AudioQueue] Queue depth monitoring: current="
-                      << m_audioQueue.size() << L", max=" << MAX_QUEUE_SIZE << std::endl;
-        }
-    }
-
-    // Create packet and add to queue
-    AudioPacket packet;
-    packet.data = std::move(data); // Move data to avoid copy
-    packet.timestampUs = timestampUs;
-    packet.rtpTimestamp = rtpTimestamp;
-
-    m_audioQueue.push(std::move(packet));
-    m_queueCondition.notify_one(); // Wake queue processor
-
-    return true;
-}
-
 // Overloaded method for zero-copy buffer data (avoid intermediate vector allocation)
-bool AudioCapturer::QueueAudioPacket(const uint8_t* buffer, size_t size, int64_t timestampUs, uint32_t rtpTimestamp)
+bool AudioCapturer::QueueAudioPacket(const uint8_t* buffer, size_t size, int64_t timestampUs)
 {
     std::lock_guard<std::mutex> lock(m_queueMutex);
 
-    // With minimal queue size (1), we should rarely have queue full situations
-    // If queue is full, this indicates WebRTC congestion - let WebRTC handle it
+    // Preserve real-time behavior: replace a stale unsent packet instead of
+    // retaining latency or dropping the newest audio.
     if (m_audioQueue.size() >= MAX_QUEUE_SIZE) {
-        // Instead of dropping, signal congestion to encoder thread
-        // This allows WebRTC's congestion control to work optimally
+        m_audioQueue.pop();
         if (s_enableBufferMonitoring) {
-            std::wcerr << L"[AudioQueue] Queue full - WebRTC congestion detected. Size: "
-                      << m_audioQueue.size() << L"/" << MAX_QUEUE_SIZE << std::endl;
+            std::wcerr << L"[AudioQueue] Replaced stale encoded packet" << std::endl;
         }
-        return false; // Signal congestion to encoder thread
     }
 
     // Optional buffer monitoring for performance analysis
@@ -1456,7 +1289,6 @@ bool AudioCapturer::QueueAudioPacket(const uint8_t* buffer, size_t size, int64_t
     AudioPacket packet;
     packet.data.assign(buffer, buffer + size); // Copy data from fixed buffer
     packet.timestampUs = timestampUs;
-    packet.rtpTimestamp = rtpTimestamp;
 
     m_audioQueue.push(std::move(packet));
     m_queueCondition.notify_one(); // Wake queue processor
@@ -1470,7 +1302,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     HRESULT hr;
     // Calculate requested duration based on WASAPI configuration
     REFERENCE_TIME hnsRequestedDuration = static_cast<REFERENCE_TIME>(s_audioConfig.wasapi.devicePeriodMs * 10000.0); // Convert ms to 100ns units
-    UINT32 bufferFrameCount;
+    UINT32 bufferFrameCount = 0;
     UINT32 numFramesAvailable;
     BYTE* pData;
     DWORD flags;
@@ -3399,24 +3231,21 @@ bool AudioCapturer::ConvertPCMToFloatInPlace(const BYTE* pcmData, UINT32 numFram
 
 void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs)
 {
-    // Calculate RMS for raw input samples (every 5 seconds)
-    float rawRms = 0.0f;
-    for (size_t i = 0; i < sampleCount; ++i) {
-        rawRms += samples[i] * samples[i];
-    }
-    rawRms = sqrtf(rawRms / sampleCount);
+    if (!samples || sampleCount == 0) return;
 
-    // FIX: Reduce debug logging frequency to avoid console I/O overhead
     static auto lastRawLog = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRawLog).count();
 
-    // Log every 30 seconds instead of 5 seconds to reduce overhead
     if (elapsed >= 30000) {
+        float rawRms = 0.0f;
+        for (size_t i = 0; i < sampleCount; ++i) {
+            rawRms += samples[i] * samples[i];
+        }
+        rawRms = sqrtf(rawRms / static_cast<float>(sampleCount));
         std::cout << "[AUDIO_DEBUG] Raw audio RMS: " << rawRms << std::endl;
         lastRawLog = now;
     }
-    if (!samples || sampleCount == 0) return;
 
     // Zero-copy audio processing pipeline - direct frame processing without accumulation
 
@@ -3443,21 +3272,7 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
 
     // If we have a complete frame, push it to the ring buffer
     if (m_currentFrameSamples >= m_samplesPerFrame) {
-        AUDIO_LOG_INFO(L"[AudioCapturer] PUSHING FRAME TO RING BUFFER - Samples: " << m_currentFrameSamples);
-
-        // Push the complete frame to ring buffer (zero-copy from working buffer)
-        if (PushFrameToRingBuffer(m_currentFrameBuffer, m_currentFrameTimestamp)) {
-            // Frame successfully queued to ring buffer
-            AUDIO_LOG_INFO(L"[AudioCapturer] Frame successfully pushed to ring buffer");
-            // DEBUG: Log successful frame capture
-            static uint64_t frameCounter = 0;
-            frameCounter++;
-            if (frameCounter % 10 == 0) { // Log every 10th frame
-                std::wcout << L"[AudioCapturer] DEBUG: Successfully captured and queued frame #" << frameCounter
-                           << L" (size: " << m_currentFrameBuffer.size() << L" samples)" << std::endl;
-            }
-            // Encoder thread polls continuously, so no explicit wake-up needed
-        } else {
+        if (!PushFrameToRingBuffer(m_currentFrameBuffer, m_currentFrameTimestamp)) {
             std::wcerr << L"[AudioCapturer] Failed to push frame to ring buffer - encoder congestion" << std::endl;
         }
 
@@ -4066,6 +3881,7 @@ bool AudioCapturer::IsSystemUnderLoad()
 
 void AudioCapturer::InitializeRingBuffer()
 {
+    std::lock_guard<std::mutex> lock(m_ringBufferMutex);
     // Preallocate ring buffer frames (each frame matches encoder requirements exactly)
     m_frameRingBuffer.resize(RING_BUFFER_SIZE);
     for (auto& frame : m_frameRingBuffer) {
@@ -4088,83 +3904,65 @@ void AudioCapturer::InitializeRingBuffer()
 
 bool AudioCapturer::PushFrameToRingBuffer(const std::vector<float>& frame, int64_t timestamp)
 {
-    AUDIO_LOG_INFO(L"[RingBuffer] PushFrameToRingBuffer called - Frame size: " << frame.size() << L", Timestamp: " << timestamp);
-
-    if (IsRingBufferFull()) {
-        AUDIO_LOG_INFO(L"[RingBuffer] Ring buffer is FULL - Count: " << m_ringBufferCount << L"/" << RING_BUFFER_SIZE);
-        std::wcerr << L"[AudioCapturer] Ring buffer full - dropping frame (encoder congestion)" << std::endl;
+    std::lock_guard<std::mutex> lock(m_ringBufferMutex);
+    if (frame.size() > m_frameRingBuffer[m_ringBufferWriteIndex].size()) {
         return false;
     }
 
-    AUDIO_LOG_INFO(L"[RingBuffer] Pushing frame to index " << m_ringBufferWriteIndex);
+    // Keep the newest audio when the encoder falls behind. Retaining an old
+    // frame would permanently add latency until the queue drains.
+    if (m_ringBufferCount >= RING_BUFFER_SIZE) {
+        m_ringBufferReadIndex = (m_ringBufferReadIndex + 1) % RING_BUFFER_SIZE;
+        --m_ringBufferCount;
+    }
 
     // Copy frame data directly into preallocated ring buffer slot
     auto& ringBufferFrame = m_frameRingBuffer[m_ringBufferWriteIndex];
-    if (frame.size() <= ringBufferFrame.size()) {
-        std::copy(frame.begin(), frame.end(), ringBufferFrame.begin());
-        AUDIO_LOG_INFO(L"[RingBuffer] Frame data copied successfully");
-    } else {
-        AUDIO_LOG_INFO(L"[RingBuffer] Frame size mismatch - Frame: " << frame.size() << L", Buffer: " << ringBufferFrame.size());
-        std::wcerr << L"[AudioCapturer] Frame size mismatch in ring buffer push" << std::endl;
-        return false;
-    }
+    std::copy(frame.begin(), frame.end(), ringBufferFrame.begin());
 
     // Store timestamp in separate array (no audio corruption!)
     m_frameTimestamps[m_ringBufferWriteIndex] = timestamp;
-    AUDIO_LOG_INFO(L"[RingBuffer] Timestamp stored: " << timestamp);
-
     // Update ring buffer indices
-    size_t oldWriteIndex = m_ringBufferWriteIndex;
     m_ringBufferWriteIndex = (m_ringBufferWriteIndex + 1) % RING_BUFFER_SIZE;
     m_ringBufferCount++;
-
-    AUDIO_LOG_INFO(L"[RingBuffer] Indices updated - Old write: " << oldWriteIndex << L", New write: " << m_ringBufferWriteIndex << L", Count: " << m_ringBufferCount);
-
+    m_ringBufferCondition.notify_one();
     return true;
 }
 
 bool AudioCapturer::PopFrameFromRingBuffer(std::vector<float>& frame, int64_t& timestamp)
 {
-    // AUDIO_LOG_INFO(L"[RingBuffer] PopFrameFromRingBuffer called");
-
-    if (IsRingBufferEmpty()) {
-        // AUDIO_LOG_INFO(L"[RingBuffer] Ring buffer is EMPTY");
+    std::lock_guard<std::mutex> lock(m_ringBufferMutex);
+    if (m_ringBufferCount == 0) {
         return false;
     }
-
-    // AUDIO_LOG_INFO(L"[RingBuffer] Popping frame from index " << m_ringBufferReadIndex << L", Count: " << m_ringBufferCount);
 
     // Get frame from ring buffer (audio data is intact!)
     const auto& ringBufferFrame = m_frameRingBuffer[m_ringBufferReadIndex];
     frame = ringBufferFrame; // Direct copy - no corruption!
-    // AUDIO_LOG_INFO(L"[RingBuffer] Frame copied - Size: " << frame.size() << L" samples");
-
     // Get timestamp from separate array
     timestamp = m_frameTimestamps[m_ringBufferReadIndex];
-    // AUDIO_LOG_INFO(L"[RingBuffer] Timestamp retrieved: " << timestamp);
 
     // Update ring buffer indices
-    size_t oldReadIndex = m_ringBufferReadIndex;
     m_ringBufferReadIndex = (m_ringBufferReadIndex + 1) % RING_BUFFER_SIZE;
     m_ringBufferCount--;
-
-    AUDIO_LOG_INFO(L"[RingBuffer] Indices updated - Old read: " << oldReadIndex << L", New read: " << m_ringBufferReadIndex << L", Count: " << m_ringBufferCount);
-
     return true;
 }
 
 bool AudioCapturer::IsRingBufferEmpty() const
 {
+    std::lock_guard<std::mutex> lock(m_ringBufferMutex);
     return m_ringBufferCount == 0;
 }
 
 bool AudioCapturer::IsRingBufferFull() const
 {
+    std::lock_guard<std::mutex> lock(m_ringBufferMutex);
     return m_ringBufferCount >= RING_BUFFER_SIZE;
 }
 
 size_t AudioCapturer::GetRingBufferCount() const
 {
+    std::lock_guard<std::mutex> lock(m_ringBufferMutex);
     return m_ringBufferCount;
 }
 
@@ -4714,7 +4512,13 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
             }
         }
 
-        // FIX: Ensure decimal output for bitrate (not hex) and verify frameSizeMs was set
+        // Keep the Go/Pion codec description and RTP clock in lockstep with the
+        // actual Opus encoder configuration before the PeerConnection is created.
+        const std::string ptime = std::to_string(s_audioConfig.frameSizeMs);
+        SetEnvironmentVariableA("AUDIO_PTIME_MS", ptime.c_str());
+        SetEnvironmentVariableA("AUDIO_STEREO", s_audioConfig.channels == 2 ? "1" : "0");
+        SetEnvironmentVariableA("AUDIO_USE_FEC", s_audioConfig.enableFec ? "1" : "0");
+
         std::wcout << L"[AudioCapturer] Audio config loaded: bitrate=" << std::dec << s_audioConfig.bitrate
                    << L" bps, complexity=" << s_audioConfig.complexity
                    << L", frameSize=" << s_audioConfig.frameSizeMs << L"ms, channels=" << s_audioConfig.channels
@@ -5152,4 +4956,3 @@ void AudioCapturer::FinalizeWAVOnExit()
     // but if a file is left open (rare), it is safer to leave OS to close it.
     // Instance-level destructor already finalizes per-instance files.
 }
-

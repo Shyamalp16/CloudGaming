@@ -71,18 +71,20 @@ int main()
     std::cout << "[main] Host ID: " << hostId << std::endl;
     // --------------------------
     
-    // --- Load Matchmaker Configuration ---
-    std::string matchmakerUrl = "";
+    // --- Load the one shared network profile used by both host and browser ---
+    ConfigUtils::NetworkEndpoints networkEndpoints;
+    if (!ConfigUtils::LoadNetworkEndpoints(networkEndpoints)) {
+        return -1;
+    }
+
+    const std::string& matchmakerUrl = networkEndpoints.matchmakerUrl;
+    const std::string& signalingUrl = networkEndpoints.signalingUrl;
     std::string hostSecret = "";
     int heartbeatIntervalMs = 25000;
-    bool matchmakerEnabled = false;
+    const bool matchmakerEnabled = !matchmakerUrl.empty();
     
     if (config.contains("host") && config["host"].contains("matchmaker")) {
         auto& mmCfg = config["host"]["matchmaker"];
-        if (mmCfg.contains("url") && mmCfg["url"].is_string()) {
-            matchmakerUrl = mmCfg["url"].get<std::string>();
-            matchmakerEnabled = !matchmakerUrl.empty();
-        }
         if (mmCfg.contains("hostSecret") && mmCfg["hostSecret"].is_string()) {
             hostSecret = mmCfg["hostSecret"].get<std::string>();
         }
@@ -129,14 +131,7 @@ int main()
     GraphicsAndCapture::Start(cap);
     StartCapture();
 
-    // Read optional signaling server URL from config (host.signalingUrl).
-    // Falls back to the hardcoded ws://localhost:3002 default in Websocket.cpp.
-    std::string signalingUrl = "";
-    if (config.contains("host") && config["host"].contains("signalingUrl")
-        && config["host"]["signalingUrl"].is_string()) {
-        signalingUrl = config["host"]["signalingUrl"].get<std::string>();
-        std::cout << "[main] Signaling URL (from config): " << signalingUrl << std::endl;
-    }
+    std::cout << "[main] Signaling URL: " << signalingUrl << std::endl;
     initWebsocket(roomId, signalingUrl);
     
     // --- Matchmaker Registration ---

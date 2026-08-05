@@ -63,8 +63,12 @@ bool Manager::start() {
     shouldStop.store(false);
     running.store(true);
 
-    // Start recovery thread
-    recoveryThread = std::thread(&Manager::recoveryLoop, this);
+    // Held keys are legitimate in games; time alone cannot distinguish a held
+    // key from a lost key-up. Recovery is driven by channel reset/sequence
+    // recovery unless the operator explicitly enables the legacy timeout.
+    if (config.enableStuckKeyRecovery) {
+        recoveryThread = std::thread(&Manager::recoveryLoop, this);
+    }
 
     logStateEvent("started", "State manager started successfully");
     return true;
@@ -280,7 +284,7 @@ std::string Manager::recoverStuckKeyLocked(const std::string& jsCode) {
     logStateEvent("stuck_key_recovered", "Recovered stuck key: " + jsCode);
 
     nlohmann::json recoveryEvent = {
-        {"type", "stuck_key_recovery"},
+        {"type", "keyup"},
         {"code", jsCode},
         {"timestamp", currentTime},
         {"action", "synthetic_keyup"}
@@ -485,13 +489,10 @@ void Manager::updateMousePosition(const MousePosition& newPosition) {
 
 bool Manager::validateKeyTransition(const std::string& jsCode,
                                             KeyState oldState, KeyState newState) {
-    // Allow all transitions for now, but log unusual ones
+    // Repeated key-down/up messages add injection work and can clog an ordered
+    // channel. The current state already represents them, so discard them.
     if (oldState == newState) {
-        if (config.enableAggregatedLogging) {
-            LOG_WARNING(ErrorUtils::ErrorCategory::INPUT,
-                       "Redundant key state transition for " + jsCode);
-        }
-        return true; // Allow redundant transitions
+        return false;
     }
 
     // Special handling for stuck keys

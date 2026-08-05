@@ -101,18 +101,13 @@ private:
     void StartQueueProcessor();
     void StopQueueProcessor();
     void QueueProcessorThread();
-    bool QueueAudioPacket(std::vector<uint8_t>& data, int64_t timestampUs, uint32_t rtpTimestamp);
-    bool QueueAudioPacket(const uint8_t* buffer, size_t size, int64_t timestampUs, uint32_t rtpTimestamp);
-    void ProcessQueuedPackets();
+    bool QueueAudioPacket(const uint8_t* buffer, size_t size, int64_t timestampUs);
 
     // Dedicated encoder thread methods
     void StartEncoderThread();
     void StopEncoderThread();
     void EncoderThread();
-    bool QueueRawFrame(std::vector<float>& samples, int64_t timestampUs);
-    bool QueueRawFrameRef(const std::vector<float>& samples, int64_t timestampUs);
-    void ProcessRawFrames();
-    void EncodeAndQueueFrame(RawAudioFrame frame);
+    void EncodeAndQueueFrame(RawAudioFrame& frame);
     void QueueParameterUpdate(int bitrate, int expectedLossPerc, int complexity, int fecEnabled = -1);
     bool CheckForParameterUpdates();
 
@@ -276,13 +271,11 @@ private:
 
     // Performance optimization: Conditional logging macros for hot paths
     // These macros compile to no-ops in release builds, eliminating overhead
-#define AUDIO_LOG_DEBUG(msg) \
-    do { \
-        static bool enableDebugLogs = true; /* Set to false for production */ \
-        if (enableDebugLogs) { \
-            std::wcout << msg << std::endl; \
-        } \
-    } while (0)
+#ifdef _DEBUG
+#define AUDIO_LOG_DEBUG(msg) do { std::wcout << msg << std::endl; } while (0)
+#else
+#define AUDIO_LOG_DEBUG(msg) do { } while (0)
+#endif
 
 #define AUDIO_LOG_ERROR(msg) \
     std::wcerr << msg << std::endl
@@ -294,9 +287,6 @@ private:
 #define AUDIO_SET_THREAD_PRIORITY_HIGH() \
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST)
 
-#define AUDIO_SET_THREAD_PRIORITY_TIME_CRITICAL() \
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL)
-
     // Per-instance audio frame accumulation (replaces static variables)
     std::vector<float> m_accumulatedSamples;
     size_t m_accumulatedCount = 0;
@@ -305,7 +295,6 @@ private:
     struct AudioPacket {
         std::vector<uint8_t> data;
         int64_t timestampUs;
-        uint32_t rtpTimestamp;
     };
 
     // Fixed-size buffer for encoded audio (avoid heap churn)
@@ -322,11 +311,7 @@ private:
     std::thread m_queueProcessorThread;
     std::atomic<bool> m_stopQueueProcessor;
 
-    // Dedicated encoder thread and raw frame queue (minimal buffering to let WebRTC handle congestion)
-    static constexpr size_t MAX_RAW_FRAME_QUEUE_SIZE = 1; // Minimal buffering for encoder thread synchronization
-    std::queue<RawAudioFrame> m_rawFrameQueue;
-    std::mutex m_rawFrameMutex;
-    std::condition_variable m_rawFrameCondition;
+    // Dedicated encoder thread fed by the bounded ring below.
     std::thread m_encoderThread;
     std::atomic<bool> m_stopEncoder;
 
@@ -367,7 +352,6 @@ private:
     // Timing for 20ms frames
     std::chrono::high_resolution_clock::time_point m_startTime;
     int64_t m_nextFrameTime;
-    uint32_t m_rtpTimestamp;
 
     // Audio clock timing (single source of truth)
     int64_t m_initialAudioClockTime = 0; // Initial audio clock timestamp in microseconds
@@ -440,9 +424,11 @@ private:
     std::vector<float> m_floatBuffer;
 
     // Ring buffer for encoder frames (zero-copy audio pipeline)
-    static const size_t RING_BUFFER_SIZE = 16; // 16 frames of buffering
+    static const size_t RING_BUFFER_SIZE = 3; // At most 30 ms with the default 10 ms packetization
     std::vector<std::vector<float>> m_frameRingBuffer; // Preallocated frame buffers
     std::vector<int64_t> m_frameTimestamps; // Separate timestamp storage
+    mutable std::mutex m_ringBufferMutex;
+    std::condition_variable m_ringBufferCondition;
     size_t m_ringBufferWriteIndex = 0;
     size_t m_ringBufferReadIndex = 0;
     size_t m_ringBufferCount = 0;
