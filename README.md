@@ -71,10 +71,10 @@ node mm_server/Matchmaker.js
 
 ### 5. Host (C++ runtime)
 
-Build the Visual Studio solution (`DisplayCaptureProject.sln`, x64), then run:
+Build the Visual Studio solution (`DisplayCaptureProject.sln`, **Release x64**) for streaming performance, then run:
 
 ```
-x64\Debug\DisplayCaptureProject.exe
+x64\Release\DisplayCaptureProject.exe
 ```
 
 `config.json` must be in the working directory.
@@ -102,17 +102,15 @@ x64\Debug\DisplayCaptureProject.exe
 | `bf` | `0` | B-frames (0 = lowest latency) |
 | `fullRange` | `false` | YUV color range (false = limited/TV) |
 | `hdrToneMapping.enabled` | `false` | SDR tone-map HDR signal before encode |
-| `gpuTiming` | `false` | Log GPU encode timing |
 
 ### `host.capture`
 
 | Key | Default | Description |
 |---|---|---|
-| `copyPoolSize` | `8` | D3D11 texture copy pool depth |
+| `copyPoolSize` | `4` | Application-owned D3D11 texture pool depth |
 | `maxQueueDepth` | `2` | Max frames queued for encode |
+| `framePoolBuffers` | `3` | WGC frame-pool buffers |
 | `cursor` | `false` | Render cursor into capture |
-| `skipUnchanged` | `true` | Drop duplicate frames |
-| `adaptiveBackoff` | `true` | Back off capture when encoder is saturated |
 | `mmcss.enable` | `true` | Boost capture thread via MMCSS |
 
 ### `host.audio`

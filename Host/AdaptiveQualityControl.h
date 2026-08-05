@@ -91,6 +91,7 @@ struct DroppingState {
     uint32_t frameCounter = 0;
     uint32_t framesDropped = 0;
     uint32_t framesSent = 0;
+    double dropAccumulator = 0.0;
     std::chrono::steady_clock::time_point lastFrameTime;
     std::mutex mutex;
 };

@@ -1,7 +1,6 @@
 #include "CaptureHelpers.h"
 #include "GlobalTime.h"
 #include "AudioCapturer.h"
-#include "ThreadPriorityManager.h"
 #include <chrono>
 #include <iostream>
 #include <iomanip>
@@ -18,9 +17,11 @@
 #include <d3d11.h>
 #include <winrt/base.h>
 #include "Encoder.h"
+#include "AdaptiveQualityControl.h"
 #include "VideoMetrics.h"
 #include "EtwMarkers.h"
 #include <avrt.h>
+#include <deque>
 #pragma comment(lib, "Avrt.lib")
 
 // Constants to replace magic numbers
@@ -28,7 +29,6 @@ static constexpr int kDefaultFramePoolBuffers = 3;
 static constexpr int kMaxFramePoolBuffers = 16;
 static constexpr int kDefaultTargetFps = 120;
 static constexpr int kMaxQueuedFramesDefault = 2;
-static constexpr int kOneSecondUs = 1000000;
 
 using namespace std::chrono;
 using namespace winrt;
@@ -43,17 +43,11 @@ std::atomic<bool> isCapturing{ false };
 // (Removed) advanced WGC pool tracking
 
 struct FrameData {
-    int sequenceNumber;
-    winrt::com_ptr<ID3D11Texture2D> texture; // private copy for lifetime safety
-    int64_t timestamp;
-    winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface{ nullptr }; // deferred copy source
-};
-
-// Deferred frame metadata for consumer thread processing
-struct DeferredFrameMetadata {
-    int64_t systemRelativeTimeUs;
-    winrt::Windows::Graphics::SizeInt32 contentSize;
-    bool shouldSkipUnchanged;
+    int sequenceNumber = 0;
+    winrt::com_ptr<ID3D11Texture2D> texture;
+    int64_t captureTimestampUs = 0;
+    int64_t enqueueSteadyUs = 0;
+    winrt::Windows::Graphics::SizeInt32 contentSize{ 0, 0 };
 };
 
 // (Removed) FrameComparator used by priority_queue in older design
@@ -62,19 +56,15 @@ struct DeferredFrameMetadata {
 static size_t g_maxQueuedFrames = kMaxQueuedFramesDefault;
 std::atomic<int> frameSequenceCounter{ 0 };
 
-// Ring storage and indices
-static std::vector<FrameData> g_ring;
-static std::atomic<size_t> g_ringHead{ 0 }; // next write position (producer moves)
-static std::atomic<size_t> g_ringTail{ 0 }; // next read position (consumer moves)
-static size_t g_ringCapacity = 0;           // equals g_maxQueuedFrames (number of slots)
-static std::mutex g_ringMutex;              // only for consumer wait
-static std::condition_variable g_ringCV;    // wake consumer when producer pushes
-
-// Deferred metadata ring for consumer thread (same capacity as frame ring)
-static std::vector<DeferredFrameMetadata> g_metadataRing;
-static std::atomic<size_t> g_metadataHead{ 0 };
-static std::atomic<size_t> g_metadataTail{ 0 };
-static size_t g_metadataCapacity = 0;
+// The queue and texture pool share one short-lived lock. This is intentionally
+// not a lock-free ring: dropping the oldest item makes the producer a second
+// consumer, which invalidates SPSC assumptions and races COM pointer writes.
+static std::mutex g_queueMutex;
+static std::condition_variable g_queueCV;
+static std::deque<FrameData> g_frameQueue;
+static std::vector<winrt::com_ptr<ID3D11Texture2D>> g_freeTextures;
+static size_t g_copyPoolSize = 4;
+static size_t g_allocatedTextures = 0;
 
 // Metrics
 static std::atomic<uint64_t> g_overwriteDrops{ 0 }; // times we overwrote oldest due to full ring
@@ -84,7 +74,6 @@ static std::atomic<int> g_lastProcessedSeq{ -1 }; // monotonicity tracking
 // Timestamp source tracking for A/V sync debugging
 static std::atomic<uint64_t> g_systemRelativeTimeFrames{ 0 }; // frames using WGC SystemRelativeTime
 static std::atomic<uint64_t> g_fallbackTimeFrames{ 0 }; // frames using audio reference clock fallback
-static std::chrono::steady_clock::time_point g_lastTimestampReport = std::chrono::steady_clock::now();
 static std::atomic<uint64_t> g_outOfOrder{ 0 }; // frames observed out of order
 
 static std::atomic<int> g_targetFps{kDefaultTargetFps};
@@ -95,14 +84,8 @@ void SetMaxQueuedFrames(int maxDepth) {
     g_maxQueuedFrames = static_cast<size_t>(maxDepth);
 }
 
-// Backpressure drop policy defaults
-static std::atomic<int> g_dropWindowMs{200};
-static std::atomic<int> g_dropMinEvents{2};
-void SetBackpressureDropPolicy(int windowMs, int minEvents) {
-    if (windowMs < 1) windowMs = 1;
-    if (minEvents < 1) minEvents = 1;
-    g_dropWindowMs.store(windowMs);
-    g_dropMinEvents.store(minEvents);
+void SetCopyPoolSize(int poolSize) {
+    g_copyPoolSize = static_cast<size_t>(std::clamp(poolSize, 2, 32));
 }
 
 // MMCSS config
@@ -110,7 +93,9 @@ static std::atomic<bool> g_enableMmcss{true};
 static std::atomic<int>  g_mmcssPriority{2}; // 2 ~ HIGH
 void SetMmcssConfig(bool enable, int priority) {
     g_enableMmcss.store(enable);
-    g_mmcssPriority.store(std::clamp(priority, 0, 3));
+    // CRITICAL can starve the captured game. Capture work is bounded and should
+    // use at most AVRT_PRIORITY_HIGH.
+    g_mmcssPriority.store(std::clamp(priority, 0, 2));
 }
 
 // Session options
@@ -124,27 +109,89 @@ void SetMinUpdateInterval100ns(long long interval100ns) {
     if (interval100ns < 0) interval100ns = 0;
     g_minUpdateInterval100ns.store(interval100ns);
 }
-// Skip unchanged frames heuristic
-static std::atomic<bool> g_skipUnchanged{false};
-void SetSkipUnchanged(bool enable) { g_skipUnchanged.store(enable); }
-
-// (Removed) Texture copy pool (unused)
-
-static DXGI_FORMAT CoerceFormatForVideoProcessor(DXGI_FORMAT fmt) {
-    switch (fmt) {
-    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM;
-    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM;
-    default: return fmt;
-    }
+static int64_t SteadyNowUs() {
+    return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-// (Removed) RecreateCopyPool (unused)
+static bool TextureMatches(ID3D11Texture2D* texture, const D3D11_TEXTURE2D_DESC& sourceDesc) {
+    if (!texture) return false;
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+    return desc.Width == sourceDesc.Width && desc.Height == sourceDesc.Height &&
+           desc.Format == sourceDesc.Format;
+}
 
-// (Removed) AcquirePoolSlot (unused)
+static void ReturnTextureLocked(winrt::com_ptr<ID3D11Texture2D>&& texture) {
+    if (texture) g_freeTextures.push_back(std::move(texture));
+}
 
-// (Removed) ReleasePoolSlot (unused)
+static winrt::com_ptr<ID3D11Texture2D> AcquireCopyTextureLocked(
+    ID3D11Device* device,
+    const D3D11_TEXTURE2D_DESC& sourceDesc)
+{
+    auto matching = std::find_if(g_freeTextures.begin(), g_freeTextures.end(),
+        [&](const auto& texture) { return TextureMatches(texture.get(), sourceDesc); });
+    if (matching != g_freeTextures.end()) {
+        auto texture = std::move(*matching);
+        g_freeTextures.erase(matching);
+        return texture;
+    }
 
-// (Removed) SetCopyPoolSize (unused)
+    // If the pool is exhausted, reclaim the oldest queued frame. The texture is
+    // safe to reuse because an item already removed by the consumer is not in
+    // this queue. This gives cloud-gaming traffic latest-frame semantics.
+    if (g_allocatedTextures >= g_copyPoolSize && !g_frameQueue.empty()) {
+        auto texture = std::move(g_frameQueue.front().texture);
+        g_frameQueue.pop_front();
+        g_overwriteDrops.fetch_add(1, std::memory_order_relaxed);
+        VideoMetrics::inc(VideoMetrics::overwriteDrops());
+        if (TextureMatches(texture.get(), sourceDesc)) return texture;
+        texture = nullptr;
+        --g_allocatedTextures;
+    }
+
+    if (g_allocatedTextures >= g_copyPoolSize) return nullptr;
+
+    D3D11_TEXTURE2D_DESC copyDesc = sourceDesc;
+    copyDesc.MipLevels = 1;
+    copyDesc.ArraySize = 1;
+    copyDesc.SampleDesc.Count = 1;
+    copyDesc.SampleDesc.Quality = 0;
+    copyDesc.Usage = D3D11_USAGE_DEFAULT;
+    copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    copyDesc.CPUAccessFlags = 0;
+    copyDesc.MiscFlags = 0;
+
+    winrt::com_ptr<ID3D11Texture2D> texture;
+    if (FAILED(device->CreateTexture2D(&copyDesc, nullptr, texture.put()))) return nullptr;
+    ++g_allocatedTextures;
+    return texture;
+}
+
+class CallbackMmcssRegistration {
+public:
+    void ensureRegistered() {
+        if (attempted_ || !g_enableMmcss.load(std::memory_order_relaxed)) return;
+        attempted_ = true;
+        DWORD taskIndex = 0;
+        handle_ = AvSetMmThreadCharacteristicsW(L"Capture", &taskIndex);
+        if (handle_) {
+            AVRT_PRIORITY priority = g_mmcssPriority.load(std::memory_order_relaxed) >= 2
+                ? AVRT_PRIORITY_HIGH : AVRT_PRIORITY_NORMAL;
+            AvSetMmThreadPriority(handle_, priority);
+        } else {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+        }
+    }
+
+    ~CallbackMmcssRegistration() {
+        if (handle_) AvRevertMmThreadCharacteristics(handle_);
+    }
+
+private:
+    bool attempted_ = false;
+    HANDLE handle_ = nullptr;
+};
 
 winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface)
@@ -201,25 +248,17 @@ GraphicsCaptureSession createCaptureSession(
         session.IsCursorCaptureEnabled(g_cursorCaptureEnabled.load());
         // Best-effort: some OS versions expose IsBorderRequired
         try { session.IsBorderRequired(g_borderRequired.load()); } catch (...) {}
-        // Configure MinUpdateInterval if requested - ensure it's always set for low latency
+        // Configure MinUpdateInterval from the single host.video.fps source.
         try {
             auto val = g_minUpdateInterval100ns.load();
             if (val > 0) {
                 session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ val });
                 std::wcout << L"[WGC] MinUpdateInterval set to " << val << L" (100ns units)" << std::endl;
-            } else {
-                // Fallback: set uncapped/lowest latency (0.1ms) when not configured
-                auto fallbackVal = 1000LL; // 0.1ms in 100ns units (effectively uncapped)
-                session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ fallbackVal });
-                std::wcout << L"[WGC] MinUpdateInterval not configured, using uncapped fallback: " << fallbackVal << L" (100ns units, ~1000fps)" << std::endl;
             }
         } catch (...) {
-            // Exception fallback: set very conservative default to prevent high latency
-            try {
-                auto exceptionFallback = 1000000LL; // 100ms in 100ns units (10fps)
-                session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ exceptionFallback });
-                std::wcout << L"[WGC] Exception in MinUpdateInterval, using exception fallback: " << exceptionFallback << L" (100ns units)" << std::endl;
-            } catch (...) {}
+            // Older Windows builds may not support the property. Leaving it
+            // unset is preferable to the old 10 fps fallback.
+            std::wcout << L"[WGC] MinUpdateInterval unsupported; using compositor cadence" << std::endl;
         }
     }
     catch (const winrt::hresult_error& e)
@@ -234,71 +273,82 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
     auto handler = TypedEventHandler<Direct3D11CaptureFramePool, winrt::Windows::Foundation::IInspectable>(
         [](Direct3D11CaptureFramePool sender, winrt::Windows::Foundation::IInspectable) {
             try {
+                thread_local CallbackMmcssRegistration callbackPriority;
+                callbackPriority.ensureRegistered();
+
+                auto device = GetD3DDevice();
+                if (!device) return;
+                winrt::com_ptr<ID3D11DeviceContext> context;
+                device->GetImmediateContext(context.put());
+
                 for (;;) {
                     auto frame = sender.TryGetNextFrame();
                     if (!frame) break;
+                    VideoMetrics::inc(VideoMetrics::wgcFramesArrived());
 
                     auto surface = frame.Surface();
                     if (!surface) continue;
-
-                    // MINIMAL CALLBACK: Only essential work here to reduce WGC backpressure
                     int sequenceNumber = frameSequenceCounter++;
 
-                    // Keep callback lean: capture timestamp with minimal checks and fallback.
                     int64_t timestamp = 0;
-                    int64_t systemRelativeTimeUs = 0;
                     try {
                         auto srt = frame.SystemRelativeTime();
-                        systemRelativeTimeUs = static_cast<int64_t>(srt.count() / 10);
+                        timestamp = static_cast<int64_t>(srt.count() / 10);
                     } catch (...) {
-                        systemRelativeTimeUs = 0;
+                        timestamp = 0;
                     }
 
-                    if (systemRelativeTimeUs > 0) {
-                        timestamp = systemRelativeTimeUs;
+                    if (timestamp > 0) {
                         g_systemRelativeTimeFrames.fetch_add(1, std::memory_order_relaxed);
                     } else {
                         timestamp = AudioCapturer::GetSharedReferenceTimeUs();
-                        systemRelativeTimeUs = timestamp;
                         g_fallbackTimeFrames.fetch_add(1, std::memory_order_relaxed);
                     }
 
-                    // Extract content size for deferred processing
                     winrt::Windows::Graphics::SizeInt32 contentSize{ 0, 0 };
-                    try {
-                        contentSize = frame.ContentSize();
-                    } catch (...) {}
+                    try { contentSize = frame.ContentSize(); } catch (...) {}
 
-                    // Ultra-light enqueue: minimal work in callback
-                    if (g_ringCapacity > 0) {
-                        // Compute next positions
-                        size_t head = g_ringHead.load(std::memory_order_relaxed);
-                        size_t nextHead = (head + 1) % g_ringCapacity;
-                        size_t tail = g_ringTail.load(std::memory_order_acquire);
+                    // Copy while Direct3D11CaptureFrame is alive. Once this loop
+                    // iteration ends WGC may immediately recycle its surface.
+                    auto source = GetTextureFromSurface(surface);
+                    if (!source) continue;
+                    D3D11_TEXTURE2D_DESC sourceDesc{};
+                    source->GetDesc(&sourceDesc);
 
-                        if (nextHead == tail) {
-                            // Full: drop oldest (advance tail) to keep latest
-                            g_ringTail.store((tail + 1) % g_ringCapacity, std::memory_order_release);
-                            g_overwriteDrops.fetch_add(1, std::memory_order_relaxed);
-                        }
-
-                        // Store frame data (minimal)
-                        g_ring[head].sequenceNumber = sequenceNumber;
-                        g_ring[head].texture = nullptr;
-                        g_ring[head].timestamp = timestamp;
-                        g_ring[head].surface = surface;
-
-                        // Store metadata for deferred processing (consumer thread)
-                        size_t metadataHead = g_metadataHead.load(std::memory_order_relaxed);
-                        g_metadataRing[metadataHead].systemRelativeTimeUs = systemRelativeTimeUs;
-                        g_metadataRing[metadataHead].contentSize = contentSize;
-                        g_metadataRing[metadataHead].shouldSkipUnchanged = g_skipUnchanged.load();
-
-                        // Update both ring heads, then wake the consumer
-                        g_ringHead.store(nextHead, std::memory_order_release);
-                        g_metadataHead.store((metadataHead + 1) % g_metadataCapacity, std::memory_order_release);
-                        g_ringCV.notify_one();
+                    winrt::com_ptr<ID3D11Texture2D> ownedTexture;
+                    {
+                        std::lock_guard<std::mutex> lock(g_queueMutex);
+                        ownedTexture = AcquireCopyTextureLocked(device.get(), sourceDesc);
                     }
+                    if (!ownedTexture) {
+                        g_overwriteDrops.fetch_add(1, std::memory_order_relaxed);
+                        VideoMetrics::inc(VideoMetrics::overwriteDrops());
+                        continue;
+                    }
+
+                    context->CopyResource(ownedTexture.get(), source.get());
+                    VideoMetrics::inc(VideoMetrics::captureCopies());
+
+                    {
+                        std::lock_guard<std::mutex> lock(g_queueMutex);
+                        while (g_frameQueue.size() >= g_maxQueuedFrames) {
+                            auto dropped = std::move(g_frameQueue.front());
+                            g_frameQueue.pop_front();
+                            ReturnTextureLocked(std::move(dropped.texture));
+                            g_overwriteDrops.fetch_add(1, std::memory_order_relaxed);
+                            VideoMetrics::inc(VideoMetrics::overwriteDrops());
+                        }
+                        g_frameQueue.push_back(FrameData{
+                            sequenceNumber,
+                            std::move(ownedTexture),
+                            timestamp,
+                            SteadyNowUs(),
+                            contentSize
+                        });
+                        VideoMetrics::queueDepth().store(
+                            static_cast<uint64_t>(g_frameQueue.size()), std::memory_order_relaxed);
+                    }
+                    g_queueCV.notify_one();
                 }
             }
             catch (const std::exception& e) {
@@ -308,42 +358,17 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
     return framePool.FrameArrived(handler);
 }
 
-// Helper: ring size (approximate, safe for SPSC)
-static inline size_t RingSize() {
-    size_t head = g_ringHead.load(std::memory_order_acquire);
-    size_t tail = g_ringTail.load(std::memory_order_acquire);
-    if (head >= tail) return head - tail;
-    return g_ringCapacity - (tail - head);
+static size_t QueueSize() {
+    std::lock_guard<std::mutex> lock(g_queueMutex);
+    return g_frameQueue.size();
+}
+
+static void RecycleFrameTexture(FrameData& frame) {
+    std::lock_guard<std::mutex> lock(g_queueMutex);
+    ReturnTextureLocked(std::move(frame.texture));
 }
 
 void StartCapture() {
-    // Set up MMCSS for capture thread to ensure consistent frame timing
-    static bool captureThreadConfigured = false;
-    static ThreadPriorityManager::MMCSSHandle captureMMCSS; // Make static to persist
-    if (!captureThreadConfigured) {
-        captureThreadConfigured = true;
-        // Configure capture thread with MMCSS "Capture" class for real-time capture
-        ThreadPriorityManager::ThreadPriorityConfig captureConfig;
-        captureConfig.mmcssClass = ThreadPriorityManager::MMCSSClass::Capture;
-        captureConfig.taskName = "VideoCapture";
-        captureConfig.enableMMCSS = true;
-        captureConfig.enableTimeCritical = false; // Use high priority but not time critical
-        captureConfig.threadPriority = THREAD_PRIORITY_HIGHEST;
-
-        if (captureMMCSS.elevate(captureConfig)) {
-            std::cout << "[Capture] MMCSS priority configured for capture thread (Capture class)" << std::endl;
-        } else {
-            std::cout << "[Capture] MMCSS failed, falling back to thread priority only" << std::endl;
-            // Fall back to just setting thread priority without MMCSS
-            HANDLE threadHandle = GetCurrentThread();
-            if (threadHandle != nullptr && SetThreadPriority(threadHandle, captureConfig.threadPriority)) {
-                std::cout << "[Capture] Thread priority set to HIGH (fallback)" << std::endl;
-            } else {
-                std::cout << "[Capture] Warning: Failed to set thread priority fallback" << std::endl;
-            }
-        }
-    }
-
     // Initialize shared reference clock for AV synchronization
     AudioCapturer::InitializeSharedReferenceClock();
 
@@ -355,21 +380,18 @@ void StartCapture() {
     isCapturing.store(true);
     frameSequenceCounter.store(0);
 
-    // Initialize ring buffer storage
+    // Initialize the owned-texture queue. Keep at least one texture outside the
+    // queue for the callback's in-progress copy.
     {
-        std::lock_guard<std::mutex> lock(g_ringMutex);
-        g_ringCapacity = std::max<size_t>(g_maxQueuedFrames, 2);
-        g_ring.assign(g_ringCapacity, FrameData{});
-        g_ringHead.store(0, std::memory_order_relaxed);
-        g_ringTail.store(0, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(g_queueMutex);
+        g_copyPoolSize = std::max(g_copyPoolSize, g_maxQueuedFrames + 1);
+        g_frameQueue.clear();
+        g_freeTextures.clear();
+        g_allocatedTextures = 0;
         g_overwriteDrops.store(0, std::memory_order_relaxed);
         g_backpressureSkips.store(0, std::memory_order_relaxed);
-
-        // Initialize metadata ring with same capacity
-        g_metadataCapacity = g_ringCapacity;
-        g_metadataRing.assign(g_metadataCapacity, DeferredFrameMetadata{});
-        g_metadataHead.store(0, std::memory_order_relaxed);
-        g_metadataTail.store(0, std::memory_order_relaxed);
+        g_outOfOrder.store(0, std::memory_order_relaxed);
+        g_lastProcessedSeq.store(-1, std::memory_order_relaxed);
     }
 
     // Single encode/transmit consumer thread
@@ -384,8 +406,7 @@ void StartCapture() {
                 AVRT_PRIORITY mapped = AVRT_PRIORITY_NORMAL;
                 if (prio <= 0) mapped = AVRT_PRIORITY_LOW;
                 else if (prio == 1) mapped = AVRT_PRIORITY_NORMAL;
-                else if (prio == 2) mapped = AVRT_PRIORITY_HIGH;
-                else mapped = AVRT_PRIORITY_CRITICAL;
+                else mapped = AVRT_PRIORITY_HIGH;
                 AvSetMmThreadPriority(mmcssHandle, mapped);
             }
         }
@@ -393,74 +414,57 @@ void StartCapture() {
         winrt::com_ptr<ID3D11DeviceContext> context;
         device->GetImmediateContext(context.put());
 
-        static int lastInitW = 0;
-        static int lastInitH = 0;
-        static auto lastLog = std::chrono::steady_clock::now();
-        static int submitCount = 0;
-        static uint64_t lastOverwriteDrops = 0;
-        static uint64_t lastBpSkips = 0;
-        static uint64_t lastOutOfOrder = 0;
+        int lastInitW = 0;
+        int lastInitH = 0;
+        auto lastLog = std::chrono::steady_clock::now();
+        int submitCount = 0;
+        uint64_t lastOverwriteDrops = 0;
+        uint64_t lastBpSkips = 0;
+        uint64_t lastOutOfOrder = 0;
 
-        // Encoder fps counter
-        static int encodeCount = 0;
-        static auto encodeWindowStart = std::chrono::steady_clock::now();
+        uint64_t lastArrived = VideoMetrics::wgcFramesArrived().load(std::memory_order_relaxed);
+        auto fpsWindowStart = std::chrono::steady_clock::now();
 
-        while (isCapturing.load()) {
+        for (;;) {
             FrameData job{};
-            DeferredFrameMetadata metadata{};
 
             // Wake immediately when a new frame lands; also wakes on shutdown.
             {
-                std::unique_lock<std::mutex> lk(g_ringMutex);
-                g_ringCV.wait(lk, []{ return (RingSize() > 0) || !isCapturing.load(); });
-                if (!isCapturing.load() && RingSize() == 0) break;
-            }
+                std::unique_lock<std::mutex> lock(g_queueMutex);
+                g_queueCV.wait(lock, [] { return !g_frameQueue.empty() || !isCapturing.load(); });
+                if (!isCapturing.load() && g_frameQueue.empty()) break;
 
-            // Drain the ring: take the LATEST frame, silently discard older ones.
-            // If the game produced 3 frames while we were encoding the last one,
-            // we take frame 3 and skip frames 1-2 — eliminates burst processing.
-            {
-                size_t head = g_ringHead.load(std::memory_order_acquire);
-                size_t tail = g_ringTail.load(std::memory_order_acquire);
-                if (head == tail) continue; // spurious wake
-
-                size_t latest     = (head + g_ringCapacity - 1) % g_ringCapacity;
-                size_t metaHead   = g_metadataHead.load(std::memory_order_acquire);
-                size_t metaLatest = (metaHead + g_metadataCapacity - 1) % g_metadataCapacity;
-
-                job      = g_ring[latest];
-                metadata = g_metadataRing[metaLatest];
-
-                // Drain all queued frames, keeping only the one we just took
-                size_t sz = (head >= tail) ? (head - tail) : (g_ringCapacity - tail + head);
-                if (sz > 1) g_backpressureSkips.fetch_add(sz - 1, std::memory_order_relaxed);
-                g_ringTail.store(head, std::memory_order_release);
-                g_metadataTail.store(metaHead, std::memory_order_release);
-            }
-
-            // Encoder fps tracking
-            {
-                encodeCount++;
-                auto now = std::chrono::steady_clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - encodeWindowStart).count();
-                if (elapsed >= kOneSecondUs) {
-                    double fps = static_cast<double>(encodeCount) * 1'000'000.0 / static_cast<double>(elapsed);
-                    VideoMetrics::ewmaUpdate(VideoMetrics::captureFps(), fps);
-                    encodeCount = 0;
-                    encodeWindowStart = now;
+                // Encode the freshest queued frame. Older queued frames cannot
+                // increase delivered FPS once the encoder has fallen behind.
+                while (g_frameQueue.size() > 1) {
+                    auto dropped = std::move(g_frameQueue.front());
+                    g_frameQueue.pop_front();
+                    ReturnTextureLocked(std::move(dropped.texture));
+                    g_backpressureSkips.fetch_add(1, std::memory_order_relaxed);
+                    VideoMetrics::inc(VideoMetrics::backpressureSkips());
                 }
+                job = std::move(g_frameQueue.front());
+                g_frameQueue.pop_front();
+                VideoMetrics::queueDepth().store(0, std::memory_order_relaxed);
+            }
+
+            if (SteadyNowUs() - job.enqueueSteadyUs > 100000) {
+                g_backpressureSkips.fetch_add(1, std::memory_order_relaxed);
+                VideoMetrics::inc(VideoMetrics::backpressureSkips());
+                RecycleFrameTexture(job);
+                continue;
             }
 
             // Content-size change detection
             {
                 static std::atomic<int> lastLoggedW{ 0 };
                 static std::atomic<int> lastLoggedH{ 0 };
-                if (metadata.contentSize.Width  != lastLoggedW.load() ||
-                    metadata.contentSize.Height != lastLoggedH.load()) {
+                if (job.contentSize.Width  != lastLoggedW.load() ||
+                    job.contentSize.Height != lastLoggedH.load()) {
                     std::wcout << L"[WGC] ContentSize: "
-                               << metadata.contentSize.Width << L"x" << metadata.contentSize.Height << std::endl;
-                    lastLoggedW.store(metadata.contentSize.Width);
-                    lastLoggedH.store(metadata.contentSize.Height);
+                               << job.contentSize.Width << L"x" << job.contentSize.Height << std::endl;
+                    lastLoggedW.store(job.contentSize.Width);
+                    lastLoggedH.store(job.contentSize.Height);
                 }
             }
 
@@ -473,49 +477,62 @@ void StartCapture() {
                     g_lastProcessedSeq.store(job.sequenceNumber, std::memory_order_relaxed);
                 }
             }
-            if (!job.texture && !job.surface) continue;
-
-            winrt::com_ptr<ID3D11Texture2D> tex = job.texture;
-            if (!tex && job.surface) {
-                tex = GetTextureFromSurface(job.surface);
-            }
-            if (!tex) continue;
+            if (!job.texture) continue;
 
             D3D11_TEXTURE2D_DESC desc{};
-            tex->GetDesc(&desc);
+            job.texture->GetDesc(&desc);
             int encW = static_cast<int>(desc.Width & ~1U);
             int encH = static_cast<int>(desc.Height & ~1U);
-            if (lastInitW == 0 || lastInitH == 0) {
+            if (lastInitW != encW || lastInitH != encH) {
+                if (lastInitW != 0 && lastInitH != 0) Encoder::FinalizeEncoder();
                 Encoder::InitializeEncoder("output.mp4", encW, encH, g_targetFps.load());
                 lastInitW = encW; lastInitH = encH;
             }
 
-            // Always attempt submit; encoder internally drains on EAGAIN
-            int slot = -1; ID3D11Texture2D* nv12 = nullptr;
-            if (Encoder::AcquireHwInputSurface(slot, &nv12) && Encoder::VideoProcessorBltToSlot(tex.get(), slot)) {
-                Encoder::SubmitHwFrame(slot, job.timestamp);
-                submitCount++;
+            auto qualityDecision = AdaptiveQualityControl::checkFrameDropping();
+            if (qualityDecision.shouldDropFrame) {
+                g_backpressureSkips.fetch_add(1, std::memory_order_relaxed);
+                VideoMetrics::inc(VideoMetrics::backpressureSkips());
+                RecycleFrameTexture(job);
+                continue;
             }
+
+            int slot = -1; ID3D11Texture2D* nv12 = nullptr;
+            if (Encoder::AcquireHwInputSurface(slot, &nv12) &&
+                Encoder::VideoProcessorBltToSlot(job.texture.get(), slot)) {
+                VideoMetrics::inc(VideoMetrics::vpSubmissions());
+                if (Encoder::SubmitHwFrame(slot, job.captureTimestampUs)) submitCount++;
+            }
+            RecycleFrameTexture(job);
 
             auto nowDbg = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::seconds>(nowDbg - lastLog).count() >= 1) {
                 uint64_t od = g_overwriteDrops.load(std::memory_order_relaxed);
                 uint64_t bp = g_backpressureSkips.load(std::memory_order_relaxed);
-                size_t qsz = RingSize();
+                size_t qsz = QueueSize();
                 VideoMetrics::queueDepth().store(static_cast<uint64_t>(qsz), std::memory_order_relaxed);
                 uint64_t oo = g_outOfOrder.load(std::memory_order_relaxed);
-                // std::wcout << L"[Stats] Encode=" << submitCount
-                //            << L"/s, Target=" << g_targetFps.load()
-                //            << L" fps, QueueDepth=" << qsz
-                //            << L", OverwriteDrops/s=" << (od - lastOverwriteDrops)
-                //            << L", BPSkips/s=" << (bp - lastBpSkips)
-                //            << L", OutOfOrder/s=" << (oo - lastOutOfOrder)
-                //            << std::endl;
+                uint64_t arrived = VideoMetrics::wgcFramesArrived().load(std::memory_order_relaxed);
+                auto fpsElapsedUs = duration_cast<microseconds>(nowDbg - fpsWindowStart).count();
+                double captureFps = fpsElapsedUs > 0
+                    ? static_cast<double>(arrived - lastArrived) * 1000000.0 / static_cast<double>(fpsElapsedUs)
+                    : 0.0;
+                VideoMetrics::ewmaUpdate(VideoMetrics::captureFps(), captureFps);
+                std::wcout << L"[Stats] WGC=" << std::fixed << std::setprecision(1) << captureFps
+                           << L" fps, Encode=" << submitCount
+                           << L"/s, Target=" << g_targetFps.load()
+                           << L" fps, QueueDepth=" << qsz
+                           << L", OverwriteDrops/s=" << (od - lastOverwriteDrops)
+                           << L", BPSkips/s=" << (bp - lastBpSkips)
+                           << L", OutOfOrder/s=" << (oo - lastOutOfOrder)
+                           << std::endl;
                 lastOverwriteDrops = od;
                 lastBpSkips = bp;
                 lastOutOfOrder = oo;
                 submitCount = 0;
                 lastLog = nowDbg;
+                lastArrived = arrived;
+                fpsWindowStart = nowDbg;
             }
         }
         if (mmcssHandle) {
@@ -525,31 +542,25 @@ void StartCapture() {
 }
 
 void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& framePool) {
+    // Stop callbacks before waiting for the consumer; otherwise the producer can
+    // keep refilling the queue while shutdown waits for it to become empty.
+    framePool.FrameArrived(token);
     isCapturing.store(false);
-    g_ringCV.notify_all();
+    g_queueCV.notify_all();
 
     for (auto& thread : workerThreads) {
         if (thread.joinable()) thread.join();
     }
     workerThreads.clear();
 
-    // Clear ring storage
+    // Release all application-owned capture textures after the consumer exits.
     {
-        std::lock_guard<std::mutex> lock(g_ringMutex);
-        g_ring.clear();
-        g_ringCapacity = 0;
-        g_ringHead.store(0, std::memory_order_relaxed);
-        g_ringTail.store(0, std::memory_order_relaxed);
-
-        // Clear metadata ring
-        g_metadataRing.clear();
-        g_metadataCapacity = 0;
-        g_metadataHead.store(0, std::memory_order_relaxed);
-        g_metadataTail.store(0, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(g_queueMutex);
+        g_frameQueue.clear();
+        g_freeTextures.clear();
+        g_allocatedTextures = 0;
     }
-    // Removed unused encode queue cleanup
 
-    framePool.FrameArrived(token);
     framePool.Close();
     Encoder::FinalizeEncoder();
 }

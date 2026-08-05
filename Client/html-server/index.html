@@ -682,7 +682,6 @@
     let peerConnection;
     const hiddenVideoElement = document.getElementById('hiddenVideo');
     const canvas = document.getElementById('gameCanvas');
-    const ctx = canvas.getContext('2d');
     const debugLog = document.getElementById('debugLog');
     const streamViewport = document.getElementById('streamViewport');
 
@@ -717,6 +716,7 @@
     const mousePosition = {x: 0, y: 0};
 
     let frameCount = 0;
+    let lastFallbackDecodedFrames = 0;
     let lastFrameTime = Date.now();
     let fps = 0;
     let latency = 0;
@@ -731,27 +731,6 @@
 
     canvas.width = 1920;
     canvas.height = 1080;
-
-    // Canvas debug state
-    let debugSampleCounter = 0;
-    let lastBrightness = 0;
-    function sampleCanvasBrightness() {
-      try {
-        const w = Math.min(64, canvas.width);
-        const h = Math.min(36, canvas.height);
-        const img = ctx.getImageData(Math.floor((canvas.width - w) / 2), Math.floor((canvas.height - h) / 2), w, h).data;
-        let sum = 0;
-        for (let i = 0; i < img.length; i += 4) {
-          // Luma approx
-          sum += 0.2126 * img[i] + 0.7152 * img[i + 1] + 0.0722 * img[i + 2];
-        }
-        lastBrightness = (sum / (w * h)) | 0;
-        return lastBrightness;
-      } catch (e) {
-        log(`[VIDEO] canvas sample failed: ${e.message}`, 'warn');
-        return -1;
-      }
-    }
 
     // Debug: log video element state (readyState, size, currentTime)
     function logVideoState(label) {
@@ -933,11 +912,14 @@
     function renderVideoToCanvas() {
       if (!renderActive) return;
       // Video is rendered directly by the browser (bg-video class).
-      // This rAF loop exists only to update the FPS counter.
-      frameCount++;
       const currentTime = Date.now();
       if (currentTime - lastFrameTime >= 1000) {
-        fps = Math.round((frameCount * 1000) / (currentTime - lastFrameTime));
+        const quality = hiddenVideoElement.getVideoPlaybackQuality?.();
+        if (quality) {
+          const decodedDelta = quality.totalVideoFrames - lastFallbackDecodedFrames;
+          fps = Math.round((decodedDelta * 1000) / (currentTime - lastFrameTime));
+          lastFallbackDecodedFrames = quality.totalVideoFrames;
+        }
         frameCount = 0;
         lastFrameTime = currentTime;
         updatePerformanceDisplay();
@@ -965,6 +947,8 @@
 
     function startRenderingLoop() {
       renderActive = true;
+      lastFrameTime = Date.now();
+      lastFallbackDecodedFrames = hiddenVideoElement.getVideoPlaybackQuality?.().totalVideoFrames || 0;
       if (useVFC) {
         scheduleVideoFrameCallback();
       } else {

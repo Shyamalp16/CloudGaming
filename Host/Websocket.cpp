@@ -179,10 +179,16 @@ static void metricsExportLoop() {
             json m;
             m["type"] = "video-metrics";
             m["queueDepth"] = VideoMetrics::load(VideoMetrics::queueDepth());
+            m["wgcFramesArrived"] = VideoMetrics::load(VideoMetrics::wgcFramesArrived());
+            m["captureCopies"] = VideoMetrics::load(VideoMetrics::captureCopies());
             m["overwriteDrops"] = VideoMetrics::load(VideoMetrics::overwriteDrops());
             m["backpressureSkips"] = VideoMetrics::load(VideoMetrics::backpressureSkips());
             m["outOfOrder"] = VideoMetrics::load(VideoMetrics::outOfOrder());
-            m["vpGpuMs"] = VideoMetrics::vpGpuMs().load(std::memory_order_relaxed);
+            m["vpSubmissions"] = VideoMetrics::load(VideoMetrics::vpSubmissions());
+            m["encoderOutputs"] = VideoMetrics::load(VideoMetrics::encoderOutputs());
+            m["sendQueueDrops"] = VideoMetrics::load(VideoMetrics::sendQueueDrops());
+            m["sendQueueDepth"] = VideoMetrics::load(VideoMetrics::sendQueueDepth());
+            m["captureFps"] = VideoMetrics::captureFps().load(std::memory_order_relaxed);
             send_message(m);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));

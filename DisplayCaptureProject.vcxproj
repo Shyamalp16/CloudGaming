@@ -109,8 +109,8 @@
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>NDEBUG;CPPHTTPLIB_OPENSSL_SUPPORT;%(PreprocessorDefinitions);_ITERATOR_DEBUG_LEVEL=2</PreprocessorDefinitions>
-      <DebugInformationFormat Condition="'$(Configuration)|$(Platform)'=='Release|x64'">EditAndContinue</DebugInformationFormat>
+      <PreprocessorDefinitions>NDEBUG;WIN32_LEAN_AND_MEAN;NOMINMAX;CPPHTTPLIB_OPENSSL_SUPPORT;_ITERATOR_DEBUG_LEVEL=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DebugInformationFormat Condition="'$(Configuration)|$(Platform)'=='Release|x64'">ProgramDatabase</DebugInformationFormat>
       <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\ffmpeg\include\;C:\ffmpeg\include\boost\x64-windows-static\include\boost;D:\vcpkg\installed\x64-windows\include</AdditionalIncludeDirectories>
       <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Release|x64'">stdcpp20</LanguageStandard>
       <RuntimeLibrary Condition="'$(Configuration)|$(Platform)'=='Release|x64'">MultiThreadedDLL</RuntimeLibrary>
@@ -202,7 +202,6 @@
     <ClCompile Include="Host\main.cpp" />
     <ClCompile Include="Host\MatchmakerClient.cpp" />
     <ClCompile Include="Host\MouseInputHandler.cpp" />
-    <ClCompile Include="Host\pch.cpp" />
     <ClCompile Include="Host\ShutdownManager.cpp" />
     <ClCompile Include="Host\PacketQueue.cpp" />
     <ClCompile Include="Host\WebRTCWrapper.cpp" />

@@ -47,26 +47,21 @@ static inline void callWebRTCStatsCallback(WebRTCStatsCallback f, double p, doub
 static inline void wakeKeyboardThread(void) { }
 static inline void wakeMouseThread(void) { }
 
-// MMCSS setup for Go threads
-static HANDLE goMMCSSHandle = NULL;
-
-static void SetupGoThreadMMCSS(void) {
-    if (goMMCSSHandle == NULL) {
-        // Set up MMCSS for Go threads with "Pro Audio" class for consistent timing
-        DWORD taskIndex = 0;
-        goMMCSSHandle = AvSetMmThreadCharacteristicsA("Pro Audio", &taskIndex);
-        if (goMMCSSHandle != NULL) {
-            // Set thread priority to highest for real-time performance
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-        }
-    }
+// MMCSS is thread-affine. Each locked Go sender thread owns its own handle.
+static HANDLE SetupGoAudioThreadMMCSS(void) {
+    DWORD taskIndex = 0;
+    return AvSetMmThreadCharacteristicsA("Pro Audio", &taskIndex);
 }
 
-static void CleanupGoThreadMMCSS(void) {
-    if (goMMCSSHandle != NULL) {
-        AvRevertMmThreadCharacteristics(goMMCSSHandle);
-        goMMCSSHandle = NULL;
-    }
+static HANDLE SetupGoVideoThreadMMCSS(void) {
+    DWORD taskIndex = 0;
+    HANDLE handle = AvSetMmThreadCharacteristicsA("Playback", &taskIndex);
+    if (handle != NULL) AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH);
+    return handle;
+}
+
+static void CleanupGoThreadMMCSS(HANDLE handle) {
+    if (handle != NULL) AvRevertMmThreadCharacteristics(handle);
 }
 
 */
@@ -77,6 +72,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -242,6 +238,22 @@ var webrtcStats struct {
 	sendBitrateKbps  uint32
 	lastStatsUpdate  time.Time
 	statsMutex       sync.RWMutex
+}
+
+var videoBytesSentInterval uint64
+var videoPendingDrops uint32
+
+func addPendingVideoDrops(count uint32) {
+	for {
+		current := atomic.LoadUint32(&videoPendingDrops)
+		next := current + count
+		if next < current || next > 65535 {
+			next = 65535
+		}
+		if atomic.CompareAndSwapUint32(&videoPendingDrops, current, next) {
+			return
+		}
+	}
 }
 
 // Periodic stats monitoring goroutine
@@ -531,48 +543,31 @@ func reportAudioQueueHealth() {
 	}
 }
 
-// Estimate pacer queue length based on send queue depths and timing
+// Report the actual application queue depth and bytes accepted by Pion during
+// the last monitoring interval. Pion's internal pacer is not exposed here.
 func updatePacerQueueLength() {
-	// Estimate based on video send queue depth
 	videoQueueLen := uint32(len(videoSendQueue))
-
-	// For audio queue, we can't directly check length due to channel semantics
-	// In a real implementation, we'd maintain a separate counter or use Pion's stats
-	audioQueueLen := uint32(0) // Simplified - assume minimal audio queuing
-
-	// Estimate total pacer queue length
-	// In a real implementation, this would come from Pion's internal pacer stats
-	estimatedQueueLen := videoQueueLen + audioQueueLen
-
-	// Estimate send bitrate (rough calculation based on queue growth)
-	// This is a simplified estimation - real implementation would use actual bitrate
-	// For now, use a more realistic estimation based on video frame rate
-	estimatedBitrate := uint32(35000) // 35 Mbps baseline for 200fps video
-	if estimatedQueueLen > 1 {
-		// If queue is building up, network might be congested
-		// Calculate reduction factor based on queue length
-		reductionFactor := 1.0 - float64(estimatedQueueLen)/10.0
-		if reductionFactor < 0.1 { // Don't go below 10% of original bitrate
-			reductionFactor = 0.1
-		}
-		estimatedBitrate = uint32(float64(estimatedBitrate) * reductionFactor)
-	}
+	bytes := atomic.SwapUint64(&videoBytesSentInterval, 0)
+	// Monitoring runs every 500 ms: bytes * 8 / 0.5 / 1000 = bytes * 16 / 1000 kbps.
+	actualBitrateKbps := uint32((bytes * 16) / 1000)
 
 	webrtcStats.statsMutex.Lock()
-	webrtcStats.pacerQueueLength = estimatedQueueLen
-	webrtcStats.sendBitrateKbps = estimatedBitrate
+	webrtcStats.pacerQueueLength = videoQueueLen
+	webrtcStats.sendBitrateKbps = actualBitrateKbps
 	webrtcStats.statsMutex.Unlock()
 }
 
 // Global variables
 var (
-	peerConnection *webrtc.PeerConnection
-	pcMutex        sync.RWMutex
-	audioMutex     sync.Mutex                     // Separate mutex for audio RTP state to reduce contention
-	videoTrack     *webrtc.TrackLocalStaticSample // switched to sample track for pacing
-	audioTrack     *webrtc.TrackLocalStaticRTP
-	trackSSRC      uint32
-	audioSSRC      uint32
+	peerConnection   *webrtc.PeerConnection
+	pcMutex          sync.RWMutex
+	pcLifecycleMutex sync.Mutex
+	signalingMutex   sync.Mutex
+	audioMutex       sync.Mutex                     // Separate mutex for audio RTP state to reduce contention
+	videoTrack       *webrtc.TrackLocalStaticSample // switched to sample track for pacing
+	audioTrack       *webrtc.TrackLocalStaticRTP
+	trackSSRC        uint32
+	audioSSRC        uint32
 
 	// Audio queue depth monitoring for bitrate adaptation
 	audioQueueDepthSamples [10]int      // Circular buffer for recent queue depth samples
@@ -634,13 +629,17 @@ var (
 	audioSendStop  chan struct{}    // Stop signal for sender goroutine
 
 	// Granular video send path: bounded queue and dedicated sender goroutine
-	videoSendQueue chan media.Sample // Bounded channel for video samples (size ≤ 4)
-	videoSendStop  chan struct{}     // Stop signal for video sender goroutine
+	videoSendQueue chan queuedVideoSample // Bounded channel for encoded video frames
+	videoSendStop  chan struct{}          // Stop signal for video sender goroutine
 
 	// Buffer completion mechanism to prevent use-after-free
 	audioBufferCompletion chan []byte // Channel to signal buffer completion
-	videoBufferCompletion chan []byte // Channel to signal video buffer completion
 )
+
+type queuedVideoSample struct {
+	sample     media.Sample
+	isKeyframe bool
+}
 
 // AudioRTPState encapsulates all audio RTP state with atomic operations
 // This minimizes contention with control-plane operations and provides lock-free media writes
@@ -1038,24 +1037,16 @@ func initAudioSendQueue() {
 
 // initVideoSendQueue initializes the bounded video send queue and starts the sender goroutine
 func initVideoSendQueue() {
-	// Cap at 2 frames: oldest is dropped on overflow, so 2 = ~22ms at 90fps max burst delay.
-	// C++ kMaxSendQueue is also 2, keeping total pipeline buffering at ~44ms worst case.
-	videoSendQueue = make(chan media.Sample, 2)
+	// Cap at 2 frames; oldest is replaced on overflow and its duration is
+	// transferred to the replacement sample's RTP timeline.
+	videoSendQueue = make(chan queuedVideoSample, 2)
 	videoSendStop = make(chan struct{})
-
-	// Create buffer completion channel for safe buffer pool management
-	// Increased buffer size to prevent blocking at high throughput
-	videoBufferCompletion = make(chan []byte, 64) // Larger buffer for completion signals
 
 	// Start the dedicated video sender goroutine
 	go videoSenderGoroutine()
 
-	// Start the buffer completion handler goroutine
-	go videoBufferCompletionHandler()
-
 	log.Println("[Go/Pion] Audio send queue initialized with bounded channel (capacity: 16)")
-	log.Println("[Go/Pion] Video send queue initialized with bounded channel (capacity: 4)")
-	log.Println("[Go/Pion] Buffer completion mechanism initialized for use-after-free prevention")
+	log.Println("[Go/Pion] Video send queue initialized with bounded channel (capacity: 2)")
 }
 
 // audioBufferCompletionHandler safely manages buffer pool returns to prevent use-after-free
@@ -1098,8 +1089,10 @@ func audioBufferCompletionHandler() {
 // audioSenderGoroutine runs in a separate goroutine to send RTP packets without holding locks
 // This prevents head-of-line blocking and keeps the send path lock-granular
 func audioSenderGoroutine() {
-	// Set up MMCSS for this goroutine to ensure consistent timing
-	C.SetupGoThreadMMCSS()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	mmcssHandle := C.SetupGoAudioThreadMMCSS()
+	defer C.CleanupGoThreadMMCSS(mmcssHandle)
 	log.Println("[Go/Pion] Audio sender goroutine started with MMCSS priority (Pro Audio class)")
 
 	for {
@@ -1150,9 +1143,11 @@ func audioSenderGoroutine() {
 // videoSenderGoroutine runs in a separate goroutine to send video samples without holding locks
 // This prevents head-of-line blocking and keeps the video send path lock-granular
 func videoSenderGoroutine() {
-	// Set up MMCSS for this goroutine to ensure consistent timing
-	C.SetupGoThreadMMCSS()
-	log.Println("[Go/Pion] Video sender goroutine started with MMCSS priority (Pro Audio class)")
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	mmcssHandle := C.SetupGoVideoThreadMMCSS()
+	defer C.CleanupGoThreadMMCSS(mmcssHandle)
+	log.Println("[Go/Pion] Video sender goroutine started with MMCSS priority (Playback class)")
 
 	// Single reused idle timer — avoids the common anti-pattern of calling time.After
 	// inside a hot loop, which allocates a new timer goroutine + channel on every iteration
@@ -1162,7 +1157,7 @@ func videoSenderGoroutine() {
 
 	for {
 		select {
-		case sample := <-videoSendQueue:
+		case queued := <-videoSendQueue:
 			// Reset the idle timer so it only fires if no samples arrive for 10s
 			if !idleTimer.Stop() {
 				select {
@@ -1176,51 +1171,26 @@ func videoSenderGoroutine() {
 			track := videoTrack
 			pcMutex.RUnlock()
 			if track != nil {
-				if err := track.WriteSample(sample); err != nil {
+				if err := track.WriteSample(queued.sample); err != nil {
 					log.Printf("[Go/Pion] Error in video sender goroutine: %v", err)
+				} else {
+					atomic.AddUint64(&videoBytesSentInterval, uint64(len(queued.sample.Data)))
 				}
 			} else {
 				log.Printf("[Go/Pion] Video track is nil, dropping sample")
 			}
-			putSampleBuf(sample.Data)
+			putSampleBuf(queued.sample.Data)
 
 		case <-videoSendStop:
 			log.Println("[Go/Pion] Video sender goroutine stopped")
 			return
 
 		case <-idleTimer.C:
-			log.Printf("[Go/Pion] Video sender: no samples for 10 seconds (track nil: %v)", videoTrack == nil)
+			pcMutex.RLock()
+			trackMissing := videoTrack == nil
+			pcMutex.RUnlock()
+			log.Printf("[Go/Pion] Video sender: no samples for 10 seconds (track nil: %v)", trackMissing)
 			idleTimer.Reset(10 * time.Second)
-		}
-	}
-}
-
-// videoBufferCompletionHandler safely manages buffer pool returns to prevent use-after-free
-// This goroutine ensures buffers are only returned to the pool after WriteSample has finished reading them
-func videoBufferCompletionHandler() {
-	log.Println("[Go/Pion] Video buffer completion handler started")
-
-	bufferCount := 0
-	lastLogTime := time.Now()
-
-	for {
-		select {
-		case buf := <-videoBufferCompletion:
-			// Return buffer to pool now that WriteSample has finished reading it
-			putSampleBuf(buf)
-			bufferCount++
-
-			// Log buffer processing rate occasionally
-			if time.Since(lastLogTime) >= 5*time.Second {
-				log.Printf("[Go/Pion] Video buffer completion: %d buffers processed (%.1f buffers/sec)",
-					bufferCount, float64(bufferCount)/5.0)
-				bufferCount = 0
-				lastLogTime = time.Now()
-			}
-
-		case <-videoSendStop:
-			log.Println("[Go/Pion] Video buffer completion handler stopped")
-			return
 		}
 	}
 }
@@ -1533,7 +1503,10 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 }
 
 //export sendVideoSample
-func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.int {
+func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong, isKeyframe C.int) C.int {
+	if data == nil || size <= 0 {
+		return -2
+	}
 	// RLock: we only READ peerConnection, videoTrack, connectionState, videoFeedbackChannel.
 	pcMutex.RLock()
 	if peerConnection == nil || videoTrack == nil {
@@ -1559,26 +1532,53 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong) C.i
 	C.memcpy(unsafe.Pointer(&buf[0]), data, C.size_t(n))
 	dur := time.Duration(durationValue) * time.Microsecond
 
-	// Queue sample for the dedicated sender goroutine.
-	// Drop oldest if queue is full to maintain low latency.
-	sample := media.Sample{Data: buf, Duration: dur}
+	// Preserve RTP clock progression across application-level frame drops.
+	droppedBefore := atomic.SwapUint32(&videoPendingDrops, 0)
+	sample := media.Sample{
+		Data:               buf,
+		Duration:           dur,
+		PrevDroppedPackets: uint16(droppedBefore),
+	}
+	queued := queuedVideoSample{sample: sample, isKeyframe: isKeyframe != 0}
 	select {
-	case videoSendQueue <- sample:
+	case videoSendQueue <- queued:
 		return 0
 	default:
-		// Queue is full -- drain oldest and retry once
+		// Queue is full: replace the oldest sample and transfer its skipped
+		// duration to the replacement so the receiver timeline remains honest.
 		select {
-		case oldestSample := <-videoSendQueue:
-			putSampleBuf(oldestSample.Data)
+		case oldest := <-videoSendQueue:
+			// An IDR is the decoder's recovery point. Preserve it when the
+			// incoming frame is only a delta frame.
+			if oldest.isKeyframe && !queued.isKeyframe {
+				select {
+				case videoSendQueue <- oldest:
+					putSampleBuf(buf)
+					addPendingVideoDrops(uint32(sample.PrevDroppedPackets) + 1)
+					return -1
+				default:
+					putSampleBuf(oldest.sample.Data)
+				}
+			} else {
+				putSampleBuf(oldest.sample.Data)
+			}
+			transferred := uint32(sample.PrevDroppedPackets) +
+				uint32(oldest.sample.PrevDroppedPackets) + 1
+			if transferred > 65535 {
+				transferred = 65535
+			}
+			queued.sample.PrevDroppedPackets = uint16(transferred)
 			select {
-			case videoSendQueue <- sample:
+			case videoSendQueue <- queued:
 				return 0
 			default:
 				putSampleBuf(buf)
+				addPendingVideoDrops(uint32(queued.sample.PrevDroppedPackets) + 1)
 				return -1
 			}
 		default:
 			putSampleBuf(buf)
+			addPendingVideoDrops(uint32(queued.sample.PrevDroppedPackets) + 1)
 			return -1
 		}
 	}
@@ -1675,55 +1675,68 @@ func newProtocol() *string {
 	return &b
 }
 
+func drainSenderRTCP(sender *webrtc.RTPSender, mediaKind string) {
+	for {
+		if _, _, err := sender.ReadRTCP(); err != nil {
+			log.Printf("[Go/Pion] %s RTCP reader stopped: %v", mediaKind, err)
+			return
+		}
+	}
+}
+
 //export createPeerConnectionGo
 func createPeerConnectionGo() C.int {
-	pcMutex.Lock()
-	// defer pcMutex.Unlock()
+	pcLifecycleMutex.Lock()
+	defer pcLifecycleMutex.Unlock()
 
-	if peerConnection != nil {
-		_ = peerConnection.Close()
-		peerConnection = nil
-		videoTrack = nil
-		if dataChannel != nil {
-			if err := dataChannel.Close(); err != nil {
-				log.Printf(
-					"[Go/Pion] Error closing existing DataChannel: %v\n",
-					err,
-				)
-			}
+	pcMutex.Lock()
+	oldPC := peerConnection
+	oldDataChannel := dataChannel
+	oldMouseChannel := mouseChannel
+	oldLatencyChannel := latencyChannel
+	oldVideoFeedbackChannel := videoFeedbackChannel
+	peerConnection = nil
+	videoTrack = nil
+	audioTrack = nil
+	dataChannel = nil
+	mouseChannel = nil
+	latencyChannel = nil
+	videoFeedbackChannel = nil
+	connectionState = webrtc.PeerConnectionStateNew
+	lastAnswerSDP = ""
+	pcMutex.Unlock()
+
+	// Closing can synchronously run callbacks; never do it while pcMutex is held.
+	for _, dc := range []*webrtc.DataChannel{oldDataChannel, oldMouseChannel, oldLatencyChannel, oldVideoFeedbackChannel} {
+		if dc != nil {
+			_ = dc.Close()
 		}
-		dataChannel = nil
-		mouseChannel = nil
-		messageQueue = []string{}
-		mouseQueue = []string{}
-		lastAnswerSDP = ""
-		pendingRemoteCandidates = nil
-		pingTimestamps = make(map[uint64]int64)      // Initialize/clear the map
-		audioPingTimestamps = make(map[uint64]int64) // Initialize/clear audio ping map
-		audioPingCounter = 0                         // Reset audio ping counter
-		// Reset audio RTP state for new connection (atomic, lock-free)
-		audioRTPState.Reset()
-		// Clear any buffered audio packets from previous connection
-		audioBufferMutex.Lock()
-		for _, pkt := range audioConnectionBuffer {
-			putSampleBuf(pkt.Payload)
-		}
-		audioConnectionBuffer = audioConnectionBuffer[:0]
-		audioBufferMutex.Unlock()
-		log.Println("[Go/Pion] Audio RTP state reset for new connection")
-		log.Println(
-			"[Go/Pion] createPeerConnectionGo: Closed previous PeerConnection and reset state.",
-		)
-	} else {
-		// This is the first run, initialize the map.
-		pingTimestamps = make(map[uint64]int64)
-		audioPingTimestamps = make(map[uint64]int64) // Initialize audio ping map
-		audioPingCounter = 0                         // Initialize audio ping counter
-		// Initialize audio RTP state for first connection (atomic, lock-free)
-		audioRTPState.Reset()
-		log.Println("[Go/Pion] Audio RTP state initialized for first connection")
-		log.Println("[Go/Pion] createPeerConnectionGo: Initializing pingTimestamps for new PeerConnection.")
 	}
+	if oldPC != nil {
+		_ = oldPC.Close()
+	}
+
+	queueMutex.Lock()
+	messageQueue = nil
+	mouseQueue = nil
+	queueMutex.Unlock()
+	signalingMutex.Lock()
+	pendingRemoteCandidates = nil
+	signalingMutex.Unlock()
+	pingTimestampsMutex.Lock()
+	pingTimestamps = make(map[uint64]int64)
+	pingTimestampsMutex.Unlock()
+	audioPingMutex.Lock()
+	audioPingTimestamps = make(map[uint64]int64)
+	audioPingCounter = 0
+	audioPingMutex.Unlock()
+	audioRTPState.Reset()
+	audioBufferMutex.Lock()
+	for _, pkt := range audioConnectionBuffer {
+		putSampleBuf(pkt.Payload)
+	}
+	audioConnectionBuffer = audioConnectionBuffer[:0]
+	audioBufferMutex.Unlock()
 
 	mediaEngine := &webrtc.MediaEngine{}
 	i := &interceptor.Registry{}
@@ -1785,14 +1798,14 @@ func createPeerConnectionGo() C.int {
 		SDPSemantics: webrtc.SDPSemanticsUnifiedPlan,
 	}
 
-	var err error
-	peerConnection, err = api.NewPeerConnection(config)
+	newPeerConnection, err := api.NewPeerConnection(config)
 	if err != nil {
 		log.Printf("[Go/Pion] Error creating PeerConnection: %v\n", err)
-		peerConnection = nil
-		pcMutex.Unlock()
 		return 0
 	}
+	pcMutex.Lock()
+	peerConnection = newPeerConnection
+	defer pcMutex.Unlock()
 	log.Println(
 		"[Go/Pion] createPeerConnectionGo: New PeerConnection instance created successfully.",
 	)
@@ -2280,25 +2293,31 @@ func createPeerConnectionGo() C.int {
 	)
 	if err != nil {
 		log.Printf("[Go/Pion] Error creating video track: %v\n", err)
-		if pcErr := peerConnection.Close(); pcErr != nil {
+		failedPC := peerConnection
+		peerConnection = nil
+		pcMutex.Unlock()
+		if pcErr := failedPC.Close(); pcErr != nil {
 			log.Printf(
 				"[Go/Pion] createPeerConnectionGo: Error closing PeerConnection after track failure: %v\n",
 				pcErr,
 			)
 		}
-		peerConnection = nil
-		pcMutex.Unlock()
+		pcMutex.Lock()
 		return 0
 	}
-	if _, err := peerConnection.AddTrack(videoTrack); err != nil {
+	videoSender, err := peerConnection.AddTrack(videoTrack)
+	if err != nil {
 		log.Printf("[Go/Pion] Error adding video track: %v\n", err)
-		if pcErr := peerConnection.Close(); pcErr != nil {
+		failedPC := peerConnection
+		peerConnection = nil
+		pcMutex.Unlock()
+		if pcErr := failedPC.Close(); pcErr != nil {
 			log.Printf("[Go/Pion] createPeerConnectionGo: Error closing PeerConnection after AddTrack failure: %v\n", pcErr)
 		}
-		peerConnection = nil
-		pcMutex.Unlock()
+		pcMutex.Lock()
 		return 0
 	}
+	go drainSenderRTCP(videoSender, "video")
 
 	// Cap sender bitrate to ~5 Mbps to avoid wireless bursts
 	// Disabled: this Pion version doesn't expose MaxBitrate/SetParameters on RTPSender.
@@ -2357,6 +2376,7 @@ func createPeerConnectionGo() C.int {
 			log.Printf("[Go/Pion] Error adding audio track: %v\n", err2)
 		} else {
 			audioTrack = audio
+			go drainSenderRTCP(aSender, "audio")
 			aParams := aSender.GetParameters()
 			if len(aParams.Encodings) > 0 {
 				audioSSRC = uint32(aParams.Encodings[0].SSRC)
@@ -2422,36 +2442,47 @@ func createPeerConnectionGo() C.int {
 			lastSample = rtt
 		}
 	}()
-	pcMutex.Unlock()
 	return 1
 }
 
 //export handleOffer
 func handleOffer(offerSDP *C.char) {
-	pcMutex.Lock()
-
-	if peerConnection == nil {
+	pcMutex.RLock()
+	pc := peerConnection
+	pcMutex.RUnlock()
+	if pc == nil {
 		log.Println("[Go/Pion] handleOffer: no PeerConnection, creating one.")
-		pcMutex.Unlock()
 		if createPeerConnectionGo() == 0 {
 			log.Println(
 				"[Go/Pion] handleOffer: Failed to create PeerConnection. Aborting offer handling.",
 			)
 			return
 		}
-		pcMutex.Lock()
-		if peerConnection == nil {
+		pcMutex.RLock()
+		pc = peerConnection
+		pcMutex.RUnlock()
+		if pc == nil {
 			log.Println(
 				"[Go/Pion] handleOffer: PeerConnection is STILL nil after creation attempt. Aborting.",
 			)
-			pcMutex.Unlock()
 			return
 		}
 		log.Println(
 			"[Go/Pion] handleOffer: PeerConnection successfully created and available.",
 		)
 	}
-	defer pcMutex.Unlock()
+	pcLifecycleMutex.Lock()
+	defer pcLifecycleMutex.Unlock()
+	pcMutex.RLock()
+	pc = peerConnection
+	pcMutex.RUnlock()
+	if pc == nil {
+		return
+	}
+
+	// Serialize SDP and candidate state without blocking media's pcMutex.
+	signalingMutex.Lock()
+	defer signalingMutex.Unlock()
 
 	sdpGoString := C.GoString(offerSDP)
 	log.Printf("[Go/Pion] handleOffer: %s\n", sdpGoString)
@@ -2460,7 +2491,7 @@ func handleOffer(offerSDP *C.char) {
 		Type: webrtc.SDPTypeOffer,
 		SDP:  sdpGoString,
 	}
-	if err := peerConnection.SetRemoteDescription(offer); err != nil {
+	if err := pc.SetRemoteDescription(offer); err != nil {
 		log.Printf("[Go/Pion] Error setting remote offer: %v\n", err)
 		return
 	}
@@ -2471,14 +2502,14 @@ func handleOffer(offerSDP *C.char) {
 	if len(pendingRemoteCandidates) > 0 {
 		log.Printf("[Go/Pion] handleOffer: Adding %d buffered remote ICE candidates", len(pendingRemoteCandidates))
 		for _, c := range pendingRemoteCandidates {
-			if err := peerConnection.AddICECandidate(c); err != nil {
+			if err := pc.AddICECandidate(c); err != nil {
 				log.Printf("[Go/Pion] Error adding buffered ICE candidate: %v", err)
 			}
 		}
 		pendingRemoteCandidates = nil
 	}
 
-	answer, err := peerConnection.CreateAnswer(nil)
+	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		log.Printf("[Go/Pion] Error creating answer: %v\n", err)
 		return
@@ -2487,9 +2518,9 @@ func handleOffer(offerSDP *C.char) {
 	// answer.SDP = strings.ReplaceAll(answer.SDP, "profile-level-id=42e01f", "profile-level-id=42e033")
 	// log.Println("[Go/Pion] handleOffer: Answer created successfully (munged to 42e033).")
 
-	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+	gatherComplete := webrtc.GatheringCompletePromise(pc)
 	log.Println("[Go/Pion] handleOffer: Setting Local Description (answer).")
-	if err := peerConnection.SetLocalDescription(answer); err != nil {
+	if err := pc.SetLocalDescription(answer); err != nil {
 		log.Printf(
 			"[Go/Pion] handleOffer: Error setting local description (answer): %v\n",
 			err,
@@ -2507,25 +2538,30 @@ func handleOffer(offerSDP *C.char) {
 		)
 	}
 
-	if ld := peerConnection.LocalDescription(); ld != nil {
+	if ld := pc.LocalDescription(); ld != nil {
+		pcMutex.Lock()
 		lastAnswerSDP = ld.SDP
+		answerLength := len(lastAnswerSDP)
+		pcMutex.Unlock()
 		log.Printf(
 			"[Go/Pion] handleOffer: Answer SDP generated and stored (length: %d)\n",
-			len(lastAnswerSDP),
+			answerLength,
 		)
 	} else {
 		log.Println(
 			"[Go/Pion] handleOffer: LocalDescription is nil after ICE gathering for answer. Cannot provide SDP.",
 		)
+		pcMutex.Lock()
 		lastAnswerSDP = ""
+		pcMutex.Unlock()
 	}
 	log.Println("[Go/Pion] handleOffer: Processing complete.")
 }
 
 //export getAnswerSDP
 func getAnswerSDP() *C.char {
-	pcMutex.Lock()
-	defer pcMutex.Unlock()
+	pcMutex.RLock()
+	defer pcMutex.RUnlock()
 
 	if lastAnswerSDP == "" {
 		log.Println("[Go/Pion] getAnswerSDP: no SDP available!")
@@ -2541,24 +2577,26 @@ func freeCString(p *C.char) {
 
 //export handleRemoteIceCandidate
 func handleRemoteIceCandidate(candidateStr *C.char) {
-	pcMutex.Lock()
-	defer pcMutex.Unlock()
-
-	if peerConnection == nil {
+	pcMutex.RLock()
+	pc := peerConnection
+	pcMutex.RUnlock()
+	if pc == nil {
 		log.Println("[Go/Pion] handleRemoteIceCandidate: no PeerConnection!")
 		return
 	}
+	signalingMutex.Lock()
+	defer signalingMutex.Unlock()
 
 	cGoStr := C.GoString(candidateStr)
 	log.Printf("[Go/Pion] handleRemoteIceCandidate: %s\n", cGoStr)
 
 	candidate := webrtc.ICECandidateInit{Candidate: cGoStr}
-	if peerConnection.RemoteDescription() == nil {
+	if pc.RemoteDescription() == nil {
 		pendingRemoteCandidates = append(pendingRemoteCandidates, candidate)
 		log.Println("[Go/Pion] Buffered ICE candidate (remote description not set yet)")
 		return
 	}
-	if err := peerConnection.AddICECandidate(candidate); err != nil {
+	if err := pc.AddICECandidate(candidate); err != nil {
 		log.Printf("[Go/Pion] Error adding ICE candidate: %v\n", err)
 	} else {
 		log.Println("[Go/Pion] ICE Candidate added successfully.")
@@ -2778,24 +2816,31 @@ func getIceConnectionState() C.int {
 
 //export closePeerConnection
 func closePeerConnection() {
-	pcMutex.Lock()
-	defer pcMutex.Unlock()
+	pcLifecycleMutex.Lock()
+	defer pcLifecycleMutex.Unlock()
 
-	if peerConnection != nil {
-		// Best-effort close DataChannels first to avoid races with SCTP shutdown
-		if dataChannel != nil {
-			_ = dataChannel.Close()
+	pcMutex.Lock()
+	pc := peerConnection
+	channels := []*webrtc.DataChannel{dataChannel, mouseChannel, latencyChannel, videoFeedbackChannel}
+	peerConnection = nil
+	videoTrack = nil
+	audioTrack = nil
+	dataChannel = nil
+	mouseChannel = nil
+	latencyChannel = nil
+	videoFeedbackChannel = nil
+	lastAnswerSDP = ""
+	connectionState = webrtc.PeerConnectionStateClosed
+	pcMutex.Unlock()
+
+	// Closing can synchronously invoke callbacks that take pcMutex.
+	for _, dc := range channels {
+		if dc != nil {
+			_ = dc.Close()
 		}
-		if mouseChannel != nil {
-			_ = mouseChannel.Close()
-		}
-		if videoFeedbackChannel != nil {
-			_ = videoFeedbackChannel.Close()
-		}
-		_ = peerConnection.Close()
-		peerConnection = nil
-		videoTrack = nil
-		lastAnswerSDP = ""
+	}
+	if pc != nil {
+		_ = pc.Close()
 		log.Println("[Go/Pion] PeerConnection closed.")
 	}
 }
@@ -2909,6 +2954,21 @@ func closeGo() {
 		close(audioSendStop)
 		audioSendStop = nil
 		log.Println("[Go/Pion] Audio sender goroutine stop signal sent")
+	}
+	if videoSendStop != nil {
+		close(videoSendStop)
+		videoSendStop = nil
+		log.Println("[Go/Pion] Video sender goroutine stop signal sent")
+	}
+	if videoSendQueue != nil {
+		drained := 0
+		for len(videoSendQueue) > 0 {
+			queued := <-videoSendQueue
+			putSampleBuf(queued.sample.Data)
+			drained++
+		}
+		videoSendQueue = nil
+		log.Printf("[Go/Pion] Drained %d samples from video send queue", drained)
 	}
 
 	// Drain any remaining packets from the queue and return their buffers to pool

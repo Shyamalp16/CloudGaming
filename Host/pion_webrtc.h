@@ -141,7 +141,7 @@ extern "C" {
      * @param durationUs Frame duration in microseconds (e.g., 16667 for 60fps).
      * @return 0 on success, -1 on failure.
      */
-    int sendVideoSample(uint8_t* data, int size, int64_t durationUs);
+    int sendVideoSample(uint8_t* data, int size, int64_t durationUs, int isKeyframe);
 
     /**
      * @brief Sends an Opus audio packet (RTP payload) to the WebRTC pipeline.

@@ -200,9 +200,6 @@
     <ClCompile Include="Host\main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Host\pch.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="Host\Websocket.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

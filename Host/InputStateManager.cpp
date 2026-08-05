@@ -2,6 +2,7 @@
 #include <iostream>
 #include <sstream>
 #include <algorithm>
+#include <vector>
 #include <nlohmann/json.hpp>
 
 namespace InputStateManager {
@@ -153,36 +154,37 @@ MousePosition Manager::getMousePosition() const {
 }
 
 void Manager::emergencyReleaseAllKeys(const std::string& reason) {
-    std::lock_guard<std::mutex> lock(stateMutex);
+    std::vector<std::string> eventsToFire;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        uint64_t ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        size_t releasedCount = 0;
+        for (const auto& [jsCode, keyInfo] : keyStates) {
+            if (keyInfo.state == KeyState::Pressed || keyInfo.state == KeyState::Stuck) {
+                updateKeyStateLocked(jsCode, KeyState::Released, ts);
 
-    size_t releasedCount = 0;
-    for (const auto& [jsCode, keyInfo] : keyStates) {
-        if (keyInfo.state == KeyState::Pressed || keyInfo.state == KeyState::Stuck) {
-            updateKeyState(jsCode, KeyState::Released, std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
-
-            // Create synthetic keyup event
-            nlohmann::json syntheticEvent = {
-                {"type", "keyup"},
-                {"code", jsCode},
-                {"key", jsCode}, // Simplified mapping
-                {"timestamp", std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count()},
-                {"emergency", true},
-                {"reason", reason}
-            };
-
-            if (eventCallback) {
-                eventCallback("emergency_keyup", syntheticEvent.dump());
+                // Create synthetic keyup event
+                nlohmann::json syntheticEvent = {
+                    {"type", "keyup"},
+                    {"code", jsCode},
+                    {"key", jsCode},
+                    {"timestamp", ts},
+                    {"emergency", true},
+                    {"reason", reason}
+                };
+                eventsToFire.push_back(syntheticEvent.dump());
+                releasedCount++;
             }
+        }
 
-            releasedCount++;
+        if (releasedCount > 0) {
+            logStateEvent("emergency_release", "Released " + std::to_string(releasedCount) +
+                         " keys due to: " + reason);
         }
     }
-
-    if (releasedCount > 0) {
-        logStateEvent("emergency_release", "Released " + std::to_string(releasedCount) +
-                     " keys due to: " + reason);
+    for (const auto& ev : eventsToFire) {
+        if (eventCallback) eventCallback("emergency_keyup", ev);
     }
 }
 
@@ -238,53 +240,63 @@ void Manager::checkForStuckKeys() {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(stateMutex);
-    uint64_t currentTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    std::vector<std::string> eventsToFire;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        uint64_t currentTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
 
-    for (auto& [jsCode, keyInfo] : keyStates) {
-        if (keyInfo.state == KeyState::Pressed) {
-            auto timeout = getKeyTimeout(jsCode);
-            uint64_t timeoutMs = std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count();
+        for (auto& [jsCode, keyInfo] : keyStates) {
+            if (keyInfo.state == KeyState::Pressed) {
+                auto timeout = getKeyTimeout(jsCode);
+                uint64_t timeoutMs = std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count();
 
-            if (currentTime - keyInfo.lastEventTime > timeoutMs) {
-                // Mark as stuck and initiate recovery
-                updateMetrics("stuckKeysDetected");
-                recoverStuckKey(jsCode);
+                if (currentTime - keyInfo.lastEventTime > timeoutMs) {
+                    updateMetrics("stuckKeysDetected");
+                    std::string ev = recoverStuckKeyLocked(jsCode);
+                    if (!ev.empty()) eventsToFire.push_back(std::move(ev));
+                }
             }
         }
     }
+    // Fire callbacks after releasing lock (avoids re-entrancy / "resource deadlock would occur")
+    for (const auto& ev : eventsToFire) {
+        if (eventCallback) eventCallback("stuck_key_recovery", ev);
+    }
 }
 
-void Manager::recoverStuckKey(const std::string& jsCode) {
-    // Mark key as stuck
-    {
-        std::lock_guard<std::mutex> lock(stateMutex);
-        if (keyStates.find(jsCode) != keyStates.end()) {
-            keyStates[jsCode].state = KeyState::Stuck;
-        }
-    }
+std::string Manager::recoverStuckKeyLocked(const std::string& jsCode) {
+    // Caller must hold stateMutex. Returns recovery event JSON to fire after lock release.
+    auto it = keyStates.find(jsCode);
+    if (it == keyStates.end()) return {};
 
-    // Create recovery event
-    nlohmann::json recoveryEvent = {
-        {"type", "stuck_key_recovery"},
-        {"code", jsCode},
-        {"timestamp", std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count()},
-        {"action", "synthetic_keyup"}
-    };
+    it->second.state = KeyState::Stuck;
 
-    if (eventCallback) {
-        eventCallback("stuck_key_recovery", recoveryEvent.dump());
-    }
-
-    // Update key state to UP
     uint64_t currentTime = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    updateKeyState(jsCode, KeyState::Released, currentTime);
+    updateKeyStateLocked(jsCode, KeyState::Released, currentTime);
 
     updateMetrics("stuckKeysRecovered");
     logStateEvent("stuck_key_recovered", "Recovered stuck key: " + jsCode);
+
+    nlohmann::json recoveryEvent = {
+        {"type", "stuck_key_recovery"},
+        {"code", jsCode},
+        {"timestamp", currentTime},
+        {"action", "synthetic_keyup"}
+    };
+    return recoveryEvent.dump();
+}
+
+void Manager::recoverStuckKey(const std::string& jsCode) {
+    std::string ev;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        ev = recoverStuckKeyLocked(jsCode);
+    }
+    if (eventCallback && !ev.empty()) {
+        eventCallback("stuck_key_recovery", ev);
+    }
 }
 
 bool Manager::processKeyboardEvent(const std::string& eventType, const nlohmann::json& eventData) {
@@ -426,7 +438,12 @@ std::chrono::milliseconds Manager::getKeyTimeout(const std::string& jsCode) cons
 void Manager::updateKeyState(const std::string& jsCode, KeyState newState,
                                       uint64_t timestamp, uint32_t sequenceId) {
     std::lock_guard<std::mutex> lock(stateMutex);
+    updateKeyStateLocked(jsCode, newState, timestamp, sequenceId);
+}
 
+void Manager::updateKeyStateLocked(const std::string& jsCode, KeyState newState,
+                                   uint64_t timestamp, uint32_t sequenceId) {
+    // Caller must hold stateMutex
     KeyInfo& keyInfo = keyStates[jsCode];
     KeyState oldState = keyInfo.state;
 

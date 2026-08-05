@@ -40,12 +40,11 @@ namespace Encoder {
     // Configure hardware frame pool size (ring of input D3D11 frames)
     void SetHwFramePoolSize(int pool_size);
 
+    // Configure encode resolution (0 = use capture size). VP downscales capture->encode for FPS.
+    void SetEncodeSize(int width, int height);
+
     // Configure whether to signal full range (PC) or limited range (TV) in color metadata
     void SetFullRangeColor(bool enable_full_range);
-
-    // Configure pacing: fixed FPS or fixed duration (microseconds)
-    void SetPacingFps(int fps);
-    void SetPacingFixedUs(int duration_us);
 
     // Configure PLI policy: ignore flag, min interval (ms), and min loss threshold
     void ConfigurePliPolicy(bool ignorePli, int minIntervalMs, double minLossThreshold);
@@ -67,27 +66,10 @@ namespace Encoder {
                                     int increase_interval_ms);
     void OnRtcpFeedback(double packetLoss, double rtt, double jitter);
 
-    // Backpressure visibility for capture loop
-    bool IsBacklogged(int recent_window_ms, int min_events);
-    enum BackpressureLevel {
-        NONE = 0,
-        MILD = 1,      // Occasional EAGAIN, minor congestion
-        MODERATE = 2,  // Sustained EAGAIN, moderate congestion
-        SEVERE = 3     // Persistent EAGAIN, severe congestion
-    };
-    BackpressureLevel GetBackpressureLevel();
-    void GetAndResetBackpressureStats(int &eagainEvents);
-
-    // Enable/disable GPU timing instrumentation around VideoProcessorBlt
-    void SetGpuTimingEnabled(bool enable);
-
-    // Enable/disable D3D11 deferred context path for VideoProcessorBlt
-    void SetDeferredContextEnabled(bool enable);
-
     // HDR tone mapping configuration
     void SetHdrToneMappingConfig(bool enabled, const std::string& method, float exposure, float gamma, float saturation);
 
-    extern "C" int sendVideoSample(uint8_t* data, int size, int64_t durationUs);
+    extern "C" int sendVideoSample(uint8_t* data, int size, int64_t durationUs, int isKeyframe);
 
     extern int currentWidth;
     extern int currentHeight;

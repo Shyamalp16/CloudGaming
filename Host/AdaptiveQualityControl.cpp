@@ -99,18 +99,18 @@ NetworkCondition QualityController::assessNetworkCondition() const {
         return NetworkCondition::Fair;
     }
 
-    // Good condition: Low RTT and low loss and short queue
-    if (stats.rttMs <= config.rttGoodThreshold &&
-        stats.packetLoss <= config.lossGoodThreshold &&
-        stats.pacerQueueLength <= config.queueGoodThreshold) {
-        return NetworkCondition::Good;
-    }
-
     // Excellent condition: Very low RTT and very low loss and minimal queue
     if (stats.rttMs <= config.rttExcellentThreshold &&
         stats.packetLoss <= config.lossExcellentThreshold &&
         stats.pacerQueueLength <= config.queueExcellentThreshold) {
         return NetworkCondition::Excellent;
+    }
+
+    // Good condition: Low RTT and low loss and short queue
+    if (stats.rttMs <= config.rttGoodThreshold &&
+        stats.packetLoss <= config.lossGoodThreshold &&
+        stats.pacerQueueLength <= config.queueGoodThreshold) {
+        return NetworkCondition::Good;
     }
 
     // Default to Good if conditions don't match extremes
@@ -137,11 +137,19 @@ QualityDecision QualityController::shouldDropFrame() {
         now - droppingState.lastFrameTime).count();
 
     if (timeSinceLastFrame < static_cast<long long>(config.minFrameIntervalMs)) {
+        droppingState.frameCounter++;
+        droppingState.framesDropped++;
         return QualityDecision{true, NetworkCondition::Excellent, 0.0, 1,
                              "Frame rate too high, enforcing minimum interval"};
     }
 
-    NetworkCondition condition = assessNetworkCondition();
+    NetworkCondition condition;
+    NetworkStats statsSnapshot;
+    {
+        std::lock_guard<std::mutex> statsLock(statsMutex);
+        condition = assessNetworkCondition();
+        statsSnapshot = currentStats;
+    }
     double dropRatio = 0.0;
 
     // Determine drop ratio based on network condition
@@ -172,27 +180,30 @@ QualityDecision QualityController::shouldDropFrame() {
     bool shouldDrop = false;
     uint32_t framesUntilNext = 0;
 
+    dropRatio = std::clamp(dropRatio, 0.0, 1.0);
     if (dropRatio > 0.0) {
-        // Use a simple counter-based dropping strategy
-        // This ensures even distribution of dropped frames
-        uint32_t dropInterval = static_cast<uint32_t>(1.0 / dropRatio);
-        shouldDrop = (droppingState.frameCounter % dropInterval) != 0;
-
-        if (shouldDrop) {
-            framesUntilNext = dropInterval - (droppingState.frameCounter % dropInterval);
+        // Accumulation produces the requested ratio for arbitrary values instead
+        // of inverting it through integer division (25% used to drop 75%).
+        droppingState.dropAccumulator += dropRatio;
+        if (droppingState.dropAccumulator >= 1.0) {
+            droppingState.dropAccumulator -= 1.0;
+            shouldDrop = true;
         }
+        framesUntilNext = static_cast<uint32_t>(std::ceil(
+            (1.0 - droppingState.dropAccumulator) / dropRatio));
+    } else {
+        droppingState.dropAccumulator = 0.0;
     }
 
     droppingState.frameCounter++;
 
     if (shouldDrop) {
         droppingState.framesDropped++;
-        droppingState.lastFrameTime = now;
 
         std::string reason = "Network condition: " + std::to_string(static_cast<int>(condition)) +
-                           ", RTT: " + std::to_string(currentStats.rttMs) + "ms" +
-                           ", Loss: " + std::to_string(currentStats.packetLoss * 100.0) + "%" +
-                           ", Queue: " + std::to_string(currentStats.pacerQueueLength);
+                           ", RTT: " + std::to_string(statsSnapshot.rttMs) + "ms" +
+                           ", Loss: " + std::to_string(statsSnapshot.packetLoss * 100.0) + "%" +
+                           ", Queue: " + std::to_string(statsSnapshot.pacerQueueLength);
 
         return QualityDecision{true, condition, dropRatio, framesUntilNext, reason};
     } else {

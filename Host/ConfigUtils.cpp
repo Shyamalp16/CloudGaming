@@ -94,18 +94,6 @@ void ApplyVideoSettings(const nlohmann::json& config)
     bool fullRange = vcfg.value("fullRange", true);
     Encoder::SetFullRangeColor(fullRange);
 
-    bool gpuTiming = vcfg.value("gpuTiming", false);
-    Encoder::SetGpuTimingEnabled(gpuTiming);
-
-    bool deferredCtx = vcfg.value("deferredContext", false);
-    Encoder::SetDeferredContextEnabled(deferredCtx);
-
-    if (vcfg.contains("pacingFixedUs")) {
-        Encoder::SetPacingFixedUs(std::max(1, vcfg["pacingFixedUs"].get<int>()));
-    } else if (vcfg.contains("pacingFps")) {
-        Encoder::SetPacingFps(std::max(1, vcfg["pacingFps"].get<int>()));
-    }
-
     bool ignorePli = vcfg.value("ignorePli", false);
     int minPliIntervalMs = vcfg.value("minPliIntervalMs", 500);
     double minLossThreshold = vcfg.value("minPliLossThreshold", 0.03);
@@ -116,7 +104,16 @@ void ApplyVideoSettings(const nlohmann::json& config)
         Encoder::SetHwFramePoolSize(pool);
     }
 
-    std::string preset = vcfg.value("preset", std::string("p5"));
+    if (vcfg.contains("encodeWidth") && vcfg.contains("encodeHeight")) {
+        int encW = vcfg["encodeWidth"].get<int>();
+        int encH = vcfg["encodeHeight"].get<int>();
+        if (encW > 0 && encH > 0) {
+            Encoder::SetEncodeSize(encW, encH);
+            std::wcout << L"[Config] Encode downscale: " << encW << L"x" << encH << std::endl;
+        }
+    }
+
+    std::string preset = vcfg.value("preset", std::string("p2"));
     std::string rc     = vcfg.value("rc", std::string("cbr"));
     int bf             = vcfg.value("bf", 0);
     int rcLookahead    = vcfg.value("rcLookahead", 0);
@@ -146,6 +143,9 @@ void ApplyCaptureSettings(const nlohmann::json& config, int configuredFps)
         return;
     }
     auto ccfg = config["host"]["capture"];
+    if (ccfg.contains("copyPoolSize")) {
+        SetCopyPoolSize(std::max(2, ccfg["copyPoolSize"].get<int>()));
+    }
     if (ccfg.contains("maxQueueDepth")) {
         SetMaxQueuedFrames(std::max(1, ccfg["maxQueueDepth"].get<int>()));
     }
@@ -162,27 +162,15 @@ void ApplyCaptureSettings(const nlohmann::json& config, int configuredFps)
         bool border = ccfg.value("borderRequired", true);
         SetBorderRequired(border);
     }
-    if (ccfg.contains("dropWindowMs") || ccfg.contains("dropMinEvents")) {
-        int w = ccfg.value("dropWindowMs", 200);
-        int m = ccfg.value("dropMinEvents", 2);
-        SetBackpressureDropPolicy(w, m);
-    }
     if (ccfg.contains("mmcss")) {
         auto mcfg = ccfg["mmcss"];
         bool enable = mcfg.value("enable", true);
         int prio = mcfg.value("priority", 2);
         SetMmcssConfig(enable, prio);
     }
-    if (ccfg.contains("minUpdateInterval100ns")) {
-        auto interval = ccfg.value("minUpdateInterval100ns", 0LL);
-        SetMinUpdateInterval100ns(interval);
-    } else if (configuredFps > 0) {
+    if (configuredFps > 0) {
         long long interval = 10000000LL / configuredFps;
         SetMinUpdateInterval100ns(interval);
-    }
-    if (ccfg.contains("skipUnchanged")) {
-        bool skip = ccfg.value("skipUnchanged", false);
-        SetSkipUnchanged(skip);
     }
 }
 

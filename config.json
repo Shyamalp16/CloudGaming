@@ -4,7 +4,7 @@
     "matchmakerUrl": "https://matchmaker-production-5b36.up.railway.app"
   },
   "host": {
-    "targetProcessName": "SandFall-Win64-Shipping.exe",
+    "targetProcessName": "vlc.exe",
     "signalingUrl": "wss://signaling-server-production-acd4.up.railway.app",
     "matchmaker": {
       "url": "https://matchmaker-production-5b36.up.railway.app",
@@ -18,7 +18,6 @@
     },
     "video": {
         "fps": 60,
-        "pacingFixedUs": 16666,
         "bitrateStart": 8000000,
         "bitrateMin": 8000000,
         "bitrateMax": 12000000,
@@ -31,15 +30,14 @@
         "asyncDepth": 2,
         "surfaces": 3,
         "ignorePli": false,
-        "minPliIntervalMs": 3000,
-        "minPliLossThreshold": 0.15,
+        "minPliIntervalMs": 500,
+        "minPliLossThreshold": 0.03,
         "bitrateController": {
             "increaseStepBps": 1000000,
             "decreaseCooldownMs": 1000,
             "cleanSamplesRequired": 3,
             "increaseIntervalMs": 1000
         },
-        "gpuTiming": false,
         "hdrToneMapping": {
             "enabled": false,
             "method": "reinhard",
@@ -51,17 +49,10 @@
     "capture": {
       "copyPoolSize": 4,
       "maxQueueDepth": 2,
-      "framePoolBuffers": 2,
-      "dropWindowMs": 500,
-      "dropMinEvents": 12,
-      "mmcss": { "enable": true, "priority": 4 },
+      "framePoolBuffers": 3,
+      "mmcss": { "enable": true, "priority": 2 },
       "cursor": false,
-      "borderRequired": false,
-      "minUpdateInterval100ns": 166666,
-      "skipUnchanged": true,
-      "adaptiveBackoff": false,
-      "adaptiveWindowMs": 2000,
-      "adaptiveEagainThreshold": 8
+      "borderRequired": false
     },
     "audio": {
       "processLoopback": {
@@ -171,9 +162,9 @@
         "queuePoorThreshold": 12,
         "excellentDropRatio": 0.0,
         "goodDropRatio": 0.0,
-        "fairDropRatio": 0.0,
-        "poorDropRatio": 0.0,
-        "criticalDropRatio": 0.0,
+        "fairDropRatio": 0.1,
+        "poorDropRatio": 0.25,
+        "criticalDropRatio": 0.5,
         "minFrameIntervalMs": 0,
         "statsUpdateIntervalMs": 100
       }

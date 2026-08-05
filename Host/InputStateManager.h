@@ -229,12 +229,15 @@ private:
     void recoveryLoop();
     void checkForStuckKeys();
     void recoverStuckKey(const std::string& jsCode);
+    // Assumes stateMutex is already held. Returns recovery event JSON to fire after lock release.
+    std::string recoverStuckKeyLocked(const std::string& jsCode);
     bool processKeyboardEvent(const std::string& eventType, const nlohmann::json& eventData);
     bool processMouseEvent(const std::string& eventType, const nlohmann::json& eventData);
     MousePosition transformMouseCoordinates(const nlohmann::json& eventData);
     bool isModifierKey(const std::string& jsCode) const;
     std::chrono::milliseconds getKeyTimeout(const std::string& jsCode) const;
     void updateKeyState(const std::string& jsCode, KeyState newState, uint64_t timestamp, uint32_t sequenceId = 0);
+    void updateKeyStateLocked(const std::string& jsCode, KeyState newState, uint64_t timestamp, uint32_t sequenceId = 0);
     void updateMouseButtonState(int button, MouseButtonState newState, uint64_t timestamp, uint32_t sequenceId = 0);
     void updateMousePosition(const MousePosition& newPosition);
     bool validateKeyTransition(const std::string& jsCode, KeyState oldState, KeyState newState);

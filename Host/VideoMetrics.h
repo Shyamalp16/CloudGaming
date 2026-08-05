@@ -6,17 +6,18 @@
 namespace VideoMetrics {
 
 // Capture/queue metrics
+inline std::atomic<uint64_t>& wgcFramesArrived() { static std::atomic<uint64_t> v{0}; return v; }
+inline std::atomic<uint64_t>& captureCopies() { static std::atomic<uint64_t> v{0}; return v; }
 inline std::atomic<uint64_t>& overwriteDrops() { static std::atomic<uint64_t> v{0}; return v; }
 inline std::atomic<uint64_t>& backpressureSkips() { static std::atomic<uint64_t> v{0}; return v; }
 inline std::atomic<uint64_t>& outOfOrder() { static std::atomic<uint64_t> v{0}; return v; }
 inline std::atomic<uint64_t>& queueDepth() { static std::atomic<uint64_t> v{0}; return v; }
+inline std::atomic<uint64_t>& vpSubmissions() { static std::atomic<uint64_t> v{0}; return v; }
+inline std::atomic<uint64_t>& encoderOutputs() { static std::atomic<uint64_t> v{0}; return v; }
 inline std::atomic<uint64_t>& eagainEvents() { static std::atomic<uint64_t> v{0}; return v; }
 inline std::atomic<uint64_t>& sendQueueDrops() { static std::atomic<uint64_t> v{0}; return v; }
 // Depth of the encoder->Go sender queue
 inline std::atomic<uint64_t>& sendQueueDepth() { static std::atomic<uint64_t> v{0}; return v; }
-
-// GPU timing (ms, last observed)
-inline std::atomic<double>& vpGpuMs() { static std::atomic<double> v{0.0}; return v; }
 
 // EWMAs and last-observed timings (low overhead)
 inline std::atomic<double>& captureFps() { static std::atomic<double> v{0.0}; return v; }

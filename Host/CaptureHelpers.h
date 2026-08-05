@@ -43,8 +43,8 @@ void SetCaptureTargetFps(int fps);
 // Configure maximum queued frames for capture backpressure
 void SetMaxQueuedFrames(int maxDepth);
 
-// Configure encoder backpressure drop policy (window in ms, minimum EAGAIN events)
-void SetBackpressureDropPolicy(int windowMs, int minEvents);
+// Configure the application-owned BGRA texture pool used to retain WGC frames.
+void SetCopyPoolSize(int poolSize);
 
 // Configure MMCSS usage and priority (0=LOW,1=NORMAL,2=HIGH,3=CRITICAL)
 void SetMmcssConfig(bool enable, int priority);
@@ -55,10 +55,5 @@ void SetCursorCaptureEnabled(bool enable);
 // Configure border requirement for capture session (visual border)
 void SetBorderRequired(bool required);
 
-// (Removed) Configure copy texture pool size (unused)
-
 // Configure WGC session MinUpdateInterval in 100ns units (0 disables)
 void SetMinUpdateInterval100ns(long long interval100ns);
-
-// Enable/disable skipping encode on unchanged frames (heuristic)
-void SetSkipUnchanged(bool enable);

@@ -118,6 +118,18 @@ bool SetupD3D(
                 << std::hex << hr << std::endl;
             return false;
         }
+
+        // WGC delivers frames on a free-threaded callback while the encoder uses
+        // the same immediate context from its consumer thread. D3D11 immediate
+        // contexts are not thread-safe unless ID3D11Multithread protection is
+        // enabled. This keeps CopyResource and VideoProcessorBlt in one ordered
+        // command stream and prevents intermittent texture corruption.
+        auto multithread = d3dContext.try_as<ID3D11Multithread>();
+        if (!multithread) {
+            std::wcerr << L"[SetupD3D] ID3D11Multithread is unavailable." << std::endl;
+            return false;
+        }
+        multithread->SetMultithreadProtected(TRUE);
 		myD3DDevice = d3dDevice;
         std::wcout << L"[SetupD3D] Created D3D device & context. FeatureLevel="
             << selectedFeatureLevel << std::endl;

@@ -17,8 +17,12 @@ void PrintBanner(const std::string& roomId)
 void MonitorConnection()
 {
     int state = getPeerConnectionState();
+    static int lastState = -1;
+    if (state == lastState) return;
+    lastState = state;
     if (state == 4 || state == 5 || state == 6) {
-        std::wcout << L"[runtime] Peer disconnected (state=" << state << L"). Keeping host alive for reconnection." << std::endl;
+        std::wcout << L"[runtime] Peer disconnected (state=" << state
+                   << L"). Keeping host alive for reconnection.\n";
     }
 }
 

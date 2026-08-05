@@ -1,7 +1,9 @@
 #pragma once
 #define _WEBSOCKETPP_CPP11_STL_
 #define BOOST_ALL_NO_LIB
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 
 #include <stdint.h>  // For uint64_t
 #include <winsock2.h>
