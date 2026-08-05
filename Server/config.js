@@ -9,6 +9,8 @@ const schema = z.object({
 	REDIS_URL: z.string().url().default('redis://127.0.0.1:6379'),
 	ROOM_CAPACITY: z.preprocess((v) => Number(v), z.number().int().positive()).default(2),
 	ROOM_TTL_SECONDS: z.preprocess((v) => Number(v), z.number().int().positive()).default(120),
+	HOST_TTL_SECONDS: z.preprocess((v) => Number(v), z.number().int().positive()).default(60),
+	ALLOCATION_RESERVATION_SECONDS: z.preprocess((v) => Number(v), z.number().int().positive()).default(20),
 	MESSAGE_MAX_BYTES: z.preprocess((v) => Number(v), z.number().int().positive()).default(256 * 1024),
 	BACKPRESSURE_CLOSE_THRESHOLD_BYTES: z.preprocess((v) => Number(v), z.number().int().positive()).default(5 * 1024 * 1024),
 	HEARTBEAT_INTERVAL_MS: z.preprocess((v) => Number(v), z.number().int().positive()).default(30000),
@@ -37,11 +39,6 @@ const schema = z.object({
 	JWKS_URL: z.string().optional(),
 	JWKS_CACHE_TTL: z.preprocess((v) => Number(v), z.number().int().positive()).optional(),
 	ROOMS_CLAIM: z.string().optional(),
-	// Public WSS URL returned to clients by the matchmaker so they know where to
-	// connect for WebRTC signaling. Must be set in production.
-	// Example: wss://signaling.yourdomain.com
-	SIGNALING_PUBLIC_URL: z.string().optional(),
-
 	METERED_DOMAIN:  z.string().optional(),
 	METERED_API_KEY: z.string().optional(),
 	TURN_EXPIRY_SECONDS: z.preprocess((v) => Number(v), z.number().int().positive()).default(14400), // 4 hours
@@ -63,6 +60,8 @@ const config = {
 	redisUrl: parsed.REDIS_URL,
 	roomCapacity: parsed.ROOM_CAPACITY,
 	roomTtlSeconds: parsed.ROOM_TTL_SECONDS,
+	hostTtlSeconds: parsed.HOST_TTL_SECONDS,
+	allocationReservationSeconds: parsed.ALLOCATION_RESERVATION_SECONDS,
 	messageMaxBytes: parsed.MESSAGE_MAX_BYTES,
 	backpressureCloseThresholdBytes: parsed.BACKPRESSURE_CLOSE_THRESHOLD_BYTES,
 	heartbeatIntervalMs: parsed.HEARTBEAT_INTERVAL_MS,
@@ -93,7 +92,6 @@ const config = {
 		jwksTtlMs: parsed.JWKS_CACHE_TTL || 300000,
 		roomsClaim: parsed.ROOMS_CLAIM || 'rooms',
 	},
-	signalingPublicUrl: parsed.SIGNALING_PUBLIC_URL || null,
 	metered: {
 		domain:          parsed.METERED_DOMAIN  || null,
 		apiKey:          parsed.METERED_API_KEY || null,

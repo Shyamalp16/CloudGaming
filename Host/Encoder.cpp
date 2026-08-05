@@ -2,20 +2,20 @@
 #include "GlobalTime.h"
 #include "pion_webrtc.h"
 #include <Windows.h>
-#include <functional>
 #include <mutex>
-#include <condition_variable>
 #include <fstream>
 #include <chrono>
-#include "PacketQueue.h"
 #include "D3DHelpers.h" // For GetGpuVendorId
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/avutil.h>  // AV_NOPTS_VALUE
+#include <libavutil/opt.h>
+}
 #include <d3d11.h>
 #include <wrl.h>
 #include <unordered_map>
-#include "EtwMarkers.h"
-#include "VideoMetrics.h"
 #include <thread>
 #include <deque>
 #include <cstring>
@@ -26,35 +26,17 @@
 #pragma comment(lib, "Avrt.lib")
 #include "ThreadPriorityManager.h"
 
-// Removed unused software conversion components
-int Encoder::currentWidth = 0;
-int Encoder::currentHeight = 0;
-
-std::mutex Encoder::g_encoderMutex;
+static std::mutex g_encoderMutex;
 
 // Separate mutex for VideoProcessor (VP) resources — do not hold g_encoderMutex during VideoProcessorBlt.
 // This removes CPU-side serialization between VP blt and encoder send/drain.
 static std::mutex g_vpMutex;
 
 // Static variables for encoder state
-AVFormatContext* Encoder::formatCtx = nullptr;
-AVCodecContext* Encoder::codecCtx = nullptr;
-AVStream* Encoder::videoStream = nullptr;
-AVPacket* Encoder::packet = nullptr;
-AVBufferRef* Encoder::hwDeviceCtx = nullptr;
-AVBufferRef* Encoder::hwFramesCtx = nullptr;
-int Encoder::frameCounter = 0;
-int64_t Encoder::last_dts = 0;
-
-Encoder::EncodedFrameCallback Encoder::g_onEncodedFrameCallback = nullptr;
-
-std::mutex Encoder::g_frameMutex;
-std::condition_variable Encoder::g_frameAvailable;
-std::vector<uint8_t> Encoder::g_latestFrameData;
-int64_t Encoder::g_latestPTS = 0;
-bool Encoder::g_frameReady = false;
-
-static bool g_shutdown = false;
+static AVCodecContext* codecCtx = nullptr;
+static AVPacket* packet = nullptr;
+static AVBufferRef* hwDeviceCtx = nullptr;
+static AVBufferRef* hwFramesCtx = nullptr;
 
 static std::chrono::steady_clock::time_point encoderStartTime;
 static bool isFirstFrame = true;
@@ -69,7 +51,7 @@ static int g_vpHeight = 0;
 static int g_encodeWidth = 0;   // 0 = use capture size
 static int g_encodeHeight = 0;
 // LRU caches for D3D11 views to avoid per-frame allocations and prevent wholesale clears
-template<typename K, typename V>
+template<typename K, typename V, typename Hash = std::hash<K>>
 class LruCacheD3D {
 public:
     explicit LruCacheD3D(size_t cap = 0) : capacity_(cap) {}
@@ -112,14 +94,46 @@ private:
     }
     size_t capacity_;
     std::list<std::pair<K, V>> items_;
-    std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator> map_;
+    std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator, Hash> map_;
+};
+
+struct OutputSurfaceKey {
+    ID3D11Texture2D* texture = nullptr;
+    UINT arraySlice = 0;
+    bool operator==(const OutputSurfaceKey& other) const noexcept {
+        return texture == other.texture && arraySlice == other.arraySlice;
+    }
+};
+struct OutputSurfaceKeyHash {
+    size_t operator()(const OutputSurfaceKey& key) const noexcept {
+        return std::hash<ID3D11Texture2D*>{}(key.texture) ^
+            (static_cast<size_t>(key.arraySlice) * 0x9e3779b97f4a7c15ULL);
+    }
 };
 
 // framePoolBuffers=2 means at most 2-3 live BGRA source textures from WGC.
 // A capacity-8 LRU fits them all in L1/L2 cache (vs 64-entry unordered_map
 // that pointer-chases into random heap locations on every frame).
 static LruCacheD3D<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView>> g_inputViewLru(8);
-static LruCacheD3D<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView>> g_outputViewLru(8);
+static LruCacheD3D<OutputSurfaceKey, Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView>, OutputSurfaceKeyHash> g_outputViewLru(8);
+
+static D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC MakeOutputViewDesc(
+    ID3D11Texture2D* texture, UINT arraySlice)
+{
+    D3D11_TEXTURE2D_DESC textureDesc{};
+    texture->GetDesc(&textureDesc);
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC viewDesc{};
+    if (textureDesc.ArraySize > 1) {
+        viewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2DARRAY;
+        viewDesc.Texture2DArray.MipSlice = 0;
+        viewDesc.Texture2DArray.FirstArraySlice = arraySlice;
+        viewDesc.Texture2DArray.ArraySize = 1;
+    } else {
+        viewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        viewDesc.Texture2D.MipSlice = 0;
+    }
+    return viewDesc;
+}
 // Optional GPU timestamp queries for VideoProcessorBlt
 // WARNING: Keep disabled in production - adds GPU overhead and can cause stalls
 
@@ -173,10 +187,11 @@ static int g_nvSurfaces = 3; // Optimized: async_depth + 1 for minimal buffering
 // Pacing from capture timestamps (EWMA of inter-frame delta)
 static std::atomic<long long> g_lastCaptureTsUs{0};
 static std::atomic<long long> g_smoothedDurUs{0};
+static std::atomic<bool> g_forceIdrRequested{false};
 
 static inline int64_t ComputeFrameDurationUsLocked() {
-    int fpsNum = Encoder::codecCtx ? Encoder::codecCtx->framerate.num : 60;
-    int fpsDen = Encoder::codecCtx ? Encoder::codecCtx->framerate.den : 1;
+    int fpsNum = codecCtx ? codecCtx->framerate.num : 60;
+    int fpsDen = codecCtx ? codecCtx->framerate.den : 1;
     if (fpsNum > 0) return static_cast<int64_t>((1000000.0 * (fpsDen > 0 ? fpsDen : 1)) / static_cast<double>(fpsNum));
     return 8333; // ~120fps fallback
 }
@@ -189,24 +204,11 @@ static inline int64_t UpdatePacingFromTimestamp(int64_t currentTsUs) {
     long long prevTs = g_lastCaptureTsUs.exchange(currentTsUs, std::memory_order_relaxed);
     if (prevTs > 0) {
         long long delta = currentTsUs - prevTs;
-        // FIX: Stricter bounds checking (500us = 2000fps max, 100ms = 10fps min)
-        // This prevents invalid deltas from corrupting the smoothed duration
-        if (delta > 500 && delta < 100000) {
-            long long prevSm = g_smoothedDurUs.load(std::memory_order_relaxed);
-            // FIX: Adaptive alpha - use more of new value if delta differs significantly from smoothed
-            // This allows faster adaptation to FPS changes while maintaining stability
-            double alpha = 0.2; // Default smoothing factor
-            if (prevSm > 0) {
-                double diffRatio = std::abs(static_cast<double>(delta - prevSm)) / static_cast<double>(prevSm);
-                if (diffRatio > 0.1) {
-                    // Delta differs by more than 10% from smoothed - use more aggressive smoothing
-                    alpha = 0.3;
-                }
-            }
-            long long newSm = (prevSm <= 0) ? delta : 
-                static_cast<long long>((1.0 - alpha) * static_cast<double>(prevSm) + alpha * static_cast<double>(delta));
-            g_smoothedDurUs.store(newSm, std::memory_order_relaxed);
-            return newSm;
+        // RTP time must follow capture time. Smoothing these deltas hides frames
+        // dropped before the encoder and gradually pushes video behind audio.
+        if (delta > 500 && delta < 2000000) {
+            g_smoothedDurUs.store(delta, std::memory_order_relaxed);
+            return delta;
         }
     }
     long long sm = g_smoothedDurUs.load(std::memory_order_relaxed);
@@ -215,17 +217,7 @@ static inline int64_t UpdatePacingFromTimestamp(int64_t currentTsUs) {
 
 static inline void EnqueueEncodedSample(std::vector<uint8_t>&& bytes, int64_t durationUs, bool isKeyframe) {
     if (bytes.empty()) return;
-    auto ffiStart = std::chrono::steady_clock::now();
-    int result = sendVideoSample(bytes.data(), static_cast<int>(bytes.size()), durationUs, isKeyframe ? 1 : 0);
-    auto ffiEnd = std::chrono::steady_clock::now();
-    VideoMetrics::ewmaUpdate(VideoMetrics::ffiSendLatencyMsAvg(),
-        std::chrono::duration<double, std::milli>(ffiEnd - ffiStart).count());
-    VideoMetrics::sendQueueDepth().store(0, std::memory_order_relaxed);
-    if (result == 0) {
-        VideoMetrics::inc(VideoMetrics::encoderOutputs());
-    } else {
-        VideoMetrics::inc(VideoMetrics::sendQueueDrops());
-    }
+    sendVideoSample(bytes.data(), static_cast<int>(bytes.size()), durationUs, isKeyframe ? 1 : 0);
 }
 
 // Per-packet sample: used to enqueue each AVPacket as its own WebRTC sample (avoids merging
@@ -352,13 +344,11 @@ static void PrimeCommonViews(ID3D11Device* device, int inputWidth, int inputHeig
     Microsoft::WRL::ComPtr<ID3D11Texture2D> dummyOutputTex;
     if (SUCCEEDED(device->CreateTexture2D(&texDesc, nullptr, dummyOutputTex.GetAddressOf()))) {
         // Prime output view
-        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
-        outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
-        outDesc.Texture2D.MipSlice = 0;
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc = MakeOutputViewDesc(dummyOutputTex.Get(), 0);
 
         Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
         if (SUCCEEDED(g_videoDevice->CreateVideoProcessorOutputView(dummyOutputTex.Get(), g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) {
-            g_outputViewLru.put(dummyOutputTex.Get(), outView);
+            g_outputViewLru.put({dummyOutputTex.Get(), 0}, outView);
         }
     }
 
@@ -532,8 +522,6 @@ namespace Encoder {
                 float b = pixels[pixelOffset + 0] / 255.0f;
                 float g = pixels[pixelOffset + 1] / 255.0f;
                 float r = pixels[pixelOffset + 2] / 255.0f;
-                float a = pixels[pixelOffset + 3] / 255.0f;
-                
                 // Apply exposure adjustment
                 float exposureMultiplier = powf(2.0f, g_hdrExposure);
                 r *= exposureMultiplier;
@@ -593,11 +581,13 @@ namespace Encoder {
 
         // Brief encoder lock only to read NV12 texture pointer (no GPU work)
         ID3D11Texture2D* nv12 = nullptr;
+        UINT arraySlice = 0;
         {
             std::lock_guard<std::mutex> lock(g_encoderMutex);
             if (!codecCtx || slotIndex < 0 || slotIndex >= (int)g_hwFrames.size()) return false;
             AVFrame* hw = g_hwFrames[slotIndex];
             nv12 = (ID3D11Texture2D*)hw->data[0];
+            arraySlice = static_cast<UINT>(reinterpret_cast<uintptr_t>(hw->data[1]));
         }
 
         // VP resources and VideoProcessorBlt under g_vpMutex — NOT g_encoderMutex.
@@ -616,12 +606,12 @@ namespace Encoder {
                 if (FAILED(g_videoDevice->CreateVideoProcessorInputView(bgraSrcTexture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf()))) return false;
                 g_inputViewLru.put(bgraSrcTexture, inView);
             }
+            const OutputSurfaceKey outputKey{nv12, arraySlice};
             Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
-            if (!g_outputViewLru.get(nv12, outView)) {
-                D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
-                outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D; outDesc.Texture2D.MipSlice = 0;
+            if (!g_outputViewLru.get(outputKey, outView)) {
+                D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc = MakeOutputViewDesc(nv12, arraySlice);
                 if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(nv12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) return false;
-                g_outputViewLru.put(nv12, outView);
+                g_outputViewLru.put(outputKey, outView);
             }
             D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
 
@@ -640,12 +630,17 @@ namespace Encoder {
             std::lock_guard<std::mutex> lock(g_encoderMutex);
             if (!codecCtx || slotIndex < 0 || slotIndex >= (int)g_hwFrames.size()) return false;
             AVFrame* hw = g_hwFrames[slotIndex];
+            if (g_forceIdrRequested.exchange(false, std::memory_order_acq_rel)) {
+                hw->pict_type = AV_PICTURE_TYPE_I;
+                hw->flags |= AV_FRAME_FLAG_KEY;
+            } else {
+                hw->pict_type = AV_PICTURE_TYPE_NONE;
+                hw->flags &= ~AV_FRAME_FLAG_KEY;
+            }
             hw->pts = av_rescale_q(timestampUs, {1, 1000000}, codecCtx->time_base);
-            auto tSendStart = std::chrono::steady_clock::now();
             int ret = avcodec_send_frame(codecCtx, hw);
             if (ret == AVERROR(EAGAIN)) {
                 g_eagainCount.fetch_add(1);
-                VideoMetrics::inc(VideoMetrics::eagainEvents());
 
                 // Log EAGAIN events for debugging (throttled)
                 static auto lastEagainLog = std::chrono::steady_clock::now();
@@ -676,12 +671,6 @@ namespace Encoder {
                 if (!sample.data.empty()) pendingSamples.push_back(std::move(sample));
                 av_packet_unref(packet);
             }
-            auto tSendEnd = std::chrono::steady_clock::now();
-            double ms = std::chrono::duration<double, std::milli>(tSendEnd - tSendStart).count();
-            VideoMetrics::ewmaUpdate(VideoMetrics::avSendMsAvg(), ms);
-        }
-        if (!pendingSamples.empty()) {
-            VideoMetrics::ewmaUpdate(VideoMetrics::packetsPerFrameAvg(), static_cast<double>(pendingSamples.size()));
         }
         for (auto& s : pendingSamples) {
             EnqueueEncodedSample(std::move(s.data), s.durationUs, s.isKeyframe);
@@ -817,72 +806,12 @@ namespace Encoder {
         RequestIDR();
     }
 
-    void setEncodedFrameCallback(EncodedFrameCallback callback) {
-        g_onEncodedFrameCallback = callback;
-    }
-
-    void SignalEncoderShutdown() {
-        std::lock_guard<std::mutex> lock(g_frameMutex);
-        g_shutdown = true;
-        g_frameAvailable.notify_all(); // Wake up any waiting threads
-    }
-
-    bool getEncodedFrame(std::vector<uint8_t>& frameData, int64_t& pts) {
-        std::unique_lock<std::mutex> lock(g_frameMutex);
-        if (g_frameAvailable.wait_for(lock, std::chrono::milliseconds(100), [] { return g_frameReady || g_shutdown; })) {
-            if (g_shutdown) {
-                return false; // Exit if shutdown is signaled
-            }
-
-            if (g_latestFrameData.empty()) {
-                return false;
-            }
-            frameData = g_latestFrameData;
-            pts = g_latestPTS;
-            g_frameReady = false;
-            return true;
-        }
-        return false; // Timeout
-    }
-
-    void logNALUnits(const uint8_t* data, int size) {
-        int pos = 0;
-        while (pos < size) {
-            if (pos + 3 >= size) break;
-            if (data[pos] == 0x00 && data[pos + 1] == 0x00 && data[pos + 2] == 0x00 && data[pos + 3] == 0x01) {
-                pos += 4;
-                if (pos >= size) break;
-                uint8_t nalUnitType = data[pos] & 0x1F;
-                //std::wcout << L"[DEBUG] NAL Unit Type: " << (int)nalUnitType << L"\n";
-                int nextPos = pos + 1;
-                while (nextPos + 3 < size) {
-                    if (data[nextPos] == 0x00 && data[nextPos + 1] == 0x00 && data[nextPos + 2] == 0x00 && data[nextPos + 3] == 0x01) {
-                        break;
-                    }
-                    nextPos++;
-                }
-                int nalSize = (nextPos + 3 < size) ? (nextPos - pos + 3) : (size - pos);
-                //std::wcout << L"[DEBUG] NAL Unit Size: " << nalSize << L"\n";
-                pos = nextPos;
-            }
-            else {
-                pos++;
-            }
-        }
-    }
-
-    void pushPacketToWebRTC(AVPacket* packet) {
-        // Use packet->pts for duration when available (per-packet enqueue, no merging)
-        auto sample = MakePendingSampleFromPacket(packet, codecCtx, 0);
-        if (!sample.data.empty()) {
-            ETW_MARK("Encoder_Send_Start");
-            EnqueueEncodedSample(std::move(sample.data), sample.durationUs, sample.isKeyframe);
-            ETW_MARK("Encoder_Send_End");
-        }
-    }
-
-    void InitializeEncoder(const std::string& fileName, int width, int height, int fps) {
+    bool InitializeEncoder(int width, int height, int fps) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
+
+        g_lastCaptureTsUs.store(0, std::memory_order_relaxed);
+        g_smoothedDurUs.store(0, std::memory_order_relaxed);
+        g_forceIdrRequested.store(false, std::memory_order_relaxed);
 
         // Clear VP caches when (re)initializing encoder (under g_vpMutex for consistency)
         {
@@ -898,10 +827,6 @@ namespace Encoder {
         if (codecCtx) avcodec_free_context(&codecCtx);
         if (hwFramesCtx) av_buffer_unref(&hwFramesCtx);
         if (hwDeviceCtx) av_buffer_unref(&hwDeviceCtx);
-        if (formatCtx) {
-            avformat_free_context(formatCtx);
-            formatCtx = nullptr;
-        }
         if (packet) av_packet_free(&packet);
 
         UINT vendorId = GetGpuVendorId();
@@ -927,9 +852,8 @@ namespace Encoder {
             hwPixFmt = AV_PIX_FMT_D3D11;
             break;
         default:
-            encoderName = "libx264";
-            isHardware = false;
-            break;
+            std::cerr << "[Encoder] Unsupported GPU vendor; the active zero-copy path requires a D3D11 hardware encoder." << std::endl;
+            return false;
         }
 
         std::wcout << L"[Encoder] Using " << (isHardware ? L"Hardware" : L"Software") << L" encoder: " << std::wstring(encoderName.begin(), encoderName.end()) << std::endl;
@@ -943,19 +867,17 @@ namespace Encoder {
         const AVCodec* codec = avcodec_find_encoder_by_name(encoderName.c_str());
         if (!codec) {
             std::cerr << "[Encoder] Failed to find encoder: " << encoderName << std::endl;
-            return;
+            return false;
         }
 
         codecCtx = avcodec_alloc_context3(codec);
         if (!codecCtx) {
             std::cerr << "[Encoder] Failed to allocate codec context." << std::endl;
-            return;
+            return false;
         }
 
         codecCtx->width = encodeW;
         codecCtx->height = encodeH;
-        currentWidth = encodeW;
-        currentHeight = encodeH;
         codecCtx->time_base = AVRational{ 1, fps };
         codecCtx->framerate = { fps, 1 };
         codecCtx->gop_size = fps * 2; // IDR every ~2 seconds: balances compression efficiency with low latency
@@ -983,7 +905,7 @@ namespace Encoder {
             hwDeviceCtx = av_hwdevice_ctx_alloc(hwDeviceType);
             if (!hwDeviceCtx) {
                 std::cerr << "[Encoder] Failed to allocate HW device context." << std::endl;
-                return;
+                return false;
             }
             AVHWDeviceContext* deviceCtx = (AVHWDeviceContext*)hwDeviceCtx->data;
             AVD3D11VADeviceContext* d3d11vaDeviceCtx = (AVD3D11VADeviceContext*)deviceCtx->hwctx;
@@ -992,14 +914,14 @@ namespace Encoder {
             if (av_hwdevice_ctx_init(hwDeviceCtx) < 0) {
                 std::cerr << "[Encoder] Failed to initialize HW device context with the capture device." << std::endl;
                 av_buffer_unref(&hwDeviceCtx);
-                return;
+                return false;
             }
             codecCtx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
 
             hwFramesCtx = av_hwframe_ctx_alloc(hwDeviceCtx);
             if (!hwFramesCtx) {
                 std::cerr << "[Encoder] Failed to allocate hwFramesCtx." << std::endl;
-                return;
+                return false;
             }
             AVHWFramesContext* framesCtx = (AVHWFramesContext*)hwFramesCtx->data;
             framesCtx->format = AV_PIX_FMT_D3D11;
@@ -1017,7 +939,7 @@ namespace Encoder {
             }
             if (av_hwframe_ctx_init(hwFramesCtx) < 0) {
                 std::cerr << "[Encoder] Failed to init hwFramesCtx." << std::endl;
-                return;
+                return false;
             }
             codecCtx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
 
@@ -1026,14 +948,14 @@ namespace Encoder {
             int desiredPool = std::max(g_hwFramePoolSize, g_nvAsyncDepth + 2);
             for (int i = 0; i < desiredPool; ++i) {
                 AVFrame* f = av_frame_alloc();
-                if (!f) { std::cerr << "[Encoder] av_frame_alloc failed for hw frame." << std::endl; return; }
+                if (!f) { std::cerr << "[Encoder] av_frame_alloc failed for hw frame." << std::endl; return false; }
                 if (av_hwframe_get_buffer(codecCtx->hw_frames_ctx, f, 0) < 0) {
-                    std::cerr << "[Encoder] av_hwframe_get_buffer failed for hw frame " << i << std::endl; return;
+                    std::cerr << "[Encoder] av_hwframe_get_buffer failed for hw frame " << i << std::endl; return false;
                 }
                 g_hwFrames.push_back(f);
             }
 
-            InitializeVideoProcessor((ID3D11Device*)GetD3DDevice().get(), width, height, encodeW, encodeH);
+            if (!InitializeVideoProcessor((ID3D11Device*)GetD3DDevice().get(), width, height, encodeW, encodeH)) return false;
         } else {
             codecCtx->pix_fmt = AV_PIX_FMT_NV12;
         }
@@ -1116,25 +1038,9 @@ namespace Encoder {
             av_strerror(openResult, errbuf, sizeof(errbuf));
             std::cerr << "[Encoder] Failed to open codec: " << errbuf << std::endl;
             av_dict_free(&opts);
-            return;
+            return false;
         }
         av_dict_free(&opts);
-
-        int fmtRes = avformat_alloc_output_context2(&formatCtx, nullptr, "null", nullptr);
-        if (fmtRes < 0) {
-            char errbuf[128];
-            av_strerror(fmtRes, errbuf, sizeof(errbuf));
-            std::cerr << "[Encoder] Failed to allocate format context: " << errbuf << std::endl;
-            return;
-        }
-        videoStream = avformat_new_stream(formatCtx, nullptr);
-        if (!videoStream) {
-            std::cerr << "[Encoder] Failed to create new video stream." << std::endl;
-            return;
-        }
-        videoStream->id = formatCtx->nb_streams - 1;
-        videoStream->time_base = codecCtx->time_base;
-        avcodec_parameters_from_context(videoStream->codecpar, codecCtx);
 
         packet = av_packet_alloc();
 
@@ -1177,233 +1083,11 @@ namespace Encoder {
 
             std::wcout << L"[Encoder] Encoded samples are handed directly to the non-blocking Go queue" << std::endl;
         }
-    }
-
-    void EncodeFrame(ID3D11Texture2D* texture, ID3D11DeviceContext* context, int width, int height, int64_t pts) {
-        // Apply HDR tone mapping if enabled (before video processing)
-        if (g_hdrToneMappingEnabled) {
-            ApplyHdrToneMapping(texture, context);
-        }
-
-        // Collect per-packet samples (do NOT merge multiple frames into one WebRTC sample)
-        std::vector<PendingSample> pendingSamples;
-
-        {
-        std::lock_guard<std::mutex> lock(g_encoderMutex);
-        if (!codecCtx || g_hwFrames.empty() || !g_videoProcessor) {
-            std::cerr << "[Encoder] Encoder/VideoProcessor not initialized." << std::endl;
-            return;
-        }
-
-        // Ensure even dimensions and re-init encoder if size changed
-        D3D11_TEXTURE2D_DESC srcDesc{};
-        texture->GetDesc(&srcDesc);
-        int srcW = (int)(srcDesc.Width & ~1U);
-        int srcH = (int)(srcDesc.Height & ~1U);
-        int encW = (g_encodeWidth > 0 && g_encodeHeight > 0) ? g_encodeWidth : srcW;
-        int encH = (g_encodeWidth > 0 && g_encodeHeight > 0) ? g_encodeHeight : srcH;
-        static int s_lastSrcW = 0, s_lastSrcH = 0, s_lastEncW = 0, s_lastEncH = 0;
-        bool sizeChanged = (srcW != s_lastSrcW || srcH != s_lastSrcH || encW != s_lastEncW || encH != s_lastEncH);
-        if (sizeChanged) {
-            s_lastSrcW = srcW; s_lastSrcH = srcH; s_lastEncW = encW; s_lastEncH = encH;
-            // Reconfigure hw frames and video processor for new size
-            if (hwFramesCtx) { av_buffer_unref(&hwFramesCtx); hwFramesCtx = nullptr; }
-            currentWidth = encW; currentHeight = encH;
-            codecCtx->width = encW;
-            codecCtx->height = encH;
-            hwFramesCtx = av_hwframe_ctx_alloc(hwDeviceCtx);
-            if (!hwFramesCtx) return;
-            AVHWFramesContext* framesCtx = (AVHWFramesContext*)hwFramesCtx->data;
-            framesCtx->format = AV_PIX_FMT_D3D11;
-            framesCtx->sw_format = AV_PIX_FMT_NV12;
-            framesCtx->width = encW;
-            framesCtx->height = encH;
-            framesCtx->initial_pool_size = std::max(g_hwFramePoolSize, g_nvAsyncDepth + 2);
-            AVD3D11VAFramesContext* framesHw = (AVD3D11VAFramesContext*)framesCtx->hwctx;
-            if (framesHw) {
-                    framesHw->BindFlags = D3D11_BIND_RENDER_TARGET;
-                framesHw->MiscFlags = 0;
-            }
-            if (av_hwframe_ctx_init(hwFramesCtx) < 0) return;
-            if (codecCtx->hw_frames_ctx) av_buffer_unref(&codecCtx->hw_frames_ctx);
-            codecCtx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
-            for (AVFrame* f : g_hwFrames) { if (f) av_frame_free(&f); }
-            g_hwFrames.clear();
-            g_hwFrameIndex = 0;
-            int desiredPool = std::max(g_hwFramePoolSize, g_nvAsyncDepth + 2);
-            for (int i = 0; i < desiredPool; ++i) {
-                AVFrame* f = av_frame_alloc();
-                if (!f) return;
-                if (av_hwframe_get_buffer(codecCtx->hw_frames_ctx, f, 0) < 0) return;
-                g_hwFrames.push_back(f);
-            }
-            InitializeVideoProcessor((ID3D11Device*)GetD3DDevice().get(), srcW, srcH, encW, encH);
-        }
-
-        // GPU VideoProcessor BGRA->NV12
-        // Cached input view for the source texture
-        Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
-        if (!g_inputViewLru.get(texture, inView)) {
-            // Validate format support for input (use cached results to avoid per-frame checks)
-            D3D11_TEXTURE2D_DESC inTexDesc{};
-            texture->GetDesc(&inTexDesc);
-            if (!IsInputFormatSupported(inTexDesc.Format)) {
-                std::wcerr << L"[Encoder][VP] Input format not supported by VideoProcessor. Format="
-                           << std::hex << inTexDesc.Format << std::endl;
-                return;
-            }
-
-            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc{};
-            inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-            inDesc.Texture2D.MipSlice = 0; inDesc.Texture2D.ArraySlice = 0;
-            HRESULT hrIV = g_videoDevice->CreateVideoProcessorInputView(texture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf());
-            if (FAILED(hrIV)) {
-                std::wcerr << L"[Encoder][VP] CreateVideoProcessorInputView failed. HRESULT=0x" << std::hex << hrIV
-                           << L" W=" << inTexDesc.Width << L" H=" << inTexDesc.Height << L" Format=" << inTexDesc.Format << std::endl;
-                return;
-            }
-            g_inputViewLru.put(texture, inView);
-        }
-
-        // Cached output view for FFmpeg's NV12 texture from ring
-        AVFrame* hwFrameLocal = g_hwFrames[g_hwFrameIndex];
-        g_hwFrameIndex = (g_hwFrameIndex + 1) % static_cast<int>(g_hwFrames.size());
-        ID3D11Texture2D* ffmpegNV12 = (ID3D11Texture2D*)hwFrameLocal->data[0];
-        Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
-        if (!g_outputViewLru.get(ffmpegNV12, outView)) {
-            // Validate output format support (use cached results to avoid per-frame checks)
-            D3D11_TEXTURE2D_DESC outTexDesc{};
-            ffmpegNV12->GetDesc(&outTexDesc);
-            if (!IsOutputFormatSupported(outTexDesc.Format)) {
-                std::wcerr << L"[Encoder][VP] Output format not supported by VideoProcessor. Format="
-                           << std::hex << outTexDesc.Format << std::endl;
-                return;
-            }
-            D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
-            outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
-            outDesc.Texture2D.MipSlice = 0;
-            HRESULT hrOV = g_videoDevice->CreateVideoProcessorOutputView(ffmpegNV12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf());
-            if (FAILED(hrOV)) {
-                std::wcerr << L"[Encoder][VP] CreateVideoProcessorOutputView failed. HRESULT=0x" << std::hex << hrOV
-                           << L" W=" << outTexDesc.Width << L" H=" << outTexDesc.Height << L" Format=" << outTexDesc.Format << std::endl;
-                return;
-            }
-            g_outputViewLru.put(ffmpegNV12, outView);
-        }
-        D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
-        if (FAILED(g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream))) {
-            std::cerr << "[Encoder][VP] VideoProcessorBlt failed." << std::endl; return; }
-
-        // No extra copy needed; VP wrote directly into ffmpegNV12 via output view
-
-        hwFrameLocal->pts = av_rescale_q(pts, { 1, 1000000 }, codecCtx->time_base);
-
-        int ret = avcodec_send_frame(codecCtx, hwFrameLocal);
-        if (ret == AVERROR(EAGAIN)) {
-            // Encoder output queue full; drain packets and retry once
-            g_eagainCount.fetch_add(1);
-            VideoMetrics::inc(VideoMetrics::eagainEvents());
-
-            // Log EAGAIN events for debugging (throttled)
-            static auto lastEagainLog2 = std::chrono::steady_clock::now();
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastEagainLog2);
-            if (elapsed.count() >= 5000) { // Log at most every 5 seconds
-                int currentCount = g_eagainCount.load();
-                std::wcout << L"[Encoder] EAGAIN detected in EncodeFrame: encoder queue full, frame dropped. "
-                          << L"Recent EAGAIN count: " << currentCount << std::endl;
-                lastEagainLog2 = now;
-            }
-            for (;;) {
-                int rcv = avcodec_receive_packet(codecCtx, packet);
-                if (rcv == AVERROR(EAGAIN) || rcv == AVERROR_EOF) {
-                    break;
-                } else if (rcv < 0) {
-                    char errBuf[128];
-                    av_make_error_string(errBuf, 128, rcv);
-                    std::cerr << "[Encoder] Drain on EAGAIN failed: " << errBuf << "\n";
-                    break;
-                }
-                auto sample = MakePendingSampleFromPacket(packet, codecCtx, pts);
-                if (!sample.data.empty()) pendingSamples.push_back(std::move(sample));
-                av_packet_unref(packet);
-            }
-            // Retry once after draining
-            ret = avcodec_send_frame(codecCtx, hwFrameLocal);
-        }
-
-        if (ret < 0) {
-            char errBuf[128];
-            av_make_error_string(errBuf, 128, ret);
-            std::cerr << "[Encoder] Failed to send frame to encoder: " << errBuf << "\n";
-            // fallthrough to not send anything
-        }
-
-        while (ret >= 0) {
-            ret = avcodec_receive_packet(codecCtx, packet);
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                break; // Need more input or end of stream
-            }
-            else if (ret < 0) {
-                char errBuf[128];
-                av_make_error_string(errBuf, 128, ret);
-                std::cerr << "[Encoder] Failed to receive packet from encoder: " << errBuf << "\n";
-                break;
-            }
-            auto sample = MakePendingSampleFromPacket(packet, codecCtx, pts);
-            if (!sample.data.empty()) pendingSamples.push_back(std::move(sample));
-            av_packet_unref(packet);
-        }
-        }
-        for (auto& s : pendingSamples) {
-            EnqueueEncodedSample(std::move(s.data), s.durationUs, s.isKeyframe);
-        }
-    }
-
-    void FlushEncoder() {
-        // Core flush operations under mutex (keep this minimal)
-        bool flushFailed = false;
-        bool receiveError = false;
-        {
-            std::lock_guard<std::mutex> lock(g_encoderMutex);
-            if (!codecCtx) return;
-
-            int ret = avcodec_send_frame(codecCtx, nullptr); // Send flush frame
-            if (ret < 0) {
-                flushFailed = true;
-                return;
-            }
-            while (ret >= 0) {
-                ret = avcodec_receive_packet(codecCtx, packet);
-                if (ret == AVERROR_EOF) {
-                    break;
-                }
-                else if (ret < 0) {
-                    receiveError = true;
-                    break;
-                }
-                pushPacketToWebRTC(packet);
-                av_packet_unref(packet);
-            }
-        }
-
-        // Logging OUTSIDE mutex (potentially slow operations)
-        if (flushFailed) {
-            std::cerr << "[Encoder] Failed to send flush frame to encoder.\n";
-        } else if (receiveError) {
-            std::cerr << "[Encoder] Error while flushing encoder.\n";
-        } else {
-            std::wcout << L"[Encoder] Encoder flush complete\n";
-        }
+        return true;
     }
 
     void RequestIDR() {
-        std::lock_guard<std::mutex> lock(g_encoderMutex);
-        if (!codecCtx) return;
-        // Best-effort force IDR on next frame for common encoders
-        av_opt_set(codecCtx->priv_data, "force_key_frames", "expr:gte(t,n_forced*1)", 0);
-        // For NVENC, try forcing IDR if supported
-        av_opt_set_int(codecCtx->priv_data, "forced-idr", 1, 0);
+        g_forceIdrRequested.store(true, std::memory_order_release);
     }
 
     void FinalizeEncoder() {
@@ -1413,10 +1097,6 @@ namespace Encoder {
             if (codecCtx) {
                 avcodec_free_context(&codecCtx);
                 codecCtx = nullptr;
-            }
-            if (formatCtx) {
-                avformat_free_context(formatCtx);
-                formatCtx = nullptr;
             }
             if (packet) { av_packet_free(&packet); packet = nullptr; }
             // Free hw frame ring

@@ -13,7 +13,6 @@
 #include "InputConfig.h"
 #include "InputTransportLayer.h"
 #include "ErrorUtils.h"
-#include "Metrics.h"
 #include <nlohmann/json.hpp>
 
 namespace InputStateManager {
@@ -94,17 +93,6 @@ struct StateStats {
     uint64_t coordinateTransforms = 0;
     uint64_t coordinateTransformErrors = 0;
 
-    void reset() {
-        keysProcessed = 0;
-        mouseEventsProcessed = 0;
-        stuckKeysDetected = 0;
-        stuckKeysRecovered = 0;
-        sequenceGapsDetected = 0;
-        invalidTransitions = 0;
-        coordinateTransforms = 0;
-        coordinateTransformErrors = 0;
-    }
-
     std::string toString() const;
 };
 
@@ -164,40 +152,16 @@ public:
     MouseButtonInfo getMouseButtonState(int button) const;
 
     /**
-     * @brief Get current mouse position
-     * @return Current mouse position information
-     */
-    MousePosition getMousePosition() const;
-
-    /**
      * @brief Force release all keys (emergency function)
      * @param reason Reason for the emergency release
      */
     void emergencyReleaseAllKeys(const std::string& reason = "emergency");
 
     /**
-     * @brief Check if a specific key is currently stuck
-     * @param jsCode JavaScript key code
-     * @return true if key is stuck, false otherwise
-     */
-    bool isKeyStuck(const std::string& jsCode) const;
-
-    /**
-     * @brief Get the number of currently stuck keys
-     * @return Number of stuck keys
-     */
-    size_t getStuckKeyCount() const;
-
-    /**
      * @brief Get current statistics
      * @return Reference to current statistics
      */
-    const StateStats& getStats() const;
-
-    /**
-     * @brief Reset statistics
-     */
-    void resetStats();
+    StateStats getStats() const;
 
     /**
      * @brief Check if the state manager is running
@@ -228,11 +192,12 @@ private:
     // Private methods
     void recoveryLoop();
     void checkForStuckKeys();
-    void recoverStuckKey(const std::string& jsCode);
     // Assumes stateMutex is already held. Returns recovery event JSON to fire after lock release.
     std::string recoverStuckKeyLocked(const std::string& jsCode);
-    bool processKeyboardEvent(const std::string& eventType, const nlohmann::json& eventData);
-    bool processMouseEvent(const std::string& eventType, const nlohmann::json& eventData);
+    bool processKeyboardEvent(const std::string& eventType, const nlohmann::json& eventData,
+                              const std::string& rawData);
+    bool processMouseEvent(const std::string& eventType, const nlohmann::json& eventData,
+                           const std::string& rawData);
     MousePosition transformMouseCoordinates(const nlohmann::json& eventData);
     bool isModifierKey(const std::string& jsCode) const;
     std::chrono::milliseconds getKeyTimeout(const std::string& jsCode) const;

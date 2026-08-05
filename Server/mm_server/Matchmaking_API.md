@@ -82,7 +82,6 @@ Client calls this when the user clicks "Play".
     {
       "found": true,
       "roomId": "room-id-from-host",
-      "signalingUrl": "ws://play.yourdomain.com", // or wss://...
       "iceServers": [
         {
           "urls": "turn:turn.yourdomain.com:3478",

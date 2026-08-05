@@ -1,10 +1,14 @@
 #include "InputIntegrationLayer.h"
+#include "InputTransportLayer.h"
+#include "InputStateManager.h"
 #include "KeyInputHandler.h"
 #include "MouseInputHandler.h"
 #include <iostream>
 #include <sstream>
 #include <thread>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include "ShutdownManager.h"
 #include "InputConfig.h"
 
@@ -14,20 +18,20 @@ namespace InputIntegrationLayer {
 IntegrationConfig globalIntegrationConfig;
 
 // Global instances
-static std::unique_ptr<InputTransportLayer::Layer> transportLayer;
-static std::unique_ptr<InputStateManager::Manager> stateManager;
 static std::thread statsReportingThread;
 static std::atomic<bool> integrationRunning{false};
 static std::atomic<bool> statsReportingRunning{false};
+static std::mutex statsWaitMutex;
+static std::condition_variable statsWaitCondition;
 
 // Use handler namespaces directly
 
 /**
- * @brief Message handler callback for new architecture
+ * @brief Dispatch validated input events to their channel-specific handlers.
  * @param eventType The type of input event
  * @param eventData JSON string containing event data
  */
-static void newArchitectureMessageHandler(const std::string& eventType, const std::string& eventData) {
+static void inputMessageHandler(const std::string& eventType, const std::string& eventData) {
     try {
         if (eventType == "keydown" || eventType == "keyup" ||
             eventType == "emergency_keyup" || eventType == "stuck_key_recovery") {
@@ -37,10 +41,10 @@ static void newArchitectureMessageHandler(const std::string& eventType, const st
             MouseInputHandler::enqueueMessage(eventData);
         } else {
             LOG_WARNING(ErrorUtils::ErrorCategory::INPUT,
-                       "Unknown event type in new architecture: " + eventType);
+                       "Unknown input event type: " + eventType);
         }
     } catch (const std::exception& e) {
-        LOG_INPUT_ERROR("Exception in new architecture message handler: " + std::string(e.what()), eventData);
+        LOG_INPUT_ERROR("Exception in input message handler: " + std::string(e.what()), eventData);
     }
 }
 
@@ -52,8 +56,10 @@ void statsReportingLoop() {
 
     while (statsReportingRunning.load() && !ShutdownManager::IsShutdown()) {
         try {
-            // Sleep for reporting interval
-            std::this_thread::sleep_for(globalIntegrationConfig.statsReportInterval);
+            std::unique_lock<std::mutex> lock(statsWaitMutex);
+            statsWaitCondition.wait_for(lock, globalIntegrationConfig.statsReportInterval,
+                [] { return !statsReportingRunning.load() || ShutdownManager::IsShutdown(); });
+            lock.unlock();
 
             if (statsReportingRunning.load()) {
                 std::string stats = getStatistics();
@@ -77,49 +83,27 @@ bool initialize() {
     LOG_INFO(ErrorUtils::ErrorCategory::INPUT, "Initializing input integration layer...");
 
     try {
-        if (globalIntegrationConfig.enableNewArchitecture) {
-            // Initialize new architecture components
-            if (InputConfig::globalInputConfig.usePionDataChannels) {
-                // Wrap the 2-arg event callback into a transport message handler
-                auto handler = [](const InputTransportLayer::InputMessage& msg) {
-                    try {
-                        // Extract type from JSON for routing
-                        nlohmann::json eventData = nlohmann::json::parse(msg.data);
-                        std::string eventType = eventData.value("type", std::string());
-                        if (auto* sm = InputStateManager::getGlobalStateManager()) {
-                            if (eventType == "input_reset") {
-                                sm->emergencyReleaseAllKeys(eventData.value("reason", std::string("transport_reset")));
-                            } else {
-                                // State validation forwards each accepted event exactly once.
-                                sm->processInputMessage(msg);
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        LOG_INPUT_ERROR("Transport handler exception: " + std::string(e.what()), msg.data);
-                    }
-                };
-
-                if (!InputTransportLayer::initializeGlobalTransport(handler)) {
-                    LOG_SYSTEM_ERROR("Failed to initialize global transport layer");
-                    return false;
+        auto handler = [](const InputTransportLayer::InputMessage& msg) {
+            try {
+                if (auto* sm = InputStateManager::getGlobalStateManager()) {
+                    sm->processInputMessage(msg);
                 }
-
-                LOG_INFO(ErrorUtils::ErrorCategory::INPUT, "Transport layer initialized successfully");
+            } catch (const std::exception& e) {
+                LOG_INPUT_ERROR("Transport handler exception: " + std::string(e.what()), msg.data);
             }
+        };
 
-            if (!InputStateManager::initializeGlobalStateManager(newArchitectureMessageHandler)) {
-                LOG_SYSTEM_ERROR("Failed to initialize global state manager");
-                return false;
-            }
-
-            LOG_INFO(ErrorUtils::ErrorCategory::INPUT, "State manager initialized successfully");
+        if (!InputTransportLayer::initializeGlobalTransport(handler)) {
+            LOG_SYSTEM_ERROR("Failed to initialize global transport layer");
+            return false;
         }
+        LOG_INFO(ErrorUtils::ErrorCategory::INPUT, "Transport layer initialized successfully");
 
-        if (globalIntegrationConfig.enableLegacyCompatibility) {
-            LOG_INFO(ErrorUtils::ErrorCategory::INPUT, "Legacy compatibility mode enabled - legacy WebSocket polling will be available");
-        } else {
-            LOG_INFO(ErrorUtils::ErrorCategory::INPUT, "Legacy compatibility mode disabled - using new architecture only");
+        if (!InputStateManager::initializeGlobalStateManager(inputMessageHandler)) {
+            LOG_SYSTEM_ERROR("Failed to initialize global state manager");
+            return false;
         }
+        LOG_INFO(ErrorUtils::ErrorCategory::INPUT, "State manager initialized successfully");
 
         LOG_INFO(ErrorUtils::ErrorCategory::INPUT, "Input integration layer initialized successfully");
         return true;
@@ -139,19 +123,14 @@ bool start() {
     LOG_INFO(ErrorUtils::ErrorCategory::INPUT, "Starting input integration layer...");
 
     try {
-        if (globalIntegrationConfig.enableNewArchitecture) {
-            // Start new architecture components
-            if (InputConfig::globalInputConfig.usePionDataChannels) {
-                if (!InputTransportLayer::startGlobalTransport()) {
-                    LOG_SYSTEM_ERROR("Failed to start global transport layer");
-                    return false;
-                }
-            }
-
-            if (!InputStateManager::startGlobalStateManager()) {
-                LOG_SYSTEM_ERROR("Failed to start global state manager");
-                return false;
-            }
+        if (!InputTransportLayer::startGlobalTransport()) {
+            LOG_SYSTEM_ERROR("Failed to start global transport layer");
+            return false;
+        }
+        if (!InputStateManager::startGlobalStateManager()) {
+            InputTransportLayer::stopGlobalTransport();
+            LOG_SYSTEM_ERROR("Failed to start global state manager");
+            return false;
         }
 
         // Start statistics reporting if enabled
@@ -179,15 +158,13 @@ void stop() {
 
     // Stop statistics reporting
     statsReportingRunning.store(false);
+    statsWaitCondition.notify_all();
     if (statsReportingThread.joinable()) {
         statsReportingThread.join();
     }
 
-    // Stop new architecture components
-    if (globalIntegrationConfig.enableNewArchitecture) {
-        InputTransportLayer::stopGlobalTransport();
-        InputStateManager::stopGlobalStateManager();
-    }
+    InputTransportLayer::stopGlobalTransport();
+    InputStateManager::stopGlobalStateManager();
 
     integrationRunning.store(false);
     LOG_INFO(ErrorUtils::ErrorCategory::INPUT, "Input integration layer stopped");
@@ -197,32 +174,10 @@ bool isRunning() {
     return integrationRunning.load();
 }
 
-void processInputMessage(const InputTransportLayer::InputMessage& message) {
-    try {
-        if (globalIntegrationConfig.enableNewArchitecture && stateManager) {
-            // Process through new state manager
-            stateManager->processInputMessage(message);
-        } else if (globalIntegrationConfig.enableLegacyCompatibility) {
-            // Fall back to legacy processing
-            if (message.type == "pion_data") {
-                MouseInputHandler::enqueueMessage(message.data);
-            }
-        } else {
-            LOG_WARNING(ErrorUtils::ErrorCategory::INPUT,
-                       "No processing path available for message type: " + message.type);
-        }
-    } catch (const std::exception& e) {
-        LOG_INPUT_ERROR("Exception processing input message: " + std::string(e.what()), message.data);
-    }
-}
-
 std::string getStatistics() {
     std::stringstream ss;
     ss << "=== Input Integration Layer Statistics ===\n";
     ss << "Integration Status: " << (isRunning() ? "RUNNING" : "STOPPED") << "\n";
-    ss << "New Architecture: " << (globalIntegrationConfig.enableNewArchitecture ? "ENABLED" : "DISABLED") << "\n";
-    ss << "Legacy Compatibility: " << (globalIntegrationConfig.enableLegacyCompatibility ? "ENABLED" : "DISABLED") << "\n";
-
     if (auto* tl = InputTransportLayer::getGlobalTransport()) {
         auto transportStats = tl->getStats();
         ss << "\n--- Transport Layer ---\n";
@@ -236,39 +191,6 @@ std::string getStatistics() {
     }
 
     return ss.str();
-}
-
-void updateConfiguration(const IntegrationConfig& config) {
-    globalIntegrationConfig = config;
-    LOG_INFO(ErrorUtils::ErrorCategory::INPUT,
-            "Integration configuration updated - New Architecture: " +
-            std::string(config.enableNewArchitecture ? "ENABLED" : "DISABLED"));
-}
-
-void emergencyStop(const std::string& reason) {
-    LOG_SYSTEM_ERROR("Emergency stop requested: " + reason);
-
-    // Emergency release all keys if state manager is available
-    if (stateManager) {
-        stateManager->emergencyReleaseAllKeys(reason);
-    }
-
-    // Force stop all components
-    stop();
-}
-
-bool isNewArchitectureEnabled() {
-    return globalIntegrationConfig.enableNewArchitecture &&
-           transportLayer != nullptr &&
-           stateManager != nullptr;
-}
-
-InputTransportLayer::Layer* getTransportLayer() {
-    return transportLayer.get();
-}
-
-InputStateManager::Manager* getStateManager() {
-    return stateManager.get();
 }
 
 } // namespace InputIntegrationLayer

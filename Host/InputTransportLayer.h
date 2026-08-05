@@ -20,12 +20,11 @@ namespace InputTransportLayer {
 struct InputMessage {
     std::string type;           // Message type (e.g., "keydown", "mousemove")
     std::string data;           // Raw JSON data from client
-    uint64_t sequenceId = 0;    // Sequence ID for ordering (if supported)
     uint64_t timestamp = 0;     // Timestamp when message was received
 
     InputMessage() = default;
-    InputMessage(std::string msgType, std::string msgData, uint64_t seq = 0, uint64_t ts = 0)
-        : type(std::move(msgType)), data(std::move(msgData)), sequenceId(seq), timestamp(ts) {}
+    InputMessage(std::string msgType, std::string msgData, uint64_t ts = 0)
+        : type(std::move(msgType)), data(std::move(msgData)), timestamp(ts) {}
 };
 
 /**
@@ -36,20 +35,8 @@ struct TransportStats {
     uint64_t messagesProcessed = 0;
     uint64_t messagesDropped = 0;
     uint64_t pionMessagesReceived = 0;
-    uint64_t websocketMessagesReceived = 0;
     uint64_t queueSize = 0;
     uint64_t maxQueueSize = 0;
-    uint64_t sequenceGapsDetected = 0;
-
-    void reset() {
-        messagesReceived = 0;
-        messagesProcessed = 0;
-        messagesDropped = 0;
-        pionMessagesReceived = 0;
-        websocketMessagesReceived = 0;
-        maxQueueSize = std::max(maxQueueSize, queueSize);
-        sequenceGapsDetected = 0;
-    }
 
     std::string toString() const;
 };
@@ -57,9 +44,7 @@ struct TransportStats {
 /**
  * @brief Input transport layer - unified interface for all input message handling
  *
- * This layer consolidates input from multiple transport mechanisms:
- * - Pion WebRTC data channels (primary)
- * - Legacy WebSocket (if enabled in config)
+ * This layer receives input from Pion WebRTC data channels.
  *
  * It provides a single, well-documented path for input ingestion and
  * separates transport concerns from processing logic.
@@ -99,31 +84,7 @@ public:
      * @brief Get current transport statistics
      * @return Reference to current statistics
      */
-    const TransportStats& getStats() const;
-
-    /**
-     * @brief Reset transport statistics
-     */
-    void resetStats();
-
-    /**
-     * @brief Get the current queue size
-     * @return Number of pending messages
-     */
-    size_t getQueueSize() const;
-
-    /**
-     * @brief Force processing of pending messages
-     * @return Number of messages processed
-     */
-    size_t processPendingMessages();
-
-    /**
-     * @brief Check if a specific transport is enabled
-     * @param transportName Name of transport ("pion" or "websocket")
-     * @return true if enabled, false otherwise
-     */
-    bool isTransportEnabled(const std::string& transportName) const;
+    TransportStats getStats() const;
 
 private:
     // Configuration
@@ -142,26 +103,17 @@ private:
 
     // Transport threads
     std::thread pionThread;
-    std::thread websocketThread;
     std::atomic<bool> pionRunning{false};
-    std::atomic<bool> websocketRunning{false};
 
     // Statistics
     mutable std::mutex statsMutex;
     TransportStats stats;
 
-    // Sequence tracking for gap detection
-    uint64_t lastSequenceId = 0;
-    bool sequenceTrackingEnabled = false;
-
     // Private methods
     void pionMessageLoop();
-    void websocketMessageLoop();
     void processingLoop();
     void enqueueMessage(InputMessage&& message);
     void updateStatsQueueSize();
-    void detectSequenceGap(uint64_t sequenceId);
-    bool shouldProcessMessage(const InputMessage& message);
     void logTransportEvent(const std::string& event, const std::string& details = "");
 };
 

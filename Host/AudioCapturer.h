@@ -84,16 +84,13 @@ public:
     // WAV file output for debugging
     bool StartWAVRecording(const std::string& filename = "output.wav");
     void StopWAVRecording();
-    bool IsWAVRecording() const { return m_wavFile.is_open(); }
 
     // Shared reference clock for AV synchronization
     static void InitializeSharedReferenceClock();
     static int64_t GetSharedReferenceTimeUs();
-    static void LogAVSyncStatus();
 
 private:
     void CaptureThread(DWORD processId);
-    bool ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, void* format, std::vector<float>& floatData);
     bool ConvertPCMToFloatInPlace(const BYTE* pcmData, UINT32 numFrames, void* format, float* outputBuffer, size_t outputBufferSize);
     void ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs);
 
@@ -112,7 +109,6 @@ private:
     bool CheckForParameterUpdates();
 
     // Audio resampling methods
-    void ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out);
     void ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFrames, uint32_t inRate, uint32_t channels);
     bool ResampleTo48kInPlaceConstrained(std::vector<float>& buffer, size_t inFrames, uint32_t inRate, uint32_t channels, size_t maxBufferSize);
 
@@ -121,9 +117,6 @@ private:
     bool ProcessResamplerDMO(const float* inputData, size_t inputSamples, std::vector<float>& outputData);
     bool ProcessResamplerDMOInPlace(std::vector<float>& buffer);
     void CleanupDMOResampler();
-
-    // Test and validation methods
-    void TestResamplerQuality(uint32_t testSampleRate, uint32_t testChannels);
 
     // Audio latency optimization methods
     bool ValidateOpusPacketization(int frameSizeMs);
@@ -146,9 +139,6 @@ private:
     void InitializeRingBuffer();
     bool PushFrameToRingBuffer(const std::vector<float>& frame, int64_t timestamp);
     bool PopFrameFromRingBuffer(std::vector<float>& frame, int64_t& timestamp);
-    bool IsRingBufferEmpty() const;
-    bool IsRingBufferFull() const;
-    size_t GetRingBufferCount() const;
 
     // Simple MediaBuffer implementation for DMO
     class CMediaBuffer : public IMediaBuffer {
@@ -202,8 +192,12 @@ private:
     };
     
     std::thread m_captureThread;
-    std::thread m_audioHealthCheckThread;
     std::atomic<bool> m_stopCapture;
+    std::mutex m_captureStartupMutex;
+    std::condition_variable m_captureStartupCondition;
+    bool m_captureStartupComplete = false;
+    bool m_captureStartupSucceeded = false;
+    void NotifyCaptureStartup(bool succeeded);
 
     // Opus encoder
     std::unique_ptr<OpusEncoderWrapper> m_opusEncoder;
@@ -267,7 +261,7 @@ private:
     static AudioConfig s_audioConfig;
 
     // Active instance reference for parameter updates (assumes single instance)
-    static inline AudioCapturer* s_activeInstance = nullptr;
+    static inline std::atomic<AudioCapturer*> s_activeInstance{nullptr};
 
     // Performance optimization: Conditional logging macros for hot paths
     // These macros compile to no-ops in release builds, eliminating overhead
@@ -446,7 +440,6 @@ private:
     void WriteInt16ToFile(std::ofstream& file, int16_t value);
     void WriteInt32ToFile(std::ofstream& file, int32_t value);
     static void FinalizeWAVOnExit();
-    static bool TryParseGuidFromWideString(const wchar_t* str, GUID& outGuid);
 
     // Simple resampler state for linear interpolation between callbacks
     std::vector<float> m_resampleRemainder; // per-channel remainder sample
@@ -459,7 +452,6 @@ private:
     uint16_t m_activeBitsPerSample = 16;
     uint16_t m_activeWavAudioFormat = 1; // 1=PCM, 3=IEEE_FLOAT
     bool m_wavWriteRawMode = false; // write float->PCM16 samples to WAV
-    GUID m_targetSessionGuid = GUID_NULL; // Target render session GUID for per-process loopback
 
     // WAV recording state
     std::ofstream m_wavFile;

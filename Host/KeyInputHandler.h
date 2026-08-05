@@ -19,7 +19,6 @@
 
 namespace KeyInputHandler {
     void initializeDataChannel();
-    void simulateKeyPress(const std::string& key);
     void cleanup();
     void wakeKeyboardThreadInternal();
     void releaseAllKeysEmergency();
@@ -37,9 +36,6 @@ namespace KeyInputHandler {
 
 
 
-    // Counters for observability (reads are racy but acceptable for telemetry)
-    struct Stats { unsigned dropped{0}; unsigned injected{0}; unsigned skipped{0}; unsigned resets{0}; };
-    const Stats& getStats();
 }
 
 
@@ -47,16 +43,5 @@ namespace KeyInputHandler {
 extern "C" void initKeyInputHandler();
 extern "C" void stopKeyInputHandler();
 extern "C" void emergencyReleaseAllKeys();
-
-// Input statistics API
-extern "C" const char* getInputStatsSummary();
-extern "C" void resetInputStats();
-
-// Sequence management API
-extern "C" void resetSequenceState();
-extern "C" const char* getSequenceStats();
-
-// Key mapping test API
-extern "C" bool runKeyMappingTests();
 
 #endif

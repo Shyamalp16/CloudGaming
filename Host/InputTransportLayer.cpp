@@ -17,10 +17,8 @@ std::string TransportStats::toString() const {
     ss << ", processed:" << messagesProcessed;
     ss << ", dropped:" << messagesDropped;
     ss << ", pion:" << pionMessagesReceived;
-    ss << ", ws:" << websocketMessagesReceived;
     ss << ", queue:" << queueSize;
     ss << ", maxQueue:" << maxQueueSize;
-    ss << ", seqGaps:" << sequenceGapsDetected;
     ss << "}";
     return ss.str();
 }
@@ -38,7 +36,6 @@ bool Layer::initialize(MessageHandler handler) {
         return false;
     }
 
-    sequenceTrackingEnabled = config.enableSequenceRecovery;
     logTransportEvent("initialized", "Transport layer initialized successfully");
 
     return true;
@@ -61,18 +58,9 @@ bool Layer::start() {
     // Start processing thread
     processingThread = std::thread(&Layer::processingLoop, this);
 
-    // Start transport threads based on configuration
-    if (config.usePionDataChannels) {
-        pionRunning.store(true);
-        pionThread = std::thread(&Layer::pionMessageLoop, this);
-        logTransportEvent("pion_started", "Pion data channel transport started");
-    }
-
-    if (config.enableLegacyWebSocket) {
-        websocketRunning.store(true);
-        websocketThread = std::thread(&Layer::websocketMessageLoop, this);
-        logTransportEvent("websocket_started", "Legacy WebSocket transport started");
-    }
+    pionRunning.store(true);
+    pionThread = std::thread(&Layer::pionMessageLoop, this);
+    logTransportEvent("pion_started", "Pion data channel transport started");
 
     logTransportEvent("started", "Transport layer started successfully");
     return true;
@@ -89,7 +77,6 @@ void Layer::stop() {
 
     // Stop transport threads
     pionRunning.store(false);
-    websocketRunning.store(false);
 
     // Notify condition variable to wake up waiting threads
     {
@@ -100,9 +87,6 @@ void Layer::stop() {
     // Join transport threads
     if (pionThread.joinable()) {
         pionThread.join();
-    }
-    if (websocketThread.joinable()) {
-        websocketThread.join();
     }
 
     // Stop processing thread
@@ -125,51 +109,9 @@ bool Layer::isRunning() const {
     return running.load();
 }
 
-const TransportStats& Layer::getStats() const {
+TransportStats Layer::getStats() const {
     std::lock_guard<std::mutex> lock(statsMutex);
     return stats;
-}
-
-void Layer::resetStats() {
-    std::lock_guard<std::mutex> lock(statsMutex);
-    stats.reset();
-    logTransportEvent("stats_reset", "Transport statistics reset");
-}
-
-size_t Layer::getQueueSize() const {
-    std::lock_guard<std::mutex> lock(queueMutex);
-    return messageQueue.size();
-}
-
-size_t Layer::processPendingMessages() {
-    std::lock_guard<std::mutex> lock(queueMutex);
-    size_t processed = 0;
-
-    while (!messageQueue.empty() && !shouldStop.load()) {
-        InputMessage message = std::move(messageQueue.front());
-        messageQueue.pop();
-
-        if (messageHandler) {
-            try {
-                messageHandler(message);
-                processed++;
-            } catch (const std::exception& e) {
-                LOG_INPUT_ERROR("Exception in message handler: " + std::string(e.what()), message.data);
-            }
-        }
-    }
-
-    updateStatsQueueSize();
-    return processed;
-}
-
-bool Layer::isTransportEnabled(const std::string& transportName) const {
-    if (transportName == "pion") {
-        return config.usePionDataChannels;
-    } else if (transportName == "websocket") {
-        return config.enableLegacyWebSocket;
-    }
-    return false;
 }
 
 // Private methods
@@ -187,15 +129,15 @@ void Layer::pionMessageLoop() {
             for (;;) {
                 std::string kbMsg = WebRTCWrapper::getDataChannelMessageString();
                 if (kbMsg.empty()) break;
-                InputMessage message("pion_data", std::move(kbMsg), 0, timestamp);
+                InputMessage message("pion_data", std::move(kbMsg), timestamp);
                 enqueueMessage(std::move(message));
                 receivedCount++;
             }
 
             for (;;) {
-                auto mouseMsg = WebRTCWrapper::getMouseChannelMessageSafe();
-                if (!mouseMsg) break;
-                InputMessage message("pion_data", mouseMsg.toString(), 0, timestamp);
+                std::string mouseMsg = WebRTCWrapper::getMouseChannelMessageString();
+                if (mouseMsg.empty()) break;
+                InputMessage message("pion_data", std::move(mouseMsg), timestamp);
                 enqueueMessage(std::move(message));
                 receivedCount++;
             }
@@ -216,25 +158,6 @@ void Layer::pionMessageLoop() {
     }
 
     logTransportEvent("pion_loop_stopped", "Pion message loop stopped");
-}
-
-void Layer::websocketMessageLoop() {
-    logTransportEvent("websocket_loop_started", "WebSocket message loop starting");
-
-    while (websocketRunning.load() && !shouldStop.load()) {
-        try {
-            // TODO: Implement legacy WebSocket message retrieval
-            // Block briefly to avoid busy-yielding when legacy transport is enabled.
-            std::unique_lock<std::mutex> lock(queueMutex);
-            queueCondition.wait_for(lock, std::chrono::milliseconds(10),
-                [this]() { return shouldStop.load() || !websocketRunning.load(); });
-        } catch (const std::exception& e) {
-            LOG_INPUT_ERROR("Exception in WebSocket message loop: " + std::string(e.what()), "");
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    }
-
-    logTransportEvent("websocket_loop_stopped", "WebSocket message loop stopped");
 }
 
 void Layer::processingLoop() {
@@ -297,6 +220,7 @@ void Layer::enqueueMessage(InputMessage&& message) {
     // state first, then deliver the latest release.
     if (messageQueue.size() >= config.maxPendingMessages) {
         const bool isRelease = message.data.find("\"type\":\"keyup\"") != std::string::npos ||
+                               message.data.find("\"type\":\"mouseup\"") != std::string::npos ||
                                message.data.find("\"type\":\"input_reset\"") != std::string::npos;
         if (!isRelease) {
             std::lock_guard<std::mutex> statsLock(statsMutex);
@@ -308,16 +232,11 @@ void Layer::enqueueMessage(InputMessage&& message) {
         messageQueue.swap(empty);
         const uint64_t timestamp = message.timestamp;
         messageQueue.emplace("pion_data",
-            "{\"type\":\"input_reset\",\"reason\":\"transport_queue_overflow\"}", 0, timestamp);
+            "{\"type\":\"input_reset\",\"reason\":\"transport_queue_overflow\"}", timestamp);
         {
             std::lock_guard<std::mutex> statsLock(statsMutex);
             stats.messagesDropped += empty.size();
         }
-    }
-
-    // Detect sequence gaps if enabled
-    if (sequenceTrackingEnabled && message.sequenceId > 0) {
-        detectSequenceGap(message.sequenceId);
     }
 
     messageQueue.push(std::move(message));
@@ -336,31 +255,6 @@ void Layer::updateStatsQueueSize() {
     std::lock_guard<std::mutex> lock(statsMutex);
     stats.queueSize = messageQueue.size();
     stats.maxQueueSize = (std::max)(stats.maxQueueSize, stats.queueSize);
-}
-
-void Layer::detectSequenceGap(uint64_t sequenceId) {
-    if (lastSequenceId > 0 && sequenceId > lastSequenceId + 1) {
-        uint64_t gapSize = sequenceId - lastSequenceId - 1;
-        std::lock_guard<std::mutex> lock(statsMutex);
-        stats.sequenceGapsDetected++;
-
-        LOG_WARNING(ErrorUtils::ErrorCategory::INPUT,
-                   "Sequence gap detected: expected " + std::to_string(lastSequenceId + 1) +
-                   ", got " + std::to_string(sequenceId) + " (gap: " + std::to_string(gapSize) + ")");
-    }
-    lastSequenceId = sequenceId;
-}
-
-bool Layer::shouldProcessMessage(const InputMessage& message) {
-    // Basic validation - can be extended with more sophisticated filtering
-    if (message.type.empty()) {
-        LOG_WARNING(ErrorUtils::ErrorCategory::INPUT, "Dropping message with empty type");
-        return false;
-    }
-
-    // Rate limiting could be added here based on config.maxInjectHz
-
-    return true;
 }
 
 void Layer::logTransportEvent(const std::string& event, const std::string& details) {

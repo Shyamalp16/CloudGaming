@@ -66,7 +66,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -238,6 +237,9 @@ var webrtcStats struct {
 
 var videoBytesSentInterval uint64
 var videoPendingDrops uint32
+var peerGeneration uint64
+var moduleStop = make(chan struct{})
+var moduleStopOnce sync.Once
 
 func addPendingVideoDrops(count uint32) {
 	for {
@@ -250,6 +252,13 @@ func addPendingVideoDrops(count uint32) {
 			return
 		}
 	}
+}
+
+func ntpMiddle32(now time.Time) uint32 {
+	const ntpUnixOffset = uint64(2208988800)
+	seconds := uint64(now.Unix()) + ntpUnixOffset
+	fraction := uint64(now.Nanosecond()) * (uint64(1) << 32) / 1_000_000_000
+	return uint32(((seconds << 32) | fraction) >> 16)
 }
 
 // Periodic stats monitoring goroutine
@@ -270,64 +279,23 @@ func startStatsMonitoring() {
 				updatePacerQueueLength()
 			case <-audioHealthTicker.C:
 				reportAudioQueueHealth()
+			case <-moduleStop:
+				return
 			}
 		}
 	}()
 }
 
-// validate4KCapacity ensures the buffer pool can handle maximum 4K video frames
-func validate4KCapacity() {
-	// Test different 4K frame sizes to ensure pool can handle them
-	testSizes := []int{
-		100 * 1024,  // 100KB - typical low-motion 4K frame
-		500 * 1024,  // 500KB - medium-motion 4K frame
-		1000 * 1024, // 1MB - high-motion 4K frame
-		1500 * 1024, // 1.5MB - maximum expected 4K frame (will be capped to max tier)
-	}
-
-	log.Printf("[Go/Pion] Validating 4K video frame capacity...")
-
-	for _, requestedSize := range testSizes {
-		// Check if requested size exceeds our maximum tier
-		maxTierSize := sampleBufPool.sizes[sampleBufPool.sizeCount-1]
-		actualSize := requestedSize
-		if requestedSize > maxTierSize {
-			log.Printf("[Go/Pion] Requested size %d KB exceeds max tier size %d KB, testing with max tier size",
-				requestedSize/1024, maxTierSize/1024)
-			actualSize = maxTierSize
-		}
-
-		// Test buffer acquisition
-		buf := getSampleBuf(actualSize)
-		if len(buf) != actualSize {
-			log.Printf("[ERROR] Buffer pool failed to provide %d byte buffer (got %d)", actualSize, len(buf))
-			continue
-		}
-
-		// Test buffer return
-		putSampleBuf(buf)
-
-		tier := sampleBufPool.getBufferTier(actualSize)
-		log.Printf("[Go/Pion] ✓ 4K capacity validated: %d KB frame -> tier %d (%d bytes)",
-			actualSize/1024, tier, sampleBufPool.sizes[tier])
-	}
-
-	log.Printf("[Go/Pion] 4K video frame capacity validation completed")
-}
-
 // checkBufferPoolHealth performs real-time health monitoring of the buffer pool
 func checkBufferPoolHealth() {
-	sampleBufPool.mutex.RLock()
-	defer sampleBufPool.mutex.RUnlock()
-
 	totalHits := int64(0)
 	totalMisses := int64(0)
 	totalAllocs := int64(0)
 
 	for i := 0; i < sampleBufPool.sizeCount; i++ {
-		totalHits += sampleBufPool.hits[i]
-		totalMisses += sampleBufPool.misses[i]
-		totalAllocs += sampleBufPool.allocations[i]
+		totalHits += atomic.LoadInt64(&sampleBufPool.hits[i])
+		totalMisses += atomic.LoadInt64(&sampleBufPool.misses[i])
+		totalAllocs += atomic.LoadInt64(&sampleBufPool.allocations[i])
 	}
 
 	// Calculate overall hit rate
@@ -353,9 +321,6 @@ func checkBufferPoolHealth() {
 
 // logBufferPoolHealth provides detailed health metrics for the buffer pool
 func logBufferPoolHealth() {
-	sampleBufPool.mutex.RLock()
-	defer sampleBufPool.mutex.RUnlock()
-
 	log.Printf("[Go/Pion] === Buffer Pool Health Report ===")
 
 	totalHits := int64(0)
@@ -363,9 +328,9 @@ func logBufferPoolHealth() {
 	totalAllocs := int64(0)
 
 	for i := 0; i < sampleBufPool.sizeCount; i++ {
-		hits := sampleBufPool.hits[i]
-		misses := sampleBufPool.misses[i]
-		allocs := sampleBufPool.allocations[i]
+		hits := atomic.LoadInt64(&sampleBufPool.hits[i])
+		misses := atomic.LoadInt64(&sampleBufPool.misses[i])
+		allocs := atomic.LoadInt64(&sampleBufPool.allocations[i])
 
 		totalHits += hits
 		totalMisses += misses
@@ -405,18 +370,6 @@ func logBufferPoolHealth() {
 	}
 
 	log.Printf("[Go/Pion] ======================================")
-}
-
-// cleanupBufferPools removes excess buffers to prevent memory bloat
-func cleanupBufferPools() {
-	sampleBufPool.mutex.Lock()
-	defer sampleBufPool.mutex.Unlock()
-
-	// Note: sync.Pool doesn't expose the internal slice, so we can't directly
-	// clean up excess buffers. The pool will naturally shrink as GC runs.
-	// This function serves as a placeholder for future pool management features.
-
-	log.Printf("[Go/Pion] Buffer pool cleanup completed (GC will handle pool sizing)")
 }
 
 // updateAudioQueueDepth records the current audio queue depth for bitrate adaptation monitoring
@@ -562,26 +515,20 @@ var (
 	audioBufferMutex      sync.Mutex        // Protects the connection buffer
 	maxAudioBufferSize    int           = 3 // Keep only the latest 30 ms while connecting.
 
-	lastAnswerSDP        string
-	audioFrameDuration   uint32 = 480 // RTP timestamp increment per frame (10ms at 48kHz)
-	videoFrameCounter    uint64
-	dataChannel          *webrtc.DataChannel
-	messageQueue         []string
-	mouseQueue           []string
-	queueMutex           sync.Mutex
-	mouseChannel         *webrtc.DataChannel
-	latencyChannel       *webrtc.DataChannel
-	videoFeedbackChannel *webrtc.DataChannel
-	pingTimestamps       map[uint64]int64
-	pingTimestampsMutex  sync.Mutex
-	connectionState      webrtc.PeerConnectionState
-	videoPayloadType     uint8 = 96
-	audioPayloadType     uint8 = 0
+	lastAnswerSDP      string
+	audioFrameDuration uint32 = 480 // RTP timestamp increment per frame (10ms at 48kHz)
+	videoFrameCounter  uint64
+	dataChannel        *webrtc.DataChannel
+	messageQueue       []string
+	messageQueueHead   int
+	mouseQueue         []string
+	mouseQueueHead     int
+	queueMutex         sync.Mutex
+	mouseChannel       *webrtc.DataChannel
+	connectionState    webrtc.PeerConnectionState
+	videoPayloadType   uint8 = 96
+	audioPayloadType   uint8 = 0
 
-	// Audio E2E latency measurement
-	audioPingCounter    uint64
-	audioPingTimestamps map[uint64]int64 // audioPingID -> hostSendTime
-	audioPingMutex      sync.Mutex
 	// Buffer remote ICE candidates received before remote SDP is set
 	pendingRemoteCandidates []webrtc.ICECandidateInit
 	// Cache latest RTT (ms) from ping/pong to combine with RTCP loss/jitter
@@ -592,11 +539,6 @@ var (
 	lastEnqueueLog    time.Time
 	msgEnqueueCount   int
 	mouseEnqueueCount int
-
-	// send rate logging
-	sendLastLog       time.Time
-	sendCount         int
-	zeroDurationCount int
 
 	// Granular audio send path: bounded queue and dedicated sender goroutine
 	audioSendQueue chan *rtp.Packet // Bounded channel for RTP packets (size ≤ 3)
@@ -612,6 +554,7 @@ var (
 type queuedVideoSample struct {
 	sample     media.Sample
 	isKeyframe bool
+	generation uint64
 }
 
 // AudioRTPState encapsulates all audio RTP state with atomic operations
@@ -744,14 +687,18 @@ type tieredBufferPool struct {
 	pools       [13]sync.Pool // Pools for different size tiers (expanded for 4K support)
 	sizes       [13]int       // Size classes: 128B to 1MB for 4K video support
 	sizeCount   int
-	hits        [13]int64    // Cache hits per tier
-	misses      [13]int64    // Cache misses per tier
-	allocations [13]int64    // New allocations per tier
-	mutex       sync.RWMutex // Protects statistics
+	hits        [13]int64 // Cache hits per tier
+	misses      [13]int64 // Cache misses per tier
+	allocations [13]int64 // New allocations per tier
 
-	// Size distribution monitoring for optimization
-	sizeRequests [13]int64     // Number of requests per tier
-	actualSizes  map[int]int64 // Track actual requested sizes (for debugging)
+}
+
+type pooledSlice struct {
+	data []byte
+}
+
+var pooledSliceWrappers = sync.Pool{
+	New: func() any { return &pooledSlice{} },
 }
 
 // ============================================================================
@@ -770,9 +717,8 @@ type tieredBufferPool struct {
 // - 1048576 (1MB): Maximum 4K frame capacity
 // ============================================================================
 var sampleBufPool = &tieredBufferPool{
-	sizes:       [13]int{128, 256, 512, 1500, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576},
-	sizeCount:   13,
-	actualSizes: make(map[int]int64), // Initialize size tracking map
+	sizes:     [13]int{128, 256, 512, 1500, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576},
+	sizeCount: 13,
 }
 
 // Initialize preallocated buffers for common sizes (expanded for 4K support)
@@ -789,7 +735,9 @@ func initBufferPool() {
 		count := preallocCounts[i]
 		for j := 0; j < count; j++ {
 			buf := make([]byte, size)
-			sampleBufPool.pools[i].Put(buf)
+			wrapper := pooledSliceWrappers.Get().(*pooledSlice)
+			wrapper.data = buf
+			sampleBufPool.pools[i].Put(wrapper)
 		}
 		log.Printf("[Go/Pion] Buffer pool tier %d (%d bytes): preallocated %d buffers", i, size, count)
 	}
@@ -800,11 +748,15 @@ func initBufferPool() {
 		statsTicker := time.NewTicker(5 * time.Minute)
 		defer statsTicker.Stop()
 
-		for range statsTicker.C {
-			logBufferPoolStats()
-			logBufferPoolHealth()
-			logBufferSizeDistribution()
-			checkBufferPoolHealth()
+		for {
+			select {
+			case <-statsTicker.C:
+				logBufferPoolStats()
+				logBufferPoolHealth()
+				checkBufferPoolHealth()
+			case <-moduleStop:
+				return
+			}
 		}
 	}()
 }
@@ -822,8 +774,7 @@ func (tbp *tieredBufferPool) getBufferTier(size int) int {
 
 // getSampleBuf returns a buffer of at least the requested size.
 // Hot path: no mutex — only calls sync.Pool.Get() which is lock-free.
-// Stats fields (hits/misses) are updated with atomics on miss paths only;
-// the actualSizes/sizeRequests maps are updated outside the per-frame critical path.
+// Stats fields are updated atomically outside the media sender's critical work.
 func getSampleBuf(n int) []byte {
 	if n <= 0 {
 		return make([]byte, 0)
@@ -848,7 +799,10 @@ func getSampleBuf(n int) []byte {
 		return buf[:n]
 	}
 
-	b := v.([]byte)
+	wrapper := v.(*pooledSlice)
+	b := wrapper.data
+	wrapper.data = nil
+	pooledSliceWrappers.Put(wrapper)
 	if cap(b) < n {
 		atomic.AddInt64(&sampleBufPool.misses[tier], 1)
 		atomic.AddInt64(&sampleBufPool.allocations[tier], 1)
@@ -877,16 +831,21 @@ func putSampleBuf(b []byte) {
 	// Find the appropriate tier for this buffer capacity
 	tier := sampleBufPool.getBufferTier(capacity)
 	targetSize := sampleBufPool.sizes[tier]
+	putInTier := func(tier int) {
+		wrapper := pooledSliceWrappers.Get().(*pooledSlice)
+		wrapper.data = b[:capacity]
+		sampleBufPool.pools[tier].Put(wrapper)
+	}
 
 	// Return to pool without zeroing -- buffers contain video data that will be
 	// fully overwritten by C.memcpy on next use, so clearing is wasted work.
 	if capacity == targetSize {
-		sampleBufPool.pools[tier].Put(b[:capacity])
+		putInTier(tier)
 		return
 	}
 
 	if capacity >= targetSize/2 && capacity <= targetSize*2 {
-		sampleBufPool.pools[tier].Put(b[:capacity])
+		putInTier(tier)
 		return
 	}
 
@@ -894,7 +853,7 @@ func putSampleBuf(b []byte) {
 		smallerTier := tier - 1
 		smallerTargetSize := sampleBufPool.sizes[smallerTier]
 		if capacity >= smallerTargetSize/2 && capacity <= smallerTargetSize*2 {
-			sampleBufPool.pools[smallerTier].Put(b[:capacity])
+			putInTier(smallerTier)
 			return
 		}
 	}
@@ -903,7 +862,7 @@ func putSampleBuf(b []byte) {
 		largerTier := tier + 1
 		largerTargetSize := sampleBufPool.sizes[largerTier]
 		if capacity >= largerTargetSize/2 && capacity <= largerTargetSize*2 {
-			sampleBufPool.pools[largerTier].Put(b[:capacity])
+			putInTier(largerTier)
 			return
 		}
 	}
@@ -911,18 +870,15 @@ func putSampleBuf(b []byte) {
 
 // logBufferPoolStats logs buffer pool usage statistics for monitoring
 func logBufferPoolStats() {
-	sampleBufPool.mutex.RLock()
-	defer sampleBufPool.mutex.RUnlock()
-
 	log.Printf("[Go/Pion] Buffer Pool Statistics:")
 	totalHits := int64(0)
 	totalMisses := int64(0)
 	totalAllocs := int64(0)
 
 	for i, size := range sampleBufPool.sizes {
-		hits := sampleBufPool.hits[i]
-		misses := sampleBufPool.misses[i]
-		allocs := sampleBufPool.allocations[i]
+		hits := atomic.LoadInt64(&sampleBufPool.hits[i])
+		misses := atomic.LoadInt64(&sampleBufPool.misses[i])
+		allocs := atomic.LoadInt64(&sampleBufPool.allocations[i])
 		totalHits += hits
 		totalMisses += misses
 		totalAllocs += allocs
@@ -945,71 +901,6 @@ func logBufferPoolStats() {
 
 	log.Printf("[Go/Pion]   Overall: %d requests, %d allocations, %.1f%% hit rate",
 		totalRequests, totalAllocs, overallHitRate)
-}
-
-// logBufferSizeDistribution logs the distribution of actual requested buffer sizes
-func logBufferSizeDistribution() {
-	sampleBufPool.mutex.RLock()
-	defer sampleBufPool.mutex.RUnlock()
-
-	log.Printf("[Go/Pion] Buffer Size Distribution (Top 20 most requested sizes):")
-
-	// Convert map to slice for sorting
-	type sizeCount struct {
-		size  int
-		count int64
-	}
-	var sizes []sizeCount
-	for size, count := range sampleBufPool.actualSizes {
-		sizes = append(sizes, sizeCount{size, count})
-	}
-
-	// Sort by count descending
-	for i := 0; i < len(sizes)-1; i++ {
-		for j := i + 1; j < len(sizes); j++ {
-			if sizes[i].count < sizes[j].count {
-				sizes[i], sizes[j] = sizes[j], sizes[i]
-			}
-		}
-	}
-
-	// Log top 20 sizes
-	maxEntries := 20
-	if len(sizes) < maxEntries {
-		maxEntries = len(sizes)
-	}
-
-	for i := 0; i < maxEntries; i++ {
-		size := sizes[i].size
-		count := sizes[i].count
-		tier := sampleBufPool.getBufferTier(size)
-		tierSize := sampleBufPool.sizes[tier]
-
-		// Calculate efficiency (how well this size fits its tier)
-		wastePercent := float64(0)
-		if tierSize > 0 {
-			wastePercent = float64(tierSize-size) / float64(tierSize) * 100
-		}
-
-		log.Printf("[Go/Pion]   Size %d bytes: %d requests -> Tier %d (%d bytes, %.1f%% waste)",
-			size, count, tier, tierSize, wastePercent)
-	}
-
-	// Log tier request distribution
-	log.Printf("[Go/Pion] Tier Request Distribution:")
-	for i, size := range sampleBufPool.sizes {
-		requests := sampleBufPool.sizeRequests[i]
-		if requests > 0 { // Only log tiers that were used
-			hits := sampleBufPool.hits[i]
-			misses := sampleBufPool.misses[i]
-			hitRate := float64(0)
-			if hits+misses > 0 {
-				hitRate = float64(hits) / float64(hits+misses) * 100
-			}
-			log.Printf("[Go/Pion]   Tier %d (%d bytes): %d requests, %.1f%% hit rate",
-				i, size, requests, hitRate)
-		}
-	}
 }
 
 // initAudioSendQueue initializes the bounded audio send queue and starts the sender goroutine
@@ -1039,6 +930,33 @@ func initVideoSendQueue() {
 	log.Println("[Go/Pion] Video send queue initialized with bounded channel (capacity: 2)")
 }
 
+func discardQueuedMedia() {
+	if videoSendQueue != nil {
+	videoDrain:
+		for {
+			select {
+			case queued := <-videoSendQueue:
+				putSampleBuf(queued.sample.Data)
+			default:
+				break videoDrain
+			}
+		}
+	}
+	if audioSendQueue != nil {
+	audioDrain:
+		for {
+			select {
+			case pkt := <-audioSendQueue:
+				if pkt != nil {
+					putSampleBuf(pkt.Payload)
+				}
+			default:
+				break audioDrain
+			}
+		}
+	}
+}
+
 // audioSenderGoroutine runs in a separate goroutine to send RTP packets without holding locks
 // This prevents head-of-line blocking and keeps the send path lock-granular
 func audioSenderGoroutine() {
@@ -1058,28 +976,11 @@ func audioSenderGoroutine() {
 			track := audioTrack
 			pcMutex.RUnlock()
 			if track != nil {
-				// Debug: Check payload data occasionally (5-second intervals)
-				if pkt.Header.SequenceNumber%2500 == 0 {
-					hasData := false
-					for i := 0; i < len(pkt.Payload) && i < 10; i++ {
-						if pkt.Payload[i] != 0 {
-							hasData = true
-							break
-						}
-					}
-					log.Printf("[Go/Pion] AUDIO DEBUG: Frame %d, size=%d bytes, has_data=%v",
-						pkt.Header.SequenceNumber, len(pkt.Payload), hasData)
-				}
-
 				if err := track.WriteRTP(pkt); err != nil {
 					log.Printf("[Go/Pion] AUDIO ERROR: Failed to write RTP packet to audio track: %v", err)
 					// Return buffer immediately on error
 					putSampleBuf(pkt.Payload)
 				} else {
-					// Log successful transmission occasionally (5-second intervals)
-					if pkt.Header.SequenceNumber%2500 == 0 {
-						log.Printf("[Go/Pion] AUDIO SUCCESS: RTP packet sent (seq=%d)", pkt.Header.SequenceNumber)
-					}
 					// Return buffer immediately after successful write
 					// This ensures minimal latency between write completion and buffer reuse
 					putSampleBuf(pkt.Payload)
@@ -1125,6 +1026,11 @@ func videoSenderGoroutine() {
 			}
 			idleTimer.Reset(10 * time.Second)
 
+			if queued.generation != atomic.LoadUint64(&peerGeneration) {
+				putSampleBuf(queued.sample.Data)
+				continue
+			}
+
 			pcMutex.RLock()
 			track := videoTrack
 			pcMutex.RUnlock()
@@ -1153,42 +1059,7 @@ func videoSenderGoroutine() {
 	}
 }
 
-// testBufferPool performs a simple test of buffer pool functionality
-// This can be called during development to verify the pool is working correctly
-func testBufferPool() {
-	log.Println("[Go/Pion] Testing buffer pool functionality...")
-
-	// Test different buffer sizes
-	testSizes := []int{50, 100, 150, 200, 300, 600, 1000, 1400}
-
-	for _, size := range testSizes {
-		// Get a buffer
-		buf := getSampleBuf(size)
-
-		// Verify buffer size
-		if len(buf) < size {
-			log.Printf("[Go/Pion] ERROR: Requested size %d, got %d", size, len(buf))
-			continue
-		}
-
-		// Fill buffer with test data
-		for i := range buf {
-			buf[i] = byte(i % 256)
-		}
-
-		// Return buffer to pool
-		putSampleBuf(buf)
-
-		log.Printf("[Go/Pion] Tested buffer size %d bytes successfully", size)
-	}
-
-	// Log final statistics
-	logBufferPoolStats()
-	log.Println("[Go/Pion] Buffer pool test completed")
-}
-
 func init() {
-	rand.Seed(time.Now().UnixNano())
 	loadDotEnvIfPresent()
 
 	// With physical RAM at near-capacity (16 GB machine running game + browser + host),
@@ -1235,28 +1106,10 @@ func validateAudioTimestampStability() {
 	}
 }
 
-// Global counter for audio packet debugging
-var audioPacketCounter int64
-
 //export sendAudioPacket
 func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	if data == nil || size <= 0 {
 		return -2
-	}
-	// Debug: Check incoming audio data (5-second intervals)
-	counter := atomic.AddInt64(&audioPacketCounter, 1)
-	if counter%2500 == 0 { // 2500 frames at 500fps = 5 seconds
-		// Check first few bytes of audio data
-		dataSlice := (*[1 << 30]byte)(data)[:size:size]
-		hasData := false
-		for i := 0; i < len(dataSlice) && i < 10; i++ {
-			if dataSlice[i] != 0 {
-				hasData = true
-				break
-			}
-		}
-		log.Printf("[Go/Pion] AUDIO RECEIVE: Frame %d, size=%d bytes, has_data=%v",
-			counter, size, hasData)
 	}
 
 	// Non-blocking audio RTP write implementation
@@ -1271,12 +1124,6 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	// Write paths (createPeerConnectionGo, closePeerConnection) use Lock().
 	pcMutex.RLock()
 	if peerConnection == nil || audioTrack == nil {
-		if peerConnection == nil {
-			log.Printf("[Go/Pion] AUDIO ERROR: PeerConnection is nil - cannot send audio packet")
-		}
-		if audioTrack == nil {
-			log.Printf("[Go/Pion] AUDIO ERROR: Audio track is nil - audio track not initialized")
-		}
 		pcMutex.RUnlock()
 		return -1
 	}
@@ -1327,7 +1174,6 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 	// track := audioTrack
 	payloadType := audioPayloadType
 	ssrc := audioSSRC
-	latencyDC := latencyChannel
 	pcMutex.RUnlock() // Release global lock immediately
 
 	// Reuse buffer from pool to avoid per-call allocation
@@ -1355,32 +1201,6 @@ func sendAudioPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
 		log.Printf("[Go/Pion] RTP timestamp wraparound detected: baseline=%d, timestamp=%d",
 			audioRTPState.GetBaseline(), packetRTPTimestamp)
 		// uint32 RTP timestamps wrap naturally.
-	}
-
-	// Check if we should insert an audio ping marker (every 100 packets).
-	if uint32(packetSequence)%100 == 0 && latencyDC != nil &&
-		latencyDC.ReadyState() == webrtc.DataChannelStateOpen {
-		audioPingMutex.Lock()
-		audioPingCounter++
-		audioPingID := audioPingCounter
-		hostSendTime := time.Now().UnixNano()
-		audioPingTimestamps[audioPingID] = hostSendTime
-		audioPingMutex.Unlock()
-
-		pingMessage := map[string]interface{}{
-			"type":           "audio_ping",
-			"ping_id":        audioPingID,
-			"host_send_time": fmt.Sprintf("%d", hostSendTime),
-			"sequence":       packetSequence,
-			"timestamp":      packetRTPTimestamp,
-		}
-		if pingJSON, err := json.Marshal(pingMessage); err == nil {
-			if err = latencyDC.SendText(string(pingJSON)); err != nil {
-				audioPingMutex.Lock()
-				delete(audioPingTimestamps, audioPingID)
-				audioPingMutex.Unlock()
-			}
-		}
 	}
 
 	// No mutex release needed - atomic operations are lock-free!
@@ -1451,7 +1271,7 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong, isK
 	if data == nil || size <= 0 {
 		return -2
 	}
-	// RLock: we only READ peerConnection, videoTrack, connectionState, videoFeedbackChannel.
+	// RLock: we only read PeerConnection state and track availability.
 	pcMutex.RLock()
 	if peerConnection == nil || videoTrack == nil {
 		pcMutex.RUnlock()
@@ -1476,20 +1296,22 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong, isK
 	C.memcpy(unsafe.Pointer(&buf[0]), data, C.size_t(n))
 	dur := time.Duration(durationValue) * time.Microsecond
 
-	// Preserve RTP clock progression across application-level frame drops.
 	droppedBefore := atomic.SwapUint32(&videoPendingDrops, 0)
 	sample := media.Sample{
 		Data:               buf,
 		Duration:           dur,
 		PrevDroppedPackets: uint16(droppedBefore),
 	}
-	queued := queuedVideoSample{sample: sample, isKeyframe: isKeyframe != 0}
+	queued := queuedVideoSample{
+		sample: sample, isKeyframe: isKeyframe != 0,
+		generation: atomic.LoadUint64(&peerGeneration),
+	}
 	select {
 	case videoSendQueue <- queued:
 		return 0
 	default:
-		// Queue is full: replace the oldest sample and transfer its skipped
-		// duration to the replacement so the receiver timeline remains honest.
+		// Queue is full: replace the oldest sample and tell Pion how many
+		// application-level samples were skipped so RTP time advances.
 		select {
 		case oldest := <-videoSendQueue:
 			// An IDR is the decoder's recovery point. Preserve it when the
@@ -1506,8 +1328,7 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong, isK
 			} else {
 				putSampleBuf(oldest.sample.Data)
 			}
-			transferred := uint32(sample.PrevDroppedPackets) +
-				uint32(oldest.sample.PrevDroppedPackets) + 1
+			transferred := uint32(sample.PrevDroppedPackets) + uint32(oldest.sample.PrevDroppedPackets) + 1
 			if transferred > 65535 {
 				transferred = 65535
 			}
@@ -1531,23 +1352,28 @@ func sendVideoSample(data unsafe.Pointer, size C.int, durationUs C.longlong, isK
 func enqueueMessage(msg string) {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
+	if messageQueueHead >= 64 && messageQueueHead*2 >= len(messageQueue) {
+		messageQueue = append(messageQueue[:0], messageQueue[messageQueueHead:]...)
+		messageQueueHead = 0
+	}
 	const maxKeyboardMessages = 128
-	if len(messageQueue) >= maxKeyboardMessages {
+	if len(messageQueue)-messageQueueHead >= maxKeyboardMessages {
 		var event struct {
 			Type string `json:"type"`
 		}
 		_ = json.Unmarshal([]byte(msg), &event)
-		if event.Type != "keyup" && event.Type != "input_reset" {
+		if event.Type != "keyup" && event.Type != "mouseup" && event.Type != "input_reset" {
 			return
 		}
 
 		// A saturated reliable/ordered key channel means releases may already be
 		// trapped behind stale presses. Reset the pending stream and force the host
 		// to release every tracked key before applying the newest release.
-		for i := range messageQueue {
+		for i := messageQueueHead; i < len(messageQueue); i++ {
 			messageQueue[i] = ""
 		}
-		messageQueue = messageQueue[:0]
+		messageQueue = nil
+		messageQueueHead = 0
 		messageQueue = append(messageQueue, `{"type":"input_reset","reason":"keyboard_queue_overflow"}`)
 	}
 	messageQueue = append(messageQueue, msg)
@@ -1563,10 +1389,28 @@ func enqueueMessage(msg string) {
 func enqueueMouseEvent(msg string) {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
+	if mouseQueueHead >= 64 && mouseQueueHead*2 >= len(mouseQueue) {
+		mouseQueue = append(mouseQueue[:0], mouseQueue[mouseQueueHead:]...)
+		mouseQueueHead = 0
+	}
 	const maxMouseMessages = 256
-	if len(mouseQueue) >= maxMouseMessages {
-		copy(mouseQueue, mouseQueue[len(mouseQueue)-maxMouseMessages+1:])
-		mouseQueue = mouseQueue[:maxMouseMessages-1]
+	if len(mouseQueue)-mouseQueueHead >= maxMouseMessages {
+		var event struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal([]byte(msg), &event)
+		if event.Type != "mouseup" && event.Type != "input_reset" {
+			return
+		}
+
+		// Button releases must never sit behind a saturated stream of stale
+		// movement events.  Reset tracked state, then apply the release.
+		for i := mouseQueueHead; i < len(mouseQueue); i++ {
+			mouseQueue[i] = ""
+		}
+		mouseQueue = nil
+		mouseQueueHead = 0
+		mouseQueue = append(mouseQueue, `{"type":"input_reset","reason":"mouse_queue_overflow"}`)
 	}
 	mouseQueue = append(mouseQueue, msg)
 	mouseEnqueueCount++
@@ -1582,60 +1426,34 @@ func enqueueMouseEvent(msg string) {
 func getDataChannelMessage() *C.char {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
-	if len(messageQueue) == 0 {
+	if messageQueueHead >= len(messageQueue) {
 		return nil
 	}
-	msg := messageQueue[0]
-	copy(messageQueue, messageQueue[1:])
-	messageQueue[len(messageQueue)-1] = ""
-	messageQueue = messageQueue[:len(messageQueue)-1]
+	msg := messageQueue[messageQueueHead]
+	messageQueue[messageQueueHead] = ""
+	messageQueueHead++
+	if messageQueueHead == len(messageQueue) {
+		messageQueue = nil
+		messageQueueHead = 0
+	}
 	return C.CString(msg)
-}
-
-//export enqueueDataChannelMessage
-func enqueueDataChannelMessage(msg *C.char) {
-	goMsg := C.GoString(msg)
-	enqueueMessage(goMsg)
 }
 
 //export getMouseChannelMessage
 func getMouseChannelMessage() *C.char {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
-	if len(mouseQueue) == 0 {
+	if mouseQueueHead >= len(mouseQueue) {
 		return nil
 	}
-	msg := mouseQueue[0]
-	copy(mouseQueue, mouseQueue[1:])
-	mouseQueue[len(mouseQueue)-1] = ""
-	mouseQueue = mouseQueue[:len(mouseQueue)-1]
-	// log.Printf(
-	// 	"[Go/Pion] <-- getMouseChannelMessage: Dequeued: '%s'. Queue size AFTER: %d",
-	// 	msg,
-	// 	len(mouseQueue),
-	// )
+	msg := mouseQueue[mouseQueueHead]
+	mouseQueue[mouseQueueHead] = ""
+	mouseQueueHead++
+	if mouseQueueHead == len(mouseQueue) {
+		mouseQueue = nil
+		mouseQueueHead = 0
+	}
 	return C.CString(msg)
-}
-
-//export enqueueMouseChannelMessage
-func enqueueMouseChannelMessage(msg *C.char) {
-	goMsg := C.GoString(msg)
-	enqueueMouseEvent(goMsg)
-}
-
-func newTrue() *bool {
-	b := true
-	return &b
-}
-
-func newFalse() *bool {
-	b := false
-	return &b
-}
-
-func newProtocol() *string {
-	b := ""
-	return &b
 }
 
 func drainSenderRTCP(sender *webrtc.RTPSender, mediaKind string) {
@@ -1656,21 +1474,17 @@ func createPeerConnectionGo() C.int {
 	oldPC := peerConnection
 	oldDataChannel := dataChannel
 	oldMouseChannel := mouseChannel
-	oldLatencyChannel := latencyChannel
-	oldVideoFeedbackChannel := videoFeedbackChannel
 	peerConnection = nil
 	videoTrack = nil
 	audioTrack = nil
 	dataChannel = nil
 	mouseChannel = nil
-	latencyChannel = nil
-	videoFeedbackChannel = nil
 	connectionState = webrtc.PeerConnectionStateNew
 	lastAnswerSDP = ""
 	pcMutex.Unlock()
 
 	// Closing can synchronously run callbacks; never do it while pcMutex is held.
-	for _, dc := range []*webrtc.DataChannel{oldDataChannel, oldMouseChannel, oldLatencyChannel, oldVideoFeedbackChannel} {
+	for _, dc := range []*webrtc.DataChannel{oldDataChannel, oldMouseChannel} {
 		if dc != nil {
 			_ = dc.Close()
 		}
@@ -1678,21 +1492,19 @@ func createPeerConnectionGo() C.int {
 	if oldPC != nil {
 		_ = oldPC.Close()
 	}
+	atomic.AddUint64(&peerGeneration, 1)
+	atomic.StoreUint32(&videoPendingDrops, 0)
+	discardQueuedMedia()
 
 	queueMutex.Lock()
 	messageQueue = nil
+	messageQueueHead = 0
 	mouseQueue = nil
+	mouseQueueHead = 0
 	queueMutex.Unlock()
 	signalingMutex.Lock()
 	pendingRemoteCandidates = nil
 	signalingMutex.Unlock()
-	pingTimestampsMutex.Lock()
-	pingTimestamps = make(map[uint64]int64)
-	pingTimestampsMutex.Unlock()
-	audioPingMutex.Lock()
-	audioPingTimestamps = make(map[uint64]int64)
-	audioPingCounter = 0
-	audioPingMutex.Unlock()
 	audioRTPState.Reset()
 	audioBufferMutex.Lock()
 	for _, pkt := range audioConnectionBuffer {
@@ -1795,25 +1607,26 @@ func createPeerConnectionGo() C.int {
 				"[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global dataChannel and attaching handlers.\n",
 				actualLabel,
 			)
-			// --- DEADLOCK FIX: REMOVED pcMutex.Lock() HERE ---
-			if dataChannel != nil && dataChannel != dc {
+			pcMutex.Lock()
+			previousChannel := dataChannel
+			dataChannel = dc
+			pcMutex.Unlock()
+			if previousChannel != nil && previousChannel != dc {
 				log.Printf(
 					"[Go/Pion] OnDataChannel: Closing previous global data channel '%s' before assigning new one.\n",
-					dataChannel.Label(),
+					previousChannel.Label(),
 				)
-				if errClose := dataChannel.Close(); errClose != nil {
+				if errClose := previousChannel.Close(); errClose != nil {
 					log.Printf(
 						"[Go/Pion] OnDataChannel: Error closing previous global dataChannel: %v\n",
 						errClose,
 					)
 				}
 			}
-			dataChannel = dc
 			log.Printf(
 				"[Go/Pion] OnDataChannel: Global 'dataChannel' variable assigned to new DC with label '%s'.",
-				dataChannel.Label(),
+				dc.Label(),
 			)
-			// --- DEADLOCK FIX: REMOVED pcMutex.Unlock() HERE ---
 
 			dc.OnOpen(func() {
 				pcMutex.Lock()
@@ -1837,17 +1650,6 @@ func createPeerConnectionGo() C.int {
 			})
 
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-				// Throttle noisy logs: only log size and acks
-				var messageData map[string]interface{}
-				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
-					if clientMs, ok := normalizeToMs(messageData["client_send_time"]); ok {
-						hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
-						oneWayLatency := hostReceiveTime - clientMs
-						if oneWayLatency > 100 {
-							log.Printf("[Go/Pion] Keyboard latency high: %.1f ms", oneWayLatency)
-						}
-					}
-				}
 				enqueueMessage(string(msg.Data))
 			})
 
@@ -1890,23 +1692,22 @@ func createPeerConnectionGo() C.int {
 				"[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global mouseChannel and attaching handlers.\n",
 				actualLabel,
 			)
-			// --- DEADLOCK FIX: REMOVED pcMutex.Lock() HERE ---
-			if mouseChannel != nil && mouseChannel != dc {
+			pcMutex.Lock()
+			previousChannel := mouseChannel
+			mouseChannel = dc
+			pcMutex.Unlock()
+			if previousChannel != nil && previousChannel != dc {
 				log.Printf(
-					"[Go/Pion] OnDataChannel: Closing previous global mouse channel '%s' (ID: %s) before assigning new one.\n",
-					mouseChannel.Label(),
-					fmt.Sprintf("%d", *mouseChannel.ID()),
+					"[Go/Pion] OnDataChannel: Closing previous global mouse channel '%s' before assigning new one.\n",
+					previousChannel.Label(),
 				)
-				if errClose := mouseChannel.Close(); errClose != nil {
+				if errClose := previousChannel.Close(); errClose != nil {
 					log.Printf(
 						"[Go/Pion] OnDataChannel: Error closing previous global mouseChannel: %v\n",
 						errClose,
 					)
 				}
 			}
-			mouseChannel = dc
-			// --- DEADLOCK FIX: REMOVED pcMutex.Unlock() HERE ---
-
 			dc.OnOpen(func() {
 				pcMutex.Lock()
 				gdcLabel := "nil (global)"
@@ -1929,17 +1730,6 @@ func createPeerConnectionGo() C.int {
 			})
 
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-				// Throttle noisy logs: only log size and acks
-				var messageData map[string]interface{}
-				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
-					if clientMs, ok := normalizeToMs(messageData["client_send_time"]); ok {
-						hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
-						oneWayLatency := hostReceiveTime - clientMs
-						if oneWayLatency > 100 {
-							log.Printf("[Go/Pion] Mouse latency high: %.1f ms", oneWayLatency)
-						}
-					}
-				}
 				enqueueMouseEvent(string(msg.Data))
 			})
 
@@ -1974,267 +1764,9 @@ func createPeerConnectionGo() C.int {
 				"[Go/Pion] OnDataChannel: All handlers attached for mouse DC '%s'.\n",
 				actualLabel,
 			)
-		} else if actualLabel == "latencyChannel" {
-			log.Printf(
-				"[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global latencyChannel and attaching handlers.\n",
-				actualLabel,
-			)
-			if latencyChannel != nil && latencyChannel != dc {
-				log.Printf(
-					"[Go/Pion] OnDataChannel: Closing previous global latency channel '%s' (ID: %s) before assigning new one.\n",
-					latencyChannel.Label(),
-					fmt.Sprintf("%d", *latencyChannel.ID()),
-				)
-				if errClose := latencyChannel.Close(); errClose != nil {
-					log.Printf(
-						"[Go/Pion] OnDataChannel: Error closing previous global latencyChannel: %v\n",
-						errClose,
-					)
-				}
-			}
-			latencyChannel = dc
-
-			dc.OnOpen(func() {
-				log.Printf(
-					"[Go/Pion] Latency channel '%s' (ID: %s) OnOpen event. ReadyState: %s\n",
-					dc.Label(),
-					idStr,
-					dc.ReadyState().String(),
-				)
-			})
-
-			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-				log.Printf(
-					"[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s\n",
-					dc.Label(),
-					idStr,
-					string(msg.Data),
-				)
-				var messageData map[string]interface{}
-				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
-					if msgType, ok := messageData["type"].(string); ok {
-						if msgType == "ping" {
-							if clientTimestamp, ok := messageData["timestamp"].(float64); ok {
-								if sequenceNumber, ok := messageData["sequence_number"].(float64); ok {
-									hostReceiveTime := float64(time.Now().UnixNano()) / float64(time.Millisecond)
-
-									pongResponse := map[string]interface{}{
-										"type":              "pong",
-										"timestamp":         clientTimestamp,
-										"sequence_number":   sequenceNumber,
-										"host_receive_time": hostReceiveTime,
-									}
-									pongJSON, _ := json.Marshal(pongResponse)
-									if err := dc.SendText(string(pongJSON)); err != nil {
-										log.Printf("[Go/Pion] Error sending pong: %v\n", err)
-									} else {
-										log.Printf(
-											"[Go/Pion] Sent pong for sequence %d (Client: %.2f, Host: %.2f)\n",
-											int(sequenceNumber), clientTimestamp, hostReceiveTime,
-										)
-									}
-								}
-							}
-						}
-					}
-				}
-			})
-
-			dc.OnClose(func() {
-				log.Printf(
-					"[Go/Pion] Latency channel '%s' (ID: %s) OnClose event. ReadyState: %s\n",
-					dc.Label(),
-					idStr,
-					dc.ReadyState().String(),
-				)
-				pcMutex.Lock()
-				if latencyChannel == dc {
-					log.Printf(
-						"[Go/Pion] OnClose: Global latencyChannel ('%s', ID: %s) is being closed. Setting global to nil.\n",
-						dc.Label(),
-						idStr,
-					)
-					latencyChannel = nil
-				}
-				pcMutex.Unlock()
-			})
-
-			dc.OnError(func(err error) {
-				log.Printf(
-					"[Go/Pion] Data channel '%s' (ID: %s) OnError event: %v\n",
-					dc.Label(),
-					idStr,
-					err,
-				)
-			})
-			log.Printf(
-				"[Go/Pion] OnDataChannel: All handlers attached for latency DC '%s'.",
-				actualLabel,
-			)
-		} else if actualLabel == "videoFeedbackChannel" {
-			log.Printf(
-				"[Go/Pion] OnDataChannel: Label MATCHED ('%s'). Assigning to global videoFeedbackChannel and attaching handlers.",
-				actualLabel,
-			)
-			if videoFeedbackChannel != nil && videoFeedbackChannel != dc {
-				log.Printf(
-					"[Go/Pion] OnDataChannel: Closing previous global videoFeedbackChannel '%s' (ID: %s) before assigning new one.",
-					videoFeedbackChannel.Label(),
-					fmt.Sprintf("%d", *videoFeedbackChannel.ID()),
-				)
-				if errClose := videoFeedbackChannel.Close(); errClose != nil {
-					log.Printf(
-						"[Go/Pion] OnDataChannel: Error closing previous global videoFeedbackChannel: %v",
-						errClose,
-					)
-				}
-			}
-			videoFeedbackChannel = dc
-
-			dc.OnOpen(func() {
-				log.Printf(
-					"[Go/Pion] Video Feedback channel '%s' (ID: %s) OnOpen event. ReadyState: %s",
-					dc.Label(),
-					idStr,
-					dc.ReadyState().String(),
-				)
-			})
-
-			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-				/* log.Printf(
-					"[Go/Pion] >>> DataChannel '%s' (ID: %s) OnMessage RECEIVED: %s",
-					dc.Label(),
-					idStr,
-					string(msg.Data),
-				) */
-				// Host doesn't need to process pong for RTT, just log for now
-				var messageData map[string]interface{}
-				if err := json.Unmarshal(msg.Data, &messageData); err == nil {
-					if msgType, ok := messageData["type"].(string); ok {
-						if msgType == "video_frame_pong" {
-							if frameIDFloat, ok := messageData["frame_id"].(float64); ok {
-								frameID := uint64(frameIDFloat)
-								if hostSendTimeString, ok := messageData["host_send_time"].(string); ok {
-									hostSendTime, err := strconv.ParseInt(hostSendTimeString, 10, 64)
-									if err != nil {
-										log.Printf("[Go/Pion] Error parsing host_send_time from pong: %v", err)
-										return
-									}
-
-									pingTimestampsMutex.Lock()
-									originalHostSendTime, found := pingTimestamps[frameID]
-									delete(pingTimestamps, frameID) // Clean up the map
-									pingTimestampsMutex.Unlock()
-
-									if found {
-										// Optional: Verify the timestamp hasn't been tampered with
-										if hostSendTime != originalHostSendTime {
-											log.Printf("[Go/Pion] [PONG] Timestamp mismatch for frame %d. Original: %d, Received: %d", frameID, originalHostSendTime, hostSendTime)
-											return
-										}
-										hostReceiveTime := time.Now().UnixNano()
-										rttNano := hostReceiveTime - hostSendTime
-										rttMilli := float64(rttNano) / float64(time.Millisecond)
-										// log.Printf("[Go/Pion] [PONG] RTT for frame %d: %.2f ms", frameID, rttMilli)
-										lastRttMutex.Lock()
-										lastRttMs = rttMilli
-										lastRttMutex.Unlock()
-
-										// Send RTT update back to the client
-										rttUpdateMsg := map[string]interface{}{
-											"type": "rtt_update",
-											"rtt":  rttMilli,
-										}
-										rttJSON, _ := json.Marshal(rttUpdateMsg)
-										if err := dc.SendText(string(rttJSON)); err != nil {
-											log.Printf("[Go/Pion] Error sending RTT update: %v", err)
-										}
-									} else {
-										log.Printf("[Go/Pion] [PONG] Received pong for unknown or expired frame_id: %d", frameID)
-									}
-								} else {
-									log.Printf("[Go/Pion] [PONG] Invalid 'host_send_time' in pong message: %v", messageData["host_send_time"])
-								}
-							} else if msgType == "audio_ping_pong" {
-								if pingIDFloat, ok := messageData["ping_id"].(float64); ok {
-									pingID := uint64(pingIDFloat)
-									if hostSendTimeString, ok := messageData["host_send_time"].(string); ok {
-										hostSendTime, err := strconv.ParseInt(hostSendTimeString, 10, 64)
-										if err != nil {
-											log.Printf("[Go/Pion] Error parsing host_send_time from audio pong: %v", err)
-											return
-										}
-
-										audioPingMutex.Lock()
-										originalHostSendTime, found := audioPingTimestamps[pingID]
-										delete(audioPingTimestamps, pingID) // Clean up the map
-										audioPingMutex.Unlock()
-
-										if found {
-											// Verify the timestamp hasn't been tampered with
-											if hostSendTime != originalHostSendTime {
-												log.Printf("[Go/Pion] [AUDIO PONG] Timestamp mismatch for ping %d. Original: %d, Received: %d", pingID, originalHostSendTime, hostSendTime)
-												return
-											}
-											hostReceiveTime := time.Now().UnixNano()
-											rttNano := hostReceiveTime - hostSendTime
-											rttMilli := float64(rttNano) / float64(time.Millisecond)
-
-											log.Printf("[Go/Pion] [AUDIO PONG] Ping %d E2E latency: %.2f ms", pingID, rttMilli)
-
-											// Could cache audio latency for monitoring/combining with other metrics
-											// For now, just log the measurement
-										} else {
-											log.Printf("[Go/Pion] [AUDIO PONG] Ping ID %d not found in timestamps map", pingID)
-										}
-									} else {
-										log.Printf("[Go/Pion] [AUDIO PONG] Invalid 'host_send_time' in pong message: %v", messageData["host_send_time"])
-									}
-								} else {
-									log.Printf("[Go/Pion] [AUDIO PONG] Invalid 'ping_id' in pong message: %v", messageData["ping_id"])
-								}
-							} else {
-								log.Printf("[Go/Pion] [PONG] Invalid 'frame_id' in pong message: %v", messageData["frame_id"])
-							}
-						}
-					}
-				}
-			})
-
-			dc.OnClose(func() {
-				log.Printf(
-					"[Go/Pion] Video Feedback channel '%s' (ID: %s) OnClose event. ReadyState: %s",
-					dc.Label(),
-					idStr,
-					dc.ReadyState().String(),
-				)
-				pcMutex.Lock()
-				if videoFeedbackChannel == dc {
-					log.Printf(
-						"[Go/Pion] OnClose: Global videoFeedbackChannel ('%s', ID: %s) is being closed. Setting global to nil.",
-						dc.Label(),
-						idStr,
-					)
-					videoFeedbackChannel = nil
-				}
-				pcMutex.Unlock()
-			})
-
-			dc.OnError(func(err error) {
-				log.Printf(
-					"[Go/Pion] Data channel '%s' (ID: %s) OnError event: %v",
-					dc.Label(),
-					idStr,
-					err,
-				)
-			})
-			log.Printf(
-				"[Go/Pion] OnDataChannel: All handlers attached for video feedback DC '%s'.",
-				actualLabel,
-			)
 		} else {
 			log.Printf(
-				"[Go/Pion] OnDataChannel: Label MISMATCH. Expected 'keyPressChannel', 'mouseChannel', 'latencyChannel' or 'videoFeedbackChannel' but received '%s' (ID: %s). Handlers NOT attached for this DC.",
+				"[Go/Pion] OnDataChannel: Unsupported channel '%s' (ID: %s); no handlers attached.",
 				actualLabel,
 				idStr,
 			)
@@ -2384,17 +1916,24 @@ func createPeerConnectionGo() C.int {
 	})
 
 	log.Println("[Go/Pion] PeerConnection created.")
-	// Periodic RTT anomaly monitor (5s)
+	// Periodic RTT anomaly monitor (5s). It belongs to this PeerConnection and
+	// exits when the connection is replaced or closed.
+	monitoredPC := newPeerConnection
 	go func() {
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()
 		var lastSample float64
-		for range t.C {
+		for {
+			select {
+			case <-moduleStop:
+				return
+			case <-t.C:
+			}
 			pcMutex.RLock()
-			pc := peerConnection
+			isCurrent := peerConnection == monitoredPC
 			pcMutex.RUnlock()
-			if pc == nil {
-				continue
+			if !isCurrent {
+				return
 			}
 			lastRttMutex.Lock()
 			rtt := lastRttMs
@@ -2450,7 +1989,7 @@ func handleOffer(offerSDP *C.char) {
 	defer signalingMutex.Unlock()
 
 	sdpGoString := C.GoString(offerSDP)
-	log.Printf("[Go/Pion] handleOffer: %s\n", sdpGoString)
+	log.Printf("[Go/Pion] handleOffer: received %d-byte SDP", len(sdpGoString))
 
 	offer := webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer,
@@ -2553,7 +2092,6 @@ func handleRemoteIceCandidate(candidateStr *C.char) {
 	defer signalingMutex.Unlock()
 
 	cGoStr := C.GoString(candidateStr)
-	log.Printf("[Go/Pion] handleRemoteIceCandidate: %s\n", cGoStr)
 
 	candidate := webrtc.ICECandidateInit{Candidate: cGoStr}
 	if pc.RemoteDescription() == nil {
@@ -2568,110 +2106,6 @@ func handleRemoteIceCandidate(candidateStr *C.char) {
 	}
 }
 
-//export sendVideoPacket
-func sendVideoPacket(data unsafe.Pointer, size C.int, pts C.longlong) C.int {
-	// LATENCY CRITICAL: This function bypasses pacing by writing with Duration: 0
-	// It should ONLY be used for testing/debugging, NEVER in production builds
-	// Production code should use sendVideoSample with accurate durations for proper pacing
-
-	// Enhanced gating: check if zero-duration packets are allowed
-	if !isZeroDurationAllowed() {
-		log.Printf("[ERROR] sendVideoPacket called but zero-duration packets are not allowed!")
-		log.Printf("[ERROR] This bypasses pacing and increases latency. Use sendVideoSample with accurate durations.")
-		log.Printf("[ERROR] To enable: set WEBRTC_ALLOW_ZERO_DURATION=1 or WEBRTC_DEBUG_MODE=1")
-		return -2 // Distinct error code for zero-duration guard violation
-	}
-
-	log.Printf("[WARNING] sendVideoPacket called - this bypasses pacing (Duration: 0)")
-	log.Printf("[WARNING] This may cause packetization delay, reordering, and jitter downstream")
-	log.Printf("[WARNING] For low-latency streaming, use sendVideoSample with accurate frame durations")
-
-	// MINIMAL LOCK SCOPE: Only hold pcMutex for state validation, not during I/O
-	pcMutex.Lock()
-	if peerConnection == nil || videoTrack == nil {
-		pcMutex.Unlock()
-		return -1
-	}
-	if connectionState != webrtc.PeerConnectionStateConnected {
-		pcMutex.Unlock()
-		return 0
-	}
-
-	// Get track reference and release lock IMMEDIATELY
-	track := videoTrack
-	pcMutex.Unlock() // CRITICAL: Release lock before I/O operation
-
-	// Reuse buffer from pool to avoid per-call allocation
-	n := int(size)
-	buf := getSampleBuf(n)
-
-	// Validate that zero duration is allowed (already checked at function entry)
-	// This is redundant but ensures consistency
-	if !validateVideoDuration(0) {
-		log.Printf("[ERROR] Duration validation failed for zero-duration packet")
-		putSampleBuf(buf) // CRITICAL: Return buffer to prevent leak
-		return -3         // Should not happen if gating is working properly
-	}
-	C.memcpy(unsafe.Pointer(&buf[0]), data, C.size_t(n))
-
-	// Write with zero duration (no pacing) - this is the test/debug functionality
-	// WARNING: This bypasses WebRTC pacing and may cause jitter
-	if err := track.WriteSample(media.Sample{Data: buf, Duration: 0}); err != nil {
-		putSampleBuf(buf) // Return buffer on error
-		log.Printf("[ERROR] sendVideoPacket WriteSample failed: %v", err)
-		return -1
-	}
-
-	// Return buffer to pool after successful write
-	putSampleBuf(buf)
-
-	// Track zero-duration packet usage for monitoring
-	zeroDurationCount++
-
-	// Debug: log send rate once per second (shared counters, disabled during streaming)
-	sendCount++
-	if time.Since(sendLastLog) >= time.Second {
-		// log.Printf("[Pion] send samples/s: %d (zero-duration: %d)", sendCount, zeroDurationCount)
-		sendCount = 0
-		zeroDurationCount = 0
-		sendLastLog = time.Now()
-	}
-	return 0
-}
-
-// isProductionBuild returns true if this is a production build
-// This can be controlled via build tags or environment variables
-func isProductionBuild() bool {
-	// Check for production build tag
-
-	// Check environment variable for runtime control
-	if debugMode := os.Getenv("WEBRTC_DEBUG_MODE"); debugMode == "1" || debugMode == "true" {
-		return false // Debug mode enabled
-	}
-
-	// Check for debug build tag at compile time
-	// This will be false if built with -tags debug
-	if os.Getenv("GO_BUILD_TAGS") == "debug" {
-		return false
-	}
-
-	// Default to production mode for safety - only allow zero-duration in debug builds
-	return true
-}
-
-// isZeroDurationAllowed returns true if zero-duration video packets are allowed
-// This provides finer control than the binary production/debug distinction
-func isZeroDurationAllowed() bool {
-	// Always allow in debug builds
-	if !isProductionBuild() {
-		return true
-	}
-
-	// In production, only allow if explicitly enabled for testing
-	allowZeroDuration := os.Getenv("WEBRTC_ALLOW_ZERO_DURATION")
-	return allowZeroDuration == "1" || allowZeroDuration == "true"
-}
-
 // validateVideoDuration validates that video pacing parameters are reasonable
 // Returns true if duration is valid for low-latency streaming
 func validateVideoDuration(durationUs int64) bool {
@@ -2681,14 +2115,8 @@ func validateVideoDuration(durationUs int64) bool {
 		return false
 	}
 
-	// For zero duration (unpaced), require explicit allowance
 	if durationUs == 0 {
-		if !isZeroDurationAllowed() {
-			log.Printf("[WARNING] Zero duration video packet rejected - pacing disabled in production")
-			return false
-		}
-		log.Printf("[WARNING] Zero duration video packet allowed - pacing disabled")
-		return true
+		return false
 	}
 
 	// Validate reasonable duration bounds for video (0.1ms to 1 second)
@@ -2709,76 +2137,6 @@ func validateVideoDuration(durationUs int64) bool {
 	return true
 }
 
-func splitNALUnits(buf []byte) [][]byte {
-	// First, try Annex B start-code scanning
-	var nalUnits [][]byte
-	start := 0
-	i := 0
-
-	for i < len(buf) {
-		if i+3 < len(buf) && buf[i] == 0 && buf[i+1] == 0 && buf[i+2] == 0 && buf[i+3] == 1 {
-			if i > start {
-				nalUnits = append(nalUnits, buf[start:i])
-			}
-			start = i + 4
-			i += 4
-		} else if i+2 < len(buf) && buf[i] == 0 && buf[i+1] == 0 && buf[i+2] == 1 {
-			if i > start {
-				nalUnits = append(nalUnits, buf[start:i])
-			}
-			start = i + 3
-			i += 3
-		} else {
-			i++
-		}
-	}
-
-	if start < len(buf) {
-		nalUnits = append(nalUnits, buf[start:])
-	}
-
-	var filteredNALs [][]byte
-	for _, nal := range nalUnits {
-		if len(nal) > 0 {
-			filteredNALs = append(filteredNALs, nal)
-		}
-	}
-
-	if len(filteredNALs) > 0 {
-		return filteredNALs
-	}
-
-	// Fallback: parse AVCC length-prefixed format (4-byte big-endian NAL size)
-	var avccNALs [][]byte
-	offset := 0
-	for offset+4 <= len(buf) {
-		size := int(buf[offset])<<24 | int(buf[offset+1])<<16 | int(buf[offset+2])<<8 | int(buf[offset+3])
-		offset += 4
-		if size <= 0 || offset+size > len(buf) {
-			break
-		}
-		avccNALs = append(avccNALs, buf[offset:offset+size])
-		offset += size
-	}
-	return avccNALs
-}
-
-func sendFragmentedNALUnit(nal []byte, maxPacketSize int, isLastNAL bool) error {
-	// Deprecated with TrackLocalStaticSample; pacing handled by WriteSample on full frames.
-	return nil
-}
-
-//export getIceConnectionState
-func getIceConnectionState() C.int {
-	pcMutex.RLock()
-	defer pcMutex.RUnlock()
-
-	if peerConnection == nil {
-		return C.int(-1)
-	}
-	return C.int(peerConnection.ICEConnectionState())
-}
-
 //export closePeerConnection
 func closePeerConnection() {
 	pcLifecycleMutex.Lock()
@@ -2786,17 +2144,18 @@ func closePeerConnection() {
 
 	pcMutex.Lock()
 	pc := peerConnection
-	channels := []*webrtc.DataChannel{dataChannel, mouseChannel, latencyChannel, videoFeedbackChannel}
+	channels := []*webrtc.DataChannel{dataChannel, mouseChannel}
 	peerConnection = nil
 	videoTrack = nil
 	audioTrack = nil
 	dataChannel = nil
 	mouseChannel = nil
-	latencyChannel = nil
-	videoFeedbackChannel = nil
 	lastAnswerSDP = ""
 	connectionState = webrtc.PeerConnectionStateClosed
 	pcMutex.Unlock()
+	atomic.AddUint64(&peerGeneration, 1)
+	atomic.StoreUint32(&videoPendingDrops, 0)
+	discardQueuedMedia()
 
 	// Closing can synchronously invoke callbacks that take pcMutex.
 	for _, dc := range channels {
@@ -2810,66 +2169,12 @@ func closePeerConnection() {
 	}
 }
 
-//export getConnectionState
-func getConnectionState() C.int {
-	pcMutex.RLock()
-	defer pcMutex.RUnlock()
-	return C.int(connectionState)
-}
-
 //export checkAudioQueueCongestionGo
 func checkAudioQueueCongestionGo() C.int {
 	if checkAudioQueueCongestion() {
 		return 1 // Congested
 	}
 	return 0 // Not congested
-}
-
-//export diagnoseAudioStreamingGo
-func diagnoseAudioStreamingGo() {
-	log.Printf("[Go/Pion] === AUDIO STREAMING DIAGNOSTICS ===")
-
-	pcMutex.RLock()
-	pcState := "nil"
-	if peerConnection != nil {
-		pcState = connectionState.String()
-	}
-	pcMutex.RUnlock()
-
-	audioTrackState := "nil"
-	if audioTrack != nil {
-		audioTrackState = "initialized"
-	}
-
-	queueLen := len(audioSendQueue)
-
-	audioBufferMutex.Lock()
-	bufferLen := len(audioConnectionBuffer)
-	audioBufferMutex.Unlock()
-
-	log.Printf("[Go/Pion] PeerConnection: %s", pcState)
-	log.Printf("[Go/Pion] Audio Track: %s", audioTrackState)
-	log.Printf("[Go/Pion] Audio Send Queue Length: %d", queueLen)
-	log.Printf("[Go/Pion] Audio Connection Buffer: %d/%d packets", bufferLen, maxAudioBufferSize)
-	log.Printf("[Go/Pion] Audio RTP Baseline Set: %v", audioRTPState.IsBaselineSet())
-
-	if audioTrack == nil {
-		log.Printf("[Go/Pion] ❌ AUDIO ISSUE: Audio track is not initialized")
-	}
-
-	if pcState != "connected" {
-		log.Printf("[Go/Pion] ❌ AUDIO ISSUE: PeerConnection not in connected state (%s)", pcState)
-	}
-
-	if queueLen > 2 {
-		log.Printf("[Go/Pion] ⚠️  AUDIO WARNING: Audio queue is backing up (%d packets)", queueLen)
-	}
-
-	if bufferLen > 0 {
-		log.Printf("[Go/Pion] ℹ️  AUDIO INFO: %d packets buffered waiting for connection", bufferLen)
-	}
-
-	log.Printf("[Go/Pion] =====================================")
 }
 
 //export getPeerConnectionState
@@ -2913,6 +2218,7 @@ func initGo() C.int {
 //export closeGo
 func closeGo() {
 	log.Println("[Go/Pion] closeGo: Closing Go WebRTC module.")
+	moduleStopOnce.Do(func() { close(moduleStop) })
 
 	// Stop the media sender goroutines.
 	if audioSendStop != nil {
@@ -2941,6 +2247,7 @@ func closeGo() {
 	if audioSendQueue != nil {
 		timeout := time.After(1 * time.Second) // Prevent infinite wait
 		drained := 0
+	drainAudioQueue:
 		for len(audioSendQueue) > 0 {
 			select {
 			case pkt := <-audioSendQueue:
@@ -2952,7 +2259,7 @@ func closeGo() {
 			case <-timeout:
 				log.Printf("[Go/Pion] Timeout draining audio queue, %d packets remaining", len(audioSendQueue))
 				// Continue with shutdown even if queue not fully drained
-				break
+				break drainAudioQueue
 			}
 		}
 		audioSendQueue = nil
@@ -3041,23 +2348,26 @@ func (r *rtcpReaderInterceptor) BindRTCPReader(reader interceptor.RTCPReader) in
 				for _, report := range p.Reports {
 					packetLoss := float64(report.FractionLost) / 256.0
 					jitterSeconds := float64(report.Jitter) / 90000.0
+					rttMs := 0.0
+					if report.LastSenderReport != 0 {
+						rttUnits := ntpMiddle32(time.Now()) - report.LastSenderReport - report.Delay
+						if rttUnits < 60*65536 {
+							rttMs = float64(rttUnits) * 1000.0 / 65536.0
+							lastRttMutex.Lock()
+							lastRttMs = rttMs
+							lastRttMutex.Unlock()
+						}
+					}
 
 					webrtcStats.statsMutex.Lock()
 					webrtcStats.lastStatsUpdate = time.Now()
 					webrtcStats.statsMutex.Unlock()
 
 					if rtcpCallback != nil {
-						lastRttMutex.Lock()
-						rttMs := lastRttMs
-						lastRttMutex.Unlock()
 						C.callRTCPCallback(rtcpCallback, C.double(packetLoss), C.double(rttMs), C.double(jitterSeconds))
 					}
 
 					if webrtcStatsCallback != nil {
-						lastRttMutex.Lock()
-						rttMs := lastRttMs
-						lastRttMutex.Unlock()
-
 						webrtcStats.statsMutex.RLock()
 						nackCount := webrtcStats.nackCount
 						pliCount := webrtcStats.pliCount
@@ -3081,7 +2391,6 @@ func (r *rtcpReaderInterceptor) BindRTCPReader(reader interceptor.RTCPReader) in
 				if pliCallback != nil {
 					C.callPLICallback(pliCallback)
 				}
-				log.Printf("[Go/Pion] PLI received - total: %d", webrtcStats.pliCount)
 
 			case *rtcp.FullIntraRequest:
 				webrtcStats.statsMutex.Lock()
@@ -3091,7 +2400,6 @@ func (r *rtcpReaderInterceptor) BindRTCPReader(reader interceptor.RTCPReader) in
 				if pliCallback != nil {
 					C.callPLICallback(pliCallback)
 				}
-				log.Printf("[Go/Pion] FIR received - total: %d", webrtcStats.pliCount)
 
 			case *rtcp.TransportLayerNack:
 				webrtcStats.statsMutex.Lock()

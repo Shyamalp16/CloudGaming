@@ -247,29 +247,16 @@ void QualityController::updateNetworkStats(const NetworkStats& stats) {
         lastCondition = newCondition;
     }
 
-    // Log congestion signals
-    if (stats.pliCount > 0 || stats.nackCount > 0) {
-        LOG_WARN("Network congestion detected - PLI: " + std::to_string(stats.pliCount) +
-                ", NACK: " + std::to_string(stats.nackCount));
+    // These counters are cumulative. Log only new feedback, otherwise a single
+    // old NACK causes one console write on every stats callback forever.
+    static uint32_t lastPliCount = 0;
+    static uint32_t lastNackCount = 0;
+    if (stats.pliCount > lastPliCount || stats.nackCount > lastNackCount) {
+        LOG_WARN("New congestion feedback - PLI +" + std::to_string(stats.pliCount - lastPliCount) +
+                ", NACK +" + std::to_string(stats.nackCount - lastNackCount));
     }
-}
-
-double QualityController::getDropRate() const {
-    uint32_t totalFrames = droppingState.framesDropped + droppingState.framesSent;
-    if (totalFrames == 0) {
-        return 0.0;
-    }
-    return static_cast<double>(droppingState.framesDropped) / static_cast<double>(totalFrames);
-}
-
-void QualityController::resetStats() {
-    std::lock_guard<std::mutex> lock(droppingState.mutex);
-    droppingState.frameCounter = 0;
-    droppingState.framesDropped = 0;
-    droppingState.framesSent = 0;
-    droppingState.lastFrameTime = std::chrono::steady_clock::now();
-
-    LOG_INFO("Quality control statistics reset");
+    lastPliCount = stats.pliCount;
+    lastNackCount = stats.nackCount;
 }
 
 } // namespace AdaptiveQualityControl

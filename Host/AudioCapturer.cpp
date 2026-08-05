@@ -71,13 +71,6 @@ private:
     Microsoft::WRL::ComPtr<IAudioClient> m_audioClient;
 };
 #include <rpc.h>
-bool AudioCapturer::TryParseGuidFromWideString(const wchar_t* str, GUID& outGuid)
-{
-    if (!str) return false;
-    RPC_WSTR wstr = (RPC_WSTR)str;
-    RPC_STATUS status = UuidFromStringW(wstr, &outGuid);
-    return status == RPC_S_OK;
-}
 
 #define REFTIMES_PER_SEC  10000000
 #define REFTIMES_PER_MILLISEC  10000
@@ -242,59 +235,11 @@ AudioCapturer::~AudioCapturer()
     }
 }
 
-// Helper function to find process ID by executable name
-DWORD FindProcessIdByName(const std::wstring& processName)
-{
-    DWORD processId = 0;
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot != INVALID_HANDLE_VALUE)
-    {
-        PROCESSENTRY32 pe32;
-        pe32.dwSize = sizeof(PROCESSENTRY32);
-
-        if (Process32First(hSnapshot, &pe32))
-        {
-            do
-            {
-                if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0)
-                {
-                    processId = pe32.th32ProcessID;
-                    break;
-                }
-            } while (Process32Next(hSnapshot, &pe32));
-        }
-        CloseHandle(hSnapshot);
-    }
-    return processId;
-}
-
 bool AudioCapturer::StartCapture(DWORD processId, const std::string& processName)
 {
-    // Set up MMCSS for audio capture thread to ensure consistent timing
-    static bool audioCaptureThreadConfigured = false;
-    static ThreadPriorityManager::MMCSSHandle audioMMCSS; // Make static to persist
-    if (!audioCaptureThreadConfigured) {
-        audioCaptureThreadConfigured = true;
-        // Configure audio capture thread with MMCSS "Audio" class for real-time audio
-        ThreadPriorityManager::ThreadPriorityConfig audioConfig;
-        audioConfig.mmcssClass = ThreadPriorityManager::MMCSSClass::Audio;
-        audioConfig.taskName = "AudioCapture";
-        audioConfig.enableMMCSS = true;
-        audioConfig.enableTimeCritical = false; // Use high priority but not time critical
-        audioConfig.threadPriority = THREAD_PRIORITY_HIGHEST;
-
-        if (audioMMCSS.elevate(audioConfig)) {
-            std::cout << "[Audio] MMCSS priority configured for audio capture thread (Audio class)" << std::endl;
-        } else {
-            std::cout << "[Audio] MMCSS failed, falling back to thread priority only" << std::endl;
-            // Fall back to just setting thread priority without MMCSS
-            HANDLE threadHandle = GetCurrentThread();
-            if (threadHandle != nullptr && SetThreadPriority(threadHandle, audioConfig.threadPriority)) {
-                std::cout << "[Audio] Thread priority set to HIGH (fallback)" << std::endl;
-            } else {
-                std::cout << "[Audio] Warning: Failed to set thread priority fallback" << std::endl;
-            }
-        }
+    if (!m_stopCapture.load() || m_captureThread.joinable()) {
+        std::wcerr << L"[AudioCapturer] Capture is already running" << std::endl;
+        return false;
     }
 
     m_stopCapture = false;
@@ -372,6 +317,9 @@ bool AudioCapturer::StartCapture(DWORD processId, const std::string& processName
     
     if (!m_opusEncoder->initialize(settings)) {
         std::wcerr << L"[AudioCapturer] Failed to initialize Opus encoder" << std::endl;
+        m_stopCapture = true;
+        AudioCapturer* expected = this;
+        s_activeInstance.compare_exchange_strong(expected, nullptr);
         return false;
     }
 
@@ -406,37 +354,45 @@ bool AudioCapturer::StartCapture(DWORD processId, const std::string& processName
     // Start the queue processor thread for async audio packet processing
     StartQueueProcessor();
 
+    {
+        std::lock_guard<std::mutex> lock(m_captureStartupMutex);
+        m_captureStartupComplete = false;
+        m_captureStartupSucceeded = false;
+    }
     std::wcout << L"[AudioCapturer] DEBUG: Starting capture thread for PID=" << processId << std::endl;
     m_captureThread = std::thread(&AudioCapturer::CaptureThread, this, processId);
 
-    // Start periodic audio streaming health check
-    m_audioHealthCheckThread = std::thread([this]() {
-        std::wcout << L"[AudioCapturer] Audio health check thread started" << std::endl;
-        while (!m_stopCapture) {
-            std::this_thread::sleep_for(std::chrono::minutes(1)); // Check every minute
-            if (!m_stopCapture) {
-                std::wcout << L"[AudioCapturer] Periodic audio streaming health check:" << std::endl;
-                diagnoseAudioStreamingGo();
-            }
-        }
-        std::wcout << L"[AudioCapturer] Audio health check thread stopped" << std::endl;
-    });
-
+    std::unique_lock<std::mutex> startupLock(m_captureStartupMutex);
+    const bool reported = m_captureStartupCondition.wait_for(startupLock, std::chrono::seconds(15),
+        [this] { return m_captureStartupComplete; });
+    const bool started = reported && m_captureStartupSucceeded;
+    startupLock.unlock();
+    if (!started) {
+        std::wcerr << L"[AudioCapturer] Audio device initialization failed or timed out" << std::endl;
+        m_stopCapture = true;
+        if (m_hStopEvent) SetEvent(m_hStopEvent);
+        if (m_captureThread.joinable()) m_captureThread.join();
+        StopEncoderThread();
+        StopQueueProcessor();
+        AudioCapturer* expected = this;
+        s_activeInstance.compare_exchange_strong(expected, nullptr);
+        return false;
+    }
     return true;
+}
+
+void AudioCapturer::NotifyCaptureStartup(bool succeeded)
+{
+    std::lock_guard<std::mutex> lock(m_captureStartupMutex);
+    if (m_captureStartupComplete) return;
+    m_captureStartupSucceeded = succeeded;
+    m_captureStartupComplete = true;
+    m_captureStartupCondition.notify_all();
 }
 
 void AudioCapturer::StopCapture()
 {
     m_stopCapture = true;
-
-    // Stop audio health check thread
-    if (m_audioHealthCheckThread.joinable()) {
-        try {
-            m_audioHealthCheckThread.join();
-        } catch (const std::system_error& e) {
-            std::wcerr << L"[AudioCapturer] Error joining audio health check thread: " << e.what() << std::endl;
-        }
-    }
 
     // Signal the stop event to wake up the capture thread immediately
     if (m_hStopEvent) {
@@ -452,9 +408,8 @@ void AudioCapturer::StopCapture()
     StopQueueProcessor();
 
     // Clear active instance reference
-    if (s_activeInstance == this) {
-        s_activeInstance = nullptr;
-    }
+    AudioCapturer* expected = this;
+    s_activeInstance.compare_exchange_strong(expected, nullptr);
 
     // Clean up DMO resampler
     CleanupDMOResampler();
@@ -547,8 +502,8 @@ bool AudioCapturer::InitializeWAVFile(const std::string& filename)
 
         // Initialize WAV header format. Force PCM16 to match WriteWAVData conversion path
         // Use safe defaults if audio device hasn't been initialized yet
-        uint16_t channels = (m_activeChannels > 0) ? m_activeChannels :
-                           (s_audioConfig.channels > 0) ? s_audioConfig.channels : 2;
+        const uint16_t channels = static_cast<uint16_t>((m_activeChannels > 0) ? m_activeChannels :
+                                  (s_audioConfig.channels > 0) ? s_audioConfig.channels : 2);
         uint32_t sampleRate = (m_activeSampleRate > 0) ? m_activeSampleRate : 48000;
 
         m_wavHeader.numChannels = channels;
@@ -1334,6 +1289,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     if (FAILED(hr))
     {
         std::wcerr << L"Unable to initialize COM in render thread: " << _com_error(hr).ErrorMessage() << std::endl;
+        NotifyCaptureStartup(false);
         return;
     }
 
@@ -1341,11 +1297,6 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     // This helps prevent audio glitching under system load
     m_hMmcssTask = AvSetMmThreadCharacteristicsW(L"Pro Audio", &m_mmcssTaskIndex);
 
-    // Add delay for gaming applications to initialize audio sessions
-    // Games like CS2.exe may not have started audio sessions immediately
-    std::wcout << L"[AudioCapturer] Waiting 3 seconds for target process audio session initialization..." << std::endl;
-    Sleep(3000); // 3 second delay to allow games to start audio
-    std::wcout << L"[AudioCapturer] 3-second delay completed, proceeding with device scan..." << std::endl;
     if (m_hMmcssTask == nullptr) {
         // Fallback to "Audio" if "Pro Audio" is not available
         m_hMmcssTask = AvSetMmThreadCharacteristicsW(L"Audio", &m_mmcssTaskIndex);
@@ -1382,7 +1333,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     // Store target process name for session matching (works with any process name)
     std::string targetProcessNameLower = m_targetProcessName;
     if (!targetProcessNameLower.empty()) {
-        std::transform(targetProcessNameLower.begin(), targetProcessNameLower.end(), targetProcessNameLower.begin(), ::tolower);
+        std::transform(targetProcessNameLower.begin(), targetProcessNameLower.end(), targetProcessNameLower.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     }
 
     // Provide guidance based on process loopback configuration
@@ -1767,11 +1719,9 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
     AUDIO_LOG_INFO(L"[AudioCapturer] Target Process ID: " << targetProcessId);
 
-    const CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
-    const IID IID_IMMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
     hr = CoCreateInstance(
-        CLSID_MMDeviceEnumerator, NULL,
-        CLSCTX_ALL, IID_IMMDeviceEnumerator,
+        __uuidof(MMDeviceEnumerator), NULL,
+        CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
         reinterpret_cast<void**>(m_pEnumerator.ReleaseAndGetAddressOf()));
 
     if (FAILED(hr))
@@ -1885,8 +1835,6 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 
                 // Fallback to device loopback
                 std::wstring capturePath = L"FALLBACK_DEVICE_LOOPBACK";
-                bool loopbackActivated = false;
-
                 // Always activate device loopback here
                 hr = m_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, reinterpret_cast<void**>(m_pAudioClient.ReleaseAndGetAddressOf()));
                 if (FAILED(hr))
@@ -2130,25 +2078,25 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 goto AfterDeviceSelection; // Skip to default device fallback
             }
 
-            IMMDeviceCollection* pCollection = NULL;
-            hr = m_pEnumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pCollection);
+            IMMDeviceCollection* sessionCollection = NULL;
+            hr = m_pEnumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &sessionCollection);
             if (FAILED(hr)) {
                 std::wcerr << L"[AudioCapturer] ERROR: EnumAudioEndpoints failed with HRESULT: 0x" << std::hex << hr << std::dec << std::endl;
                 std::wcout << L"[AudioCapturer] Will fallback to default device loopback" << std::endl;
                 goto AfterDeviceSelection; // Skip to default device fallback
             }
 
-            if (!pCollection) {
+            if (!sessionCollection) {
                 std::wcerr << L"[AudioCapturer] ERROR: EnumAudioEndpoints returned NULL collection" << std::endl;
                 std::wcout << L"[AudioCapturer] Will fallback to default device loopback" << std::endl;
                 goto AfterDeviceSelection; // Skip to default device fallback
             }
 
             UINT count = 0;
-            hr = pCollection->GetCount(&count);
+            hr = sessionCollection->GetCount(&count);
             if (FAILED(hr)) {
                 std::wcerr << L"[AudioCapturer] ERROR: GetCount failed with HRESULT: 0x" << std::hex << hr << std::dec << std::endl;
-                pCollection->Release();
+                sessionCollection->Release();
                 std::wcout << L"[AudioCapturer] Will fallback to default device loopback" << std::endl;
                 goto AfterDeviceSelection; // Skip to default device fallback
             }
@@ -2158,7 +2106,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
             for (UINT i = 0; i < count && !m_pDevice; ++i) {
                 IMMDevice* pDev = NULL;
-                hr = pCollection->Item(i, &pDev);
+                hr = sessionCollection->Item(i, &pDev);
                 if (FAILED(hr)) {
                     std::wcerr << L"[AudioCapturer] ERROR: Item(" << i << L") failed with HRESULT: 0x" << std::hex << hr << std::dec << std::endl;
                     continue;
@@ -2227,8 +2175,9 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                                             if (QueryFullProcessImageNameW(hProcess, 0, exeName, &exeNameSize)) {
                                                                 std::filesystem::path exePath(exeName);
                                                                 processName = exePath.filename().wstring();
-                                                                processNameLower = std::string(processName.begin(), processName.end());
-                                                                std::transform(processNameLower.begin(), processNameLower.end(), processNameLower.begin(), ::tolower);
+                                                                processNameLower = exePath.filename().string();
+                                                                std::transform(processNameLower.begin(), processNameLower.end(), processNameLower.begin(),
+                                                                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                                                             }
                                                             CloseHandle(hProcess);
                                                         }
@@ -2249,7 +2198,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                                             pCtrl->Release();
                                                             pEnum->Release();
                                                             pMgr->Release();
-                                                            pCollection->Release();
+                                                            sessionCollection->Release();
                                                             goto DeviceSelected; // break all
                                                         }
                                                     }
@@ -2263,6 +2212,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                     pDev->Release();
                 }
             }
+            sessionCollection->Release();
         }
         pCollection->Release();
 
@@ -2556,6 +2506,7 @@ AfterDeviceSelection:
         std::wcerr << L"Unable to start recording: " << _com_error(hr).ErrorMessage() << std::endl;
         goto Exit;
     }
+    NotifyCaptureStartup(true);
 
     // Calculate optimal polling interval aligned with Opus frame timing
     // Opus uses 10ms frames (480 samples at 48kHz) for low-latency gaming
@@ -2594,16 +2545,6 @@ AfterDeviceSelection:
     while (m_stopCapture == false)
     {
         captureCycles++;
-
-        // DEBUG: Log every 100 cycles to verify capture loop is running
-        if (captureCycles % 500 == 0) {
-            std::wcout << L"[AudioCapturer] DEBUG: Capture loop iteration " << captureCycles << L" - still running" << std::endl;
-        }
-
-        // Periodic heartbeat log to verify capture loop is running
-        if (captureCycles % 1000 == 0) {
-            AUDIO_LOG_DEBUG(L"[AudioCapturer] Capture loop heartbeat: cycle " << captureCycles << L", processed " << dataPacketsProcessed << L" packets");
-        }
 
         // Periodic latency status reporting
         if (captureCycles % 30000 == 0) { // Every 30 seconds (assuming 1000 cycles/second)
@@ -2651,13 +2592,6 @@ AfterDeviceSelection:
         hr = m_pCaptureClient->GetNextPacketSize(&numFramesAvailable);
         AUDIO_LOG_DEBUG(L"[AudioCapturer] GetNextPacketSize: hr=" << hr << L", frames=" << numFramesAvailable);
 
-        // Debug: Log when we get audio data
-        if (numFramesAvailable > 0) {
-            AUDIO_LOG_INFO(L"[AudioCapturer] AUDIO DATA RECEIVED - Frames: " << numFramesAvailable);
-        } else {
-            AUDIO_LOG_INFO(L"[AudioCapturer] NO AUDIO DATA AVAILABLE - Frames: " << numFramesAvailable);
-        }
-
         if (FAILED(hr))
         {
             LogErrorWithContext(hr, L"Failed to get next packet size", m_consecutiveErrorCount);
@@ -2701,12 +2635,9 @@ AfterDeviceSelection:
         // Reset consecutive error count on successful operation
         m_consecutiveErrorCount = 0;
 
-        AUDIO_LOG_INFO(L"[AudioCapturer] ENTERING FRAME PROCESSING LOOP - Available frames: " << numFramesAvailable);
-
         while (numFramesAvailable != 0)
         {
             dataPacketsProcessed++;
-            AUDIO_LOG_INFO(L"[AudioCapturer] PROCESSING FRAME - Packet " << dataPacketsProcessed << L", Frames: " << numFramesAvailable);
 
             UINT64 devPos = 0, qpcPos = 0;
             hr = m_pCaptureClient->GetBuffer(
@@ -3005,7 +2936,7 @@ AfterDeviceSelection:
 
         // Periodic performance logging (every 5 seconds)
         uint64_t currentTime = GetTickCount64();
-        if (currentTime - lastLogTime >= 5000) {
+        if (s_enableBufferMonitoring && currentTime - lastLogTime >= 5000) {
             double elapsedSeconds = (currentTime - lastLogTime) / 1000.0;
             double cyclesPerSecond = captureCycles / elapsedSeconds;
             double packetsPerSecond = dataPacketsProcessed / elapsedSeconds;
@@ -3030,6 +2961,7 @@ AfterDeviceSelection:
     // Cleanup and shutdown
 
 Exit:
+    NotifyCaptureStartup(false);
     std::wcout << L"[AudioCapturer] Audio capture stopped." << std::endl;
 
     // Clean up event handles
@@ -3065,91 +2997,6 @@ Exit:
     CoUninitialize();
 }
 
-bool AudioCapturer::ConvertPCMToFloat(const BYTE* pcmData, UINT32 numFrames, void* format, std::vector<float>& floatData)
-{
-    if (!pcmData || !format || numFrames == 0) return false;
-
-    // Cast to WAVEFORMATEX - this is safe since we know the type from the caller
-    const WAVEFORMATEX* formatStruct = static_cast<const WAVEFORMATEX*>(format);
-    const size_t totalSamples = static_cast<size_t>(numFrames) * static_cast<size_t>(formatStruct->nChannels);
-
-    // Use pre-allocated buffer if possible to avoid reallocations
-    if (totalSamples <= MAX_AUDIO_FRAME_SAMPLES * MAX_AUDIO_CHANNELS) {
-        EnsureAudioBuffersCapacity();
-        g_audioConversionBuffer.resize(totalSamples);
-        floatData = g_audioConversionBuffer; // Reference to pre-allocated buffer
-    } else {
-        // Fallback to dynamic allocation for very large frames (rare)
-        floatData.resize(totalSamples);
-    }
-
-    WORD tag = formatStruct->wFormatTag;
-    WORD containerBits = formatStruct->wBitsPerSample;
-    WORD validBits = containerBits;
-
-    // Handle WAVE_FORMAT_EXTENSIBLE by inspecting SubFormat
-    if (tag == WAVE_FORMAT_EXTENSIBLE && formatStruct->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
-        const WAVEFORMATEXTENSIBLE* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(formatStruct);
-        // Record valid bits if set for PCM
-        if (ext->Samples.wValidBitsPerSample) {
-            validBits = ext->Samples.wValidBitsPerSample;
-        }
-
-        if (IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
-            tag = WAVE_FORMAT_IEEE_FLOAT;
-        } else if (IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_PCM)) {
-            tag = WAVE_FORMAT_PCM;
-        }
-    }
-
-    if (tag == WAVE_FORMAT_IEEE_FLOAT) {
-        if (containerBits == 32) {
-            const float* pcmFloat = reinterpret_cast<const float*>(pcmData);
-            std::copy(pcmFloat, pcmFloat + totalSamples, floatData.begin());
-            return true;
-        }
-        return false;
-    }
-
-    if (tag == WAVE_FORMAT_PCM) {
-        if (containerBits == 16) {
-            const int16_t* pcm16 = reinterpret_cast<const int16_t*>(pcmData);
-            for (size_t i = 0; i < totalSamples; ++i) {
-                floatData[i] = static_cast<float>(pcm16[i]) / 32768.0f;
-            }
-            return true;
-        } else if (containerBits == 24) {
-            // 24-bit little-endian signed PCM (packed 3 bytes)
-            const uint8_t* p = reinterpret_cast<const uint8_t*>(pcmData);
-            const float denom = static_cast<float>(1u << (validBits - 1)); // 2^(validBits-1)
-            for (size_t i = 0; i < totalSamples; ++i) {
-                int32_t b0 = static_cast<int32_t>(p[i*3 + 0]);
-                int32_t b1 = static_cast<int32_t>(p[i*3 + 1]) << 8;
-                int32_t b2 = static_cast<int32_t>(p[i*3 + 2]) << 16;
-                int32_t sample = b0 | b1 | b2;
-                // Sign-extend 24-bit to 32-bit
-                if (sample & 0x00800000) sample |= 0xFF000000;
-                floatData[i] = static_cast<float>(sample) / denom;
-            }
-            return true;
-        } else if (containerBits == 32) {
-            const int32_t* pcm32 = reinterpret_cast<const int32_t*>(pcmData);
-            const int shift = (validBits > 0 && validBits < 32) ? (32 - validBits) : 0;
-            const float denom = (validBits > 0 && validBits <= 31)
-                ? static_cast<float>(1u << (validBits - 1))
-                : 2147483648.0f; // 2^31
-            for (size_t i = 0; i < totalSamples; ++i) {
-                int32_t raw = pcm32[i];
-                int32_t sample = (shift > 0) ? (raw >> shift) : raw; // arithmetic shift keeps sign
-                floatData[i] = static_cast<float>(sample) / denom;
-            }
-            return true;
-        }
-        return false;
-    }
-
-    return false;
-}
 
 bool AudioCapturer::ConvertPCMToFloatInPlace(const BYTE* pcmData, UINT32 numFrames, void* formatPtr, float* outputBuffer, size_t outputBufferSize)
 {
@@ -3234,10 +3081,10 @@ void AudioCapturer::ProcessAudioFrame(const float* samples, size_t sampleCount, 
     if (!samples || sampleCount == 0) return;
 
     static auto lastRawLog = std::chrono::steady_clock::now();
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRawLog).count();
+    const auto now = s_enableBufferMonitoring ? std::chrono::steady_clock::now() : lastRawLog;
 
-    if (elapsed >= 30000) {
+    if (s_enableBufferMonitoring &&
+        std::chrono::duration_cast<std::chrono::seconds>(now - lastRawLog).count() >= 30) {
         float rawRms = 0.0f;
         for (size_t i = 0; i < sampleCount; ++i) {
             rawRms += samples[i] * samples[i];
@@ -3373,15 +3220,12 @@ void AudioCapturer::ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFr
 
     // Prefer high-quality DMO for 44.1 -> 48 kHz to avoid artifacts
     if (preferLinear && !useDmoOnlyForHighQuality && inRate != 44100) {
-        // Prefer linear interpolation - use it directly
-        std::wcout << L"[AudioCapturer] Using linear interpolation resampler (preferred by config)" << std::endl;
+        // Prefer linear interpolation - use it directly.
     } else {
         // Try DMO first (high-quality mode or DMO preferred)
         if (InitializeDMOResampler(inRate, channels)) {
             // Use DMO resampler directly with the buffer
             if (ProcessResamplerDMOInPlace(buffer)) {
-                // Success - DMO resampler handled the conversion in-place
-                std::wcout << L"[AudioCapturer] Using DMO resampler (high-quality)" << std::endl;
                 return;
             } else {
                 std::wcerr << L"[AudioCapturer] DMO in-place resampler failed, falling back to linear interpolation" << std::endl;
@@ -3394,11 +3238,8 @@ void AudioCapturer::ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFr
     }
 
     // Use linear interpolation method with in-place operation
-    std::wcout << L"[AudioCapturer] Using in-place linear interpolation resampler" << std::endl;
-
     double ratio = 48000.0 / static_cast<double>(inRate);
     size_t outFrames = static_cast<size_t>(std::ceil((inFrames) * ratio));
-    size_t inputSamples = inFrames * channels;
     size_t outputSamples = outFrames * channels;
 
     // Ensure buffer has enough space for output
@@ -3419,8 +3260,6 @@ void AudioCapturer::ResampleTo48kInPlace(std::vector<float>& buffer, size_t inFr
     // Perform in-place resampling using pre-allocated temporary buffer
     g_audioTempBuffer.resize(outputSamples);
     std::vector<float>& tempBuffer = g_audioTempBuffer;
-    size_t inIndex = 0; // frame index
-
     for (size_t o = 0; o < outFrames; ++o) {
         double srcPos = (o / ratio);
         size_t srcFrame = static_cast<size_t>(srcPos);
@@ -3567,12 +3406,9 @@ bool AudioCapturer::ReinitializeAudioClient()
         }
 
         // Re-enumerate devices to find the target process
-        const CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
-        const IID IID_IMMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
-
         hr = CoCreateInstance(
-            CLSID_MMDeviceEnumerator, NULL,
-            CLSCTX_ALL, IID_IMMDeviceEnumerator,
+            __uuidof(MMDeviceEnumerator), NULL,
+            CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
             reinterpret_cast<void**>(m_pEnumerator.ReleaseAndGetAddressOf()));
 
         if (FAILED(hr)) {
@@ -3740,6 +3576,7 @@ int AudioCapturer::CalculateRetryDelay(int retryCount)
 
 bool AudioCapturer::TryRecoverFromError(HRESULT hr, const std::wstring& operation)
 {
+    (void)operation;
     m_errorStats.totalErrors++;
     m_errorStats.lastErrorCode = hr;
     m_errorStats.lastErrorTime = GetTickCount64();
@@ -3756,6 +3593,9 @@ bool AudioCapturer::TryRecoverFromError(HRESULT hr, const std::wstring& operatio
     } else {
         m_errorStats.otherErrors++;
     }
+
+    AUDIO_LOG_DEBUG(L"[AudioCapturer] Recovery requested after " << operation
+        << L" failed with HRESULT 0x" << std::hex << hr << std::dec);
 
     // Try recovery strategies in order of preference
     if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
@@ -3948,122 +3788,8 @@ bool AudioCapturer::PopFrameFromRingBuffer(std::vector<float>& frame, int64_t& t
     return true;
 }
 
-bool AudioCapturer::IsRingBufferEmpty() const
-{
-    std::lock_guard<std::mutex> lock(m_ringBufferMutex);
-    return m_ringBufferCount == 0;
-}
 
-bool AudioCapturer::IsRingBufferFull() const
-{
-    std::lock_guard<std::mutex> lock(m_ringBufferMutex);
-    return m_ringBufferCount >= RING_BUFFER_SIZE;
-}
 
-size_t AudioCapturer::GetRingBufferCount() const
-{
-    std::lock_guard<std::mutex> lock(m_ringBufferMutex);
-    return m_ringBufferCount;
-}
-
-void AudioCapturer::ResampleTo48k(const float* in, size_t inFrames, uint32_t inRate, uint32_t channels, std::vector<float>& out)
-{
-    // ============================================================================
-    // HIGH-QUALITY RESAMPLING WITH DMO FALLBACK
-    // ============================================================================
-    // This function now uses Windows Audio Resampler DMO for superior quality
-    // compared to linear interpolation, which introduces aliasing and HF loss.
-    // Optimized to minimize buffer allocations and copies.
-
-    if (inRate == 0 || channels == 0) { out.clear(); return; }
-    if (inRate == 48000) {
-        // No resampling needed - copy directly to output buffer
-        size_t totalSamples = inFrames * channels;
-        out.resize(totalSamples);
-        std::copy(in, in + totalSamples, out.begin());
-        return;
-    }
-
-    // Choose resampler priority based on configuration
-    bool preferLinear = s_audioConfig.wasapi.preferLinearResampling;
-    bool useDmoOnlyForHighQuality = s_audioConfig.wasapi.useDmoOnlyForHighQuality;
-
-    // Prefer high-quality DMO for 44.1 -> 48 kHz to avoid artifacts
-    if (preferLinear && !useDmoOnlyForHighQuality && inRate != 44100) {
-        // Prefer linear interpolation - skip DMO
-        std::wcout << L"[AudioCapturer] Using linear interpolation resampler (preferred by config)" << std::endl;
-    } else {
-        // Try DMO first (high-quality mode or DMO preferred)
-        if (InitializeDMOResampler(inRate, channels)) {
-            size_t inputSamples = inFrames * channels;
-            if (ProcessResamplerDMO(in, inputSamples, out)) {
-                // Success - DMO resampler handled the conversion
-                std::wcout << L"[AudioCapturer] Using DMO resampler (high-quality)" << std::endl;
-                return;
-            } else {
-                std::wcerr << L"[AudioCapturer] DMO resampler failed, falling back to linear interpolation" << std::endl;
-            }
-        }
-
-        if (useDmoOnlyForHighQuality) {
-            std::wcerr << L"[AudioCapturer] DMO required but unavailable, falling back to linear interpolation" << std::endl;
-        }
-    }
-
-    // Use linear interpolation method
-    std::wcout << L"[AudioCapturer] Using linear interpolation resampler (DMO unavailable)" << std::endl;
-
-    double ratio = 48000.0 / static_cast<double>(inRate);
-    size_t outFrames = static_cast<size_t>(std::ceil((inFrames) * ratio));
-    out.resize(outFrames * channels);
-
-    // For continuity across calls when rates remain the same
-    if (m_lastInputRate != inRate) {
-        m_resamplePhase = 0.0;
-        m_resampleRemainder.assign(channels, 0.0f);
-        m_lastInputRate = inRate;
-    }
-
-    // Start with previous remainder sample for interpolation continuity
-    // Use pre-allocated buffer to avoid heap allocations
-    EnsureAudioBuffersCapacity();
-    g_audioResampleBuffer.resize(channels);
-    std::vector<float>& prev = g_audioResampleBuffer;
-    std::fill(prev.begin(), prev.end(), 0.0f);
-    if (!m_resampleRemainder.empty()) {
-        prev = m_resampleRemainder;
-    }
-
-    size_t inIndex = 0; // frame index
-    for (size_t o = 0; o < outFrames; ++o) {
-        double srcPos = (o / ratio);
-        size_t i0 = static_cast<size_t>(srcPos);
-        double frac = srcPos - static_cast<double>(i0);
-
-        for (uint32_t ch = 0; ch < channels; ++ch) {
-            float s0, s1;
-            if (i0 == 0) {
-                s0 = prev[ch];
-            } else {
-                s0 = in[(i0 - 1) * channels + ch];
-            }
-            if (i0 < inFrames) {
-                s1 = in[i0 * channels + ch];
-            } else {
-                s1 = in[(inFrames - 1) * channels + ch];
-            }
-            out[o * channels + ch] = s0 + static_cast<float>(frac) * (s1 - s0);
-        }
-    }
-
-    // Save last input sample as remainder for continuity
-    if (inFrames > 0) {
-        m_resampleRemainder.resize(channels);
-        for (uint32_t ch = 0; ch < channels; ++ch) {
-            m_resampleRemainder[ch] = in[(inFrames - 1) * channels + ch];
-        }
-    }
-}
 
 // Static audio configuration instance
 AudioCapturer::AudioConfig AudioCapturer::s_audioConfig;
@@ -4094,25 +3820,6 @@ int64_t AudioCapturer::GetSharedReferenceTimeUs() {
     return std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
 }
 
-void AudioCapturer::LogAVSyncStatus() {
-    if (!s_sharedReferenceInitialized.load()) {
-        std::wcout << L"[AV-Sync] Shared reference clock not initialized" << std::endl;
-        return;
-    }
-
-    auto currentTime = GetSharedReferenceTimeUs();
-    auto wallClock = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-
-    std::wcout << L"[AV-Sync] Status:" << std::endl;
-    std::wcout << L"  Shared reference time: " << currentTime << L" us" << std::endl;
-    std::wcout << L"  Wall clock time: " << wallClock << L" us" << std::endl;
-    std::wcout << L"  Time since init: " << (wallClock - currentTime) << L" us" << std::endl;
-
-    if (s_activeInstance && s_activeInstance->m_initialAudioClockTime > 0) {
-        std::wcout << L"  Audio initial time: " << s_activeInstance->m_initialAudioClockTime << L" us" << std::endl;
-    }
-}
 
 // ============================================================================
 // AUDIO BITRATE ADAPTATION - RTCP feedback integration
@@ -4125,7 +3832,7 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
 
     // Check for audio queue congestion (complements packet loss detection)
     bool queueCongested = false;
-    if (s_activeInstance != nullptr) {
+    if (s_activeInstance.load() != nullptr) {
         // Call Go function to check queue congestion
         queueCongested = (checkAudioQueueCongestionGo() != 0);
     }
@@ -4297,7 +4004,7 @@ void AudioCapturer::ReportLatencyStats() {
 // Static method to update Opus encoder parameters dynamically
 void AudioCapturer::UpdateOpusParameters(int bitrate, int expectedLossPerc, int complexity, int fecEnabled) {
     // Get the active AudioCapturer instance
-    AudioCapturer* activeInstance = s_activeInstance;
+    AudioCapturer* activeInstance = s_activeInstance.load();
 
     if (!activeInstance) {
         std::wcerr << L"[AudioAdapt] No active AudioCapturer instance found for parameter update" << std::endl;
@@ -4396,7 +4103,7 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
                     s_audioConfig.frameSizeMs = 10; // Default to 10ms
                 }
             } else {
-                // Legacy validation for backward compatibility - accept any valid Opus frame size
+                // Non-strict mode accepts every valid integer Opus frame size.
                 // Valid Opus frame sizes: 2.5, 5, 10, 20, 40, 60ms (we use integer ms, so: 5, 10, 20, 40, 60)
                 if (frameSizeMs == 5 || frameSizeMs == 10 || frameSizeMs == 20 || frameSizeMs == 40 || frameSizeMs == 60) {
                     s_audioConfig.frameSizeMs = frameSizeMs;
@@ -4657,100 +4364,11 @@ bool AudioCapturer::InitializeDMOResampler(uint32_t inputSampleRate, uint32_t in
 
 bool AudioCapturer::ProcessResamplerDMOInPlace(std::vector<float>& buffer)
 {
-    // ============================================================================
-    // ZERO-COPY DMO RESAMPLING
-    // ============================================================================
-    // This function performs DMO resampling directly in the provided buffer,
-    // eliminating temporary vector allocations and copies.
+    if (buffer.empty()) return false;
 
-    if (!m_resamplerInitialized || buffer.empty()) {
-        return false;
-    }
-
-    size_t inputSamples = buffer.size();
-    HRESULT hr;
-    DWORD dwStatus = 0;
-    size_t totalOutputSamples = 0;
-
-    // Calculate input buffer size needed
-    size_t inputBytes = inputSamples * sizeof(float);
-
-    // Process input in chunks if needed
-    BYTE* pInputBuffer = nullptr;
-    hr = m_inputBuffer->GetBufferAndLength(&pInputBuffer, nullptr);
-    if (FAILED(hr)) {
-        std::wcerr << L"[AudioCapturer] Failed to get input buffer: " << _com_error(hr).ErrorMessage() << std::endl;
-        return false;
-    }
-
-    // Copy input data to DMO buffer
-    memcpy(pInputBuffer, buffer.data(), inputBytes);
-
-    hr = m_inputBuffer->SetLength(static_cast<DWORD>(inputBytes));
-    if (FAILED(hr)) {
-        std::wcerr << L"[AudioCapturer] Failed to set input buffer length: " << _com_error(hr).ErrorMessage() << std::endl;
-        return false;
-    }
-
-    // Process the input
-    hr = m_audioResamplerDMO->ProcessInput(0, m_inputBuffer.Get(), 0, 0, 0);
-    if (FAILED(hr)) {
-        std::wcerr << L"[AudioCapturer] ProcessInput failed: " << _com_error(hr).ErrorMessage() << std::endl;
-        return false;
-    }
-
-    // Get output directly into the provided buffer
-    buffer.clear();
-    std::vector<float> tempBuffer;
-
-    while (true) {
-        hr = m_audioResamplerDMO->ProcessOutput(0, 0, nullptr, &dwStatus);
-
-        if (hr == S_FALSE) {
-            // Need more input
-            break;
-        } else if (FAILED(hr)) {
-            std::wcerr << L"[AudioCapturer] ProcessOutput failed: " << _com_error(hr).ErrorMessage() << std::endl;
-            return false;
-        }
-
-        if (dwStatus & 0x00000001) {  // DMO_OUTPUT_DATA_BUFFERFILLED - Output buffer contains valid data
-            // Get output data
-            BYTE* pOutputBuffer = nullptr;
-            DWORD outputLength = 0;
-            hr = m_outputBuffer->GetBufferAndLength(&pOutputBuffer, &outputLength);
-            if (FAILED(hr)) {
-                std::wcerr << L"[AudioCapturer] Failed to get output buffer: " << _com_error(hr).ErrorMessage() << std::endl;
-                return false;
-            }
-
-            // Copy output data directly to temp buffer
-            size_t outputSamples = outputLength / sizeof(float);
-            tempBuffer.resize(outputSamples);
-            memcpy(tempBuffer.data(), pOutputBuffer, outputLength);
-
-            // Append to final output (buffer)
-            buffer.insert(buffer.end(), tempBuffer.begin(), tempBuffer.end());
-            totalOutputSamples += outputSamples;
-        }
-    }
-
-    if (buffer.empty()) {
-        std::wcerr << L"[AudioCapturer] DMO in-place resampler produced no output" << std::endl;
-        return false;
-    }
-
-    // Validate frame alignment for Opus encoding
-    // Opus frames should be multiples of 480 samples per channel (10ms at 48kHz)
-    size_t outputFramesPerChannel = buffer.size() / m_currentInputChannels;
-    const size_t OPUS_FRAME_SAMPLES = 480; // 10ms at 48kHz per channel
-
-    if (outputFramesPerChannel % OPUS_FRAME_SAMPLES != 0) {
-        std::wcerr << L"[AudioCapturer] Warning: DMO in-place output not aligned with Opus frames. "
-                   << L"Output samples per channel: " << outputFramesPerChannel
-                   << L", expected multiple of " << OPUS_FRAME_SAMPLES << std::endl;
-    }
-
+    std::vector<float> output;
+    if (!ProcessResamplerDMO(buffer.data(), buffer.size(), output)) return false;
+    buffer.swap(output);
     return true;
 }
 
@@ -4761,13 +4379,13 @@ bool AudioCapturer::ProcessResamplerDMO(const float* inputData, size_t inputSamp
     }
 
     HRESULT hr;
-    DWORD dwStatus = 0;
-    size_t totalOutputSamples = 0;
+    const size_t inputBytes = inputSamples * sizeof(float);
+    DWORD inputCapacity = 0;
+    if (inputBytes > MAXDWORD || FAILED(m_inputBuffer->GetMaxLength(&inputCapacity)) ||
+        inputBytes > inputCapacity) {
+        return false;
+    }
 
-    // Calculate input buffer size needed
-    size_t inputBytes = inputSamples * sizeof(float);
-
-    // Process input in chunks if needed
     BYTE* pInputBuffer = nullptr;
     hr = m_inputBuffer->GetBufferAndLength(&pInputBuffer, nullptr);
     if (FAILED(hr)) {
@@ -4791,56 +4409,44 @@ bool AudioCapturer::ProcessResamplerDMO(const float* inputData, size_t inputSamp
         return false;
     }
 
-    // Get output
     outputData.clear();
-    std::vector<float> tempBuffer;
+    for (unsigned drainAttempt = 0; drainAttempt < 16; ++drainAttempt) {
+        hr = m_outputBuffer->SetLength(0);
+        if (FAILED(hr)) return false;
 
-    while (true) {
-        hr = m_audioResamplerDMO->ProcessOutput(0, 0, nullptr, &dwStatus);
+        DMO_OUTPUT_DATA_BUFFER outputBuffer{};
+        outputBuffer.pBuffer = m_outputBuffer.Get();
+        DWORD processStatus = 0;
+        hr = m_audioResamplerDMO->ProcessOutput(0, 1, &outputBuffer, &processStatus);
 
         if (hr == S_FALSE) {
-            // Need more input
             break;
         } else if (FAILED(hr)) {
             std::wcerr << L"[AudioCapturer] ProcessOutput failed: " << _com_error(hr).ErrorMessage() << std::endl;
             return false;
         }
 
-        if (dwStatus & 0x00000001) {  // DMO_OUTPUT_DATA_BUFFERFILLED - Output buffer contains valid data
-            // Get output data
-            BYTE* pOutputBuffer = nullptr;
-            DWORD outputLength = 0;
-            hr = m_outputBuffer->GetBufferAndLength(&pOutputBuffer, &outputLength);
-            if (FAILED(hr)) {
-                std::wcerr << L"[AudioCapturer] Failed to get output buffer: " << _com_error(hr).ErrorMessage() << std::endl;
-                return false;
-            }
-
-            // Copy output data
-            size_t outputSamples = outputLength / sizeof(float);
-            tempBuffer.resize(outputSamples);
-            memcpy(tempBuffer.data(), pOutputBuffer, outputLength);
-
-            // Append to final output
-            outputData.insert(outputData.end(), tempBuffer.begin(), tempBuffer.end());
-            totalOutputSamples += outputSamples;
+        BYTE* pOutputBuffer = nullptr;
+        DWORD outputLength = 0;
+        hr = m_outputBuffer->GetBufferAndLength(&pOutputBuffer, &outputLength);
+        if (FAILED(hr)) {
+            std::wcerr << L"[AudioCapturer] Failed to get output buffer: " << _com_error(hr).ErrorMessage() << std::endl;
+            return false;
         }
+
+        const size_t oldSize = outputData.size();
+        const size_t outputSamples = outputLength / sizeof(float);
+        outputData.resize(oldSize + outputSamples);
+        if (outputLength > 0) {
+            memcpy(outputData.data() + oldSize, pOutputBuffer, outputLength);
+        }
+
+        if ((outputBuffer.dwStatus & DMO_OUTPUT_DATA_BUFFERF_INCOMPLETE) == 0) break;
     }
 
     if (outputData.empty()) {
         std::wcerr << L"[AudioCapturer] DMO resampler produced no output" << std::endl;
         return false;
-    }
-
-    // Validate frame alignment for Opus encoding
-    // Opus frames should be multiples of 480 samples per channel (10ms at 48kHz)
-    size_t outputFramesPerChannel = outputData.size() / m_currentInputChannels;
-    const size_t OPUS_FRAME_SAMPLES = 480; // 10ms at 48kHz per channel
-
-    if (outputFramesPerChannel % OPUS_FRAME_SAMPLES != 0) {
-        std::wcerr << L"[AudioCapturer] Warning: DMO output not aligned with Opus frames. "
-                   << L"Output samples per channel: " << outputFramesPerChannel
-                   << L", expected multiple of " << OPUS_FRAME_SAMPLES << std::endl;
     }
 
     return true;
@@ -4886,69 +4492,6 @@ void AudioCapturer::CleanupDMOResampler()
 // RESAMPLER QUALITY TESTING AND VALIDATION
 // ============================================================================
 
-void AudioCapturer::TestResamplerQuality(uint32_t testSampleRate, uint32_t testChannels)
-{
-    std::wcout << L"[AudioCapturer] Testing resampler quality: " << testSampleRate << L"Hz -> 48kHz, "
-               << testChannels << L" channels" << std::endl;
-
-    // Generate a test sine wave
-    const size_t TEST_DURATION_MS = 100; // 100ms test
-    const size_t testSamples = (testSampleRate * TEST_DURATION_MS) / 1000;
-    const float testFrequency = 1000.0f; // 1kHz test tone
-
-    std::vector<float> inputData(testSamples * testChannels);
-
-    // Generate sine wave
-    for (size_t i = 0; i < testSamples; ++i) {
-        float sample = sinf(2.0f * 3.14159f * testFrequency * static_cast<float>(i) / testSampleRate) * 0.5f;
-        for (uint32_t ch = 0; ch < testChannels; ++ch) {
-            inputData[i * testChannels + ch] = sample;
-        }
-    }
-
-    // Test DMO resampler
-    std::vector<float> dmoOutput;
-    bool dmoSuccess = false;
-
-    if (InitializeDMOResampler(testSampleRate, testChannels)) {
-        dmoSuccess = ProcessResamplerDMO(inputData.data(), inputData.size(), dmoOutput);
-        if (dmoSuccess) {
-            std::wcout << L"[AudioCapturer] DMO resampler test passed: "
-                       << inputData.size() << L" -> " << dmoOutput.size() << L" samples" << std::endl;
-        }
-    }
-
-    // Test linear interpolation fallback
-    std::vector<float> linearOutput;
-    ResampleTo48k(inputData.data(), testSamples, testSampleRate, testChannels, linearOutput);
-
-    // Compare results
-    if (dmoSuccess && !dmoOutput.empty() && !linearOutput.empty()) {
-        // Calculate RMS difference
-        size_t minSize = (dmoOutput.size() < linearOutput.size()) ? dmoOutput.size() : linearOutput.size();
-        double rmsDifference = 0.0;
-        size_t validSamples = 0;
-
-        for (size_t i = 0; i < minSize; ++i) {
-            if (i < linearOutput.size()) {
-                double diff = dmoOutput[i] - linearOutput[i];
-                rmsDifference += diff * diff;
-                validSamples++;
-            }
-        }
-
-        if (validSamples > 0) {
-            rmsDifference = sqrt(rmsDifference / validSamples);
-            std::wcout << L"[AudioCapturer] Quality comparison: RMS difference = " << rmsDifference << L" "
-                       << L"(lower is better for DMO resampler)" << std::endl;
-        }
-    }
-
-    // Clean up
-    CleanupDMOResampler();
-
-    std::wcout << L"[AudioCapturer] Resampler quality test completed" << std::endl;
-}
 
 void AudioCapturer::FinalizeWAVOnExit()
 {

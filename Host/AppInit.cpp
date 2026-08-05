@@ -3,6 +3,7 @@
 #include "Encoder.h"
 #include "AudioCapturer.h"
 #include "pion_webrtc.h"
+#include <iostream>
 
 // PLI callback implemented in Encoder.cpp
 extern "C" void OnPLI();

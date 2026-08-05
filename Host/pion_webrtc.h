@@ -153,35 +153,6 @@ extern "C" {
     int sendAudioPacket(uint8_t* data, int size, int64_t pts);
 
     /**
-     * @brief Enqueues a message to the data channel (Go-side enqueue)
-     *
-     * This function is called from C++ to send messages to the Go WebRTC layer.
-     * The message content is copied by the Go runtime before this function returns.
-     *
-     * @param msg Pointer to null-terminated UTF-8 string to enqueue
-     * @note This function is primarily for internal use by WebRTCWrapper
-     */
-    void enqueueDataChannelMessage(char* msg);
-
-    /**
-     * @brief Enqueues a mouse message to the mouse channel (Go-side enqueue)
-     *
-     * This function is called from C++ to send mouse messages to the Go WebRTC layer.
-     * The message content is copied by the Go runtime before this function returns.
-     *
-     * @param msg Pointer to null-terminated UTF-8 string to enqueue
-     * @note This function is primarily for internal use by WebRTCWrapper
-     */
-    void enqueueMouseChannelMessage(char* msg);
-
-    /**
-     * @brief Gets the current ICE connection state of the PeerConnection.
-     * @return The ICE connection state as an integer (-1 if no PeerConnection).
-     *         See webrtc::ICEConnectionState enum for values (e.g., 4 = Connected).
-     */
-    int getIceConnectionState();
-
-    /**
      * @brief Gets the current PeerConnection state.
      * @return The PeerConnection state as an integer.
      */
@@ -192,12 +163,6 @@ extern "C" {
      * @return 1 if congested (queue depth > 2.5 packets average), 0 if not congested.
      */
     int checkAudioQueueCongestionGo();
-
-    /**
-     * @brief Runs comprehensive diagnostics for audio streaming pipeline.
-     * Logs detailed status of PeerConnection, audio track, queue state, and identifies issues.
-     */
-    void diagnoseAudioStreamingGo();
 
     /**
      * @brief Closes the PeerConnection and cleans up resources.
@@ -217,45 +182,19 @@ extern "C" {
     typedef void (*RTCPCallback)(double, double, double);
     void SetRTCPCallback(RTCPCallback callback);
 
+    typedef void (*WebRTCStatsCallback)(double packetLoss, double rtt, double jitter,
+        unsigned int nackCount, unsigned int pliCount, unsigned int twccCount,
+        unsigned int pacerQueueLength, unsigned int sendBitrateKbps);
+    void SetWebRTCStatsCallback(WebRTCStatsCallback callback);
+
     /**
      * @brief Sets the callback invoked on incoming RTCP PLI/FIR to request a keyframe.
      */
     typedef void (*OnPLICallback)();
     void SetPLICallback(OnPLICallback cb);
 
-    // C wrapper functions for memory management
-    void freeDataChannelMessage(char* msg);
-    void freeMouseChannelMessage(char* msg);
-
 #ifdef __cplusplus
 } // end extern "C"
-
-// =======================================================================
-//               DEPRECATED FUNCTIONS (Use WebRTCWrapper.h instead)
-// =======================================================================
-
-/**
- * @brief DEPRECATED: Use WebRTCWrapper::getDataChannelMessageString() instead
- *
- * This function is maintained for backward compatibility but should not be used
- * in new code. Use WebRTCWrapper.h for safer memory management.
- *
- * @deprecated Use WebRTCWrapper::getDataChannelMessageString() for safer memory management
- * @return std::string containing the message
- */
-std::string getDataChannelMessageString();
-
-/**
- * @brief DEPRECATED: Use WebRTCWrapper::getMouseChannelMessageString() instead
- *
- * This function is maintained for backward compatibility but should not be used
- * in new code. Use WebRTCWrapper.h for safer memory management.
- *
- * @deprecated Use WebRTCWrapper::getMouseChannelMessageString() for safer memory management
- * @return std::string containing the message
- */
-std::string getMouseChannelMessageString();
-
 #endif
 
 #endif // PION_WEBRTC_H

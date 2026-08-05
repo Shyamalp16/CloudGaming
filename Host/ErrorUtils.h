@@ -67,24 +67,6 @@ std::string getSystemErrorMessage(DWORD errorCode, const std::string& defaultMes
 std::string getLastSystemErrorMessage(const std::string& defaultMessage = "Unknown system error");
 
 /**
- * @brief Format a std::error_code into a consistent error message
- *
- * @param ec The error code to format
- * @param context Optional context information about where the error occurred
- * @return Formatted error message string
- */
-std::string formatErrorCode(const std::error_code& ec, const std::string& context = "");
-
-/**
- * @brief Format an HRESULT into a consistent error message
- *
- * @param hr The HRESULT to format
- * @param context Optional context information about where the error occurred
- * @return Formatted error message string
- */
-std::string formatHResult(HRESULT hr, const std::string& context = "");
-
-/**
  * @brief Create a standardized error message with category and severity
  *
  * @param severity Error severity level
@@ -118,53 +100,6 @@ std::string severityToString(ErrorSeverity severity);
  * @brief Convert ErrorCategory enum to string
  */
 std::string categoryToString(ErrorCategory category);
-
-/**
- * @brief Get a stack trace if available (platform-dependent)
- *
- * @return Stack trace string or empty string if not available
- */
-std::string getStackTrace();
-
-/**
- * @brief Check if a Windows error code indicates a recoverable condition
- *
- * @param errorCode Windows error code to check
- * @return true if the error is recoverable, false if it's fatal
- */
-bool isRecoverableError(DWORD errorCode);
-
-/**
- * @brief Check if an HRESULT indicates success
- *
- * @param hr HRESULT to check
- * @return true if the HRESULT indicates success
- */
-bool isSuccess(HRESULT hr);
-
-/**
- * @brief Check if an HRESULT indicates failure
- *
- * @param hr HRESULT to check
- * @return true if the HRESULT indicates failure
- */
-bool isFailure(HRESULT hr);
-
-/**
- * @brief Get the severity level for a Windows error code
- *
- * @param errorCode Windows error code
- * @return Appropriate severity level for the error
- */
-ErrorSeverity getErrorSeverity(DWORD errorCode);
-
-/**
- * @brief Get the category for a Windows error code
- *
- * @param errorCode Windows error code
- * @return Appropriate category for the error
- */
-ErrorCategory getErrorCategory(DWORD errorCode);
 
 // Convenience macros for common error reporting patterns
 

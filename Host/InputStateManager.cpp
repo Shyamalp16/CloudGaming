@@ -65,7 +65,7 @@ bool Manager::start() {
 
     // Held keys are legitimate in games; time alone cannot distinguish a held
     // key from a lost key-up. Recovery is driven by channel reset/sequence
-    // recovery unless the operator explicitly enables the legacy timeout.
+    // recovery unless the operator explicitly enables the time-based timeout.
     if (config.enableStuckKeyRecovery) {
         recoveryThread = std::thread(&Manager::recoveryLoop, this);
     }
@@ -110,18 +110,22 @@ void Manager::processInputMessage(const InputTransportLayer::InputMessage& messa
         // Parse JSON data
         nlohmann::json eventData = nlohmann::json::parse(message.data);
 
+        const std::string eventType = eventData.value("type", std::string());
+        if (eventType == "input_reset") {
+            emergencyReleaseAllKeys(eventData.value("reason", std::string("transport_reset")));
+            return;
+        }
+
         // Process based on message type
         if (message.type == "pion_data") {
-            // Extract actual event type from data
-            if (eventData.contains("type")) {
-                std::string eventType = eventData["type"];
+            if (!eventType.empty()) {
                 if (eventType == "keydown" || eventType == "keyup") {
-                    if (processKeyboardEvent(eventType, eventData)) {
+                    if (processKeyboardEvent(eventType, eventData, message.data)) {
                         updateMetrics("keysProcessed");
                     }
                 } else if (eventType == "mousedown" || eventType == "mouseup" ||
                           eventType == "mousemove" || eventType == "wheel") {
-                    if (processMouseEvent(eventType, eventData)) {
+                    if (processMouseEvent(eventType, eventData, message.data)) {
                         updateMetrics("mouseEventsProcessed");
                     }
                 }
@@ -152,13 +156,8 @@ MouseButtonInfo Manager::getMouseButtonState(int button) const {
     return MouseButtonInfo(); // Default UP state
 }
 
-MousePosition Manager::getMousePosition() const {
-    std::lock_guard<std::mutex> lock(stateMutex);
-    return currentMousePosition;
-}
-
 void Manager::emergencyReleaseAllKeys(const std::string& reason) {
-    std::vector<std::string> eventsToFire;
+    std::vector<std::pair<std::string, std::string>> eventsToFire;
     {
         std::lock_guard<std::mutex> lock(stateMutex);
         uint64_t ts = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -177,8 +176,26 @@ void Manager::emergencyReleaseAllKeys(const std::string& reason) {
                     {"emergency", true},
                     {"reason", reason}
                 };
-                eventsToFire.push_back(syntheticEvent.dump());
+                eventsToFire.emplace_back("emergency_keyup", syntheticEvent.dump());
                 releasedCount++;
+            }
+        }
+
+        for (auto& [button, buttonInfo] : mouseButtonStates) {
+            if (buttonInfo.state == MouseButtonState::Pressed ||
+                buttonInfo.state == MouseButtonState::DoubleClick) {
+                buttonInfo.state = MouseButtonState::Released;
+                buttonInfo.lastEventTime = ts;
+                nlohmann::json syntheticEvent = {
+                    {"type", "mouseup"},
+                    {"button", button},
+                    {"x", currentMousePosition.x},
+                    {"y", currentMousePosition.y},
+                    {"client_send_time", ts},
+                    {"emergency", true},
+                    {"reason", reason}
+                };
+                eventsToFire.emplace_back("mouseup", syntheticEvent.dump());
             }
         }
 
@@ -187,32 +204,14 @@ void Manager::emergencyReleaseAllKeys(const std::string& reason) {
                          " keys due to: " + reason);
         }
     }
-    for (const auto& ev : eventsToFire) {
-        if (eventCallback) eventCallback("emergency_keyup", ev);
+    for (const auto& [eventType, eventData] : eventsToFire) {
+        if (eventCallback) eventCallback(eventType, eventData);
     }
 }
 
-bool Manager::isKeyStuck(const std::string& jsCode) const {
-    std::lock_guard<std::mutex> lock(stateMutex);
-    auto it = keyStates.find(jsCode);
-    return it != keyStates.end() && it->second.state == KeyState::Stuck;
-}
-
-size_t Manager::getStuckKeyCount() const {
-    std::lock_guard<std::mutex> lock(stateMutex);
-    return std::count_if(keyStates.begin(), keyStates.end(),
-                        [](const auto& pair) { return pair.second.state == KeyState::Stuck; });
-}
-
-const StateStats& Manager::getStats() const {
+StateStats Manager::getStats() const {
     std::lock_guard<std::mutex> lock(statsMutex);
     return stats;
-}
-
-void Manager::resetStats() {
-    std::lock_guard<std::mutex> lock(statsMutex);
-    stats.reset();
-    logStateEvent("stats_reset", "State statistics reset");
 }
 
 bool Manager::isRunning() const {
@@ -292,18 +291,8 @@ std::string Manager::recoverStuckKeyLocked(const std::string& jsCode) {
     return recoveryEvent.dump();
 }
 
-void Manager::recoverStuckKey(const std::string& jsCode) {
-    std::string ev;
-    {
-        std::lock_guard<std::mutex> lock(stateMutex);
-        ev = recoverStuckKeyLocked(jsCode);
-    }
-    if (eventCallback && !ev.empty()) {
-        eventCallback("stuck_key_recovery", ev);
-    }
-}
-
-bool Manager::processKeyboardEvent(const std::string& eventType, const nlohmann::json& eventData) {
+bool Manager::processKeyboardEvent(const std::string& eventType, const nlohmann::json& eventData,
+                                   const std::string& rawData) {
     if (!eventData.contains("code")) {
         LOG_WARNING(ErrorUtils::ErrorCategory::INPUT, "Keyboard event missing 'code' field");
         return false;
@@ -332,19 +321,20 @@ bool Manager::processKeyboardEvent(const std::string& eventType, const nlohmann:
 
     // Forward event to callback
     if (eventCallback) {
-        eventCallback(eventType, eventData.dump());
+        eventCallback(eventType, rawData);
     }
 
     return true;
 }
 
-bool Manager::processMouseEvent(const std::string& eventType, const nlohmann::json& eventData) {
+bool Manager::processMouseEvent(const std::string& eventType, const nlohmann::json& eventData,
+                                const std::string& rawData) {
     if (eventType == "mousemove") {
         MousePosition newPosition = transformMouseCoordinates(eventData);
         updateMousePosition(newPosition);
 
         if (eventCallback) {
-            eventCallback(eventType, eventData.dump());
+            eventCallback(eventType, rawData);
         }
         return true;
     }
@@ -374,7 +364,7 @@ bool Manager::processMouseEvent(const std::string& eventType, const nlohmann::js
 
         // Forward event to callback
         if (eventCallback) {
-            eventCallback(eventType, eventData.dump());
+            eventCallback(eventType, rawData);
         }
 
         return true;
@@ -383,7 +373,7 @@ bool Manager::processMouseEvent(const std::string& eventType, const nlohmann::js
     if (eventType == "wheel") {
         // Wheel events don't change state, just forward them
         if (eventCallback) {
-            eventCallback(eventType, eventData.dump());
+            eventCallback(eventType, rawData);
         }
         return true;
     }
@@ -404,22 +394,10 @@ MousePosition Manager::transformMouseCoordinates(const nlohmann::json& eventData
         uint64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
-        // Apply coordinate transformation based on config
-        int transformedX = clientX;
-        int transformedY = clientY;
-
-        if (config.mousePolicy == InputConfig::MouseCoordinatePolicy::DPI_AWARE) {
-            // TODO: Implement DPI-aware transformation
-            // For now, use simple scaling
-            transformedX = static_cast<int>(clientX * 1.0f);
-            transformedY = static_cast<int>(clientY * 1.0f);
-        } else if (config.mousePolicy == InputConfig::MouseCoordinatePolicy::CLIP_TO_TARGET) {
-            // TODO: Implement clipping to target window
-            transformedX = std::clamp(clientX, 0, 1920); // Default bounds
-            transformedY = std::clamp(clientY, 0, 1080);
-        }
-
-        return MousePosition(transformedX, transformedY, deltaX, deltaY, timestamp, true);
+        // This manager tracks client-space state only. MouseInputHandler performs
+        // the single authoritative DPI/window/virtual-desktop transformation at
+        // injection time, using the current target window and streamed size.
+        return MousePosition(clientX, clientY, deltaX, deltaY, timestamp, true);
 
     } catch (const std::exception& e) {
         LOG_INPUT_ERROR("Coordinate transformation failed: " + std::string(e.what()), eventData.dump());
@@ -449,8 +427,6 @@ void Manager::updateKeyStateLocked(const std::string& jsCode, KeyState newState,
                                    uint64_t timestamp, uint32_t sequenceId) {
     // Caller must hold stateMutex
     KeyInfo& keyInfo = keyStates[jsCode];
-    KeyState oldState = keyInfo.state;
-
     keyInfo.state = newState;
     keyInfo.lastEventTime = timestamp;
     keyInfo.sequenceId = sequenceId;
@@ -461,11 +437,6 @@ void Manager::updateKeyStateLocked(const std::string& jsCode, KeyState newState,
 
     keyInfo.isModifier = isModifierKey(jsCode);
 
-    if (config.enableAggregatedLogging) {
-        logStateEvent("key_state_update", jsCode + ": " +
-                     (oldState == KeyState::Released ? "UP" : "DOWN") + " -> " +
-                     (newState == KeyState::Released ? "UP" : "DOWN"));
-    }
 }
 
 void Manager::updateMouseButtonState(int button, MouseButtonState newState,
@@ -487,7 +458,7 @@ void Manager::updateMousePosition(const MousePosition& newPosition) {
     currentMousePosition = newPosition;
 }
 
-bool Manager::validateKeyTransition(const std::string& jsCode,
+bool Manager::validateKeyTransition(const std::string&,
                                             KeyState oldState, KeyState newState) {
     // Repeated key-down/up messages add injection work and can clog an ordered
     // channel. The current state already represents them, so discard them.
@@ -503,10 +474,11 @@ bool Manager::validateKeyTransition(const std::string& jsCode,
     return true;
 }
 
-bool Manager::validateMouseTransition(int button,
+bool Manager::validateMouseTransition(int,
                                               MouseButtonState oldState, MouseButtonState newState) {
-    // Allow all transitions for now
-    return true;
+    // Duplicate button transitions only add ordered-channel/injection work and
+    // can accidentally generate double-click behavior after retransmission.
+    return oldState != newState;
 }
 
 void Manager::logStateEvent(const std::string& event, const std::string& details) {

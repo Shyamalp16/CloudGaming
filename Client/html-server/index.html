@@ -568,7 +568,6 @@
 
   <div class="debug-log" id="debugLog"></div>
 
-  <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
   <script>
     document.getElementById('joinButton').addEventListener('click', async () => {
       try {
@@ -623,7 +622,9 @@
                 body: JSON.stringify({}),
                 mode: 'cors'
             });
-            
+            if (!response.ok) {
+                throw new Error(`Matchmaker returned HTTP ${response.status}`);
+            }
             const data = await response.json();
             
             if (data.found) {
@@ -751,13 +752,16 @@
     }
     let dataChannel;
     let mouseChannel;
-    let latencyChannel;
-    let videoFeedbackChannel;
     let animationId;
+    let renderGeneration = 0;
     let isFullscreen = false;
     let debugVisible = false;
     let perfVisible = true;
     let currentRoomId = null;
+    let signalingGeneration = 0;
+    let reconnectAttempt = 0;
+    let reconnectTimer = null;
+    const pendingRemoteIceCandidates = [];
     const defaultIceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
     let currentIceServers = defaultIceServers;
     
@@ -767,6 +771,10 @@
     let keySequenceId = 0;
     const mouseButtonState = new Set();
     const mousePosition = {x: 0, y: 0};
+    const pendingMouseButtons = new Map();
+    let pendingMouseWheel = null;
+    let pendingMouseMove = null;
+    const MOUSE_CHANNEL_HIGH_WATER = 16384;
 
     let frameCount = 0;
     let lastFallbackDecodedFrames = 0;
@@ -776,7 +784,6 @@
     let netFps = 0;
     let bitrateKbps = 0;
     let activeStatsTimer = null;
-    let activeResizeHandler = null;
 
     // Rendering control
     let renderActive = false;
@@ -980,12 +987,12 @@
       animationId = requestAnimationFrame(renderVideoToCanvas);
     }
 
-    function scheduleVideoFrameCallback() {
+    function scheduleVideoFrameCallback(generation) {
       if (!renderActive || !('requestVideoFrameCallback' in hiddenVideoElement)) return;
       // Video is rendered directly by the browser (bg-video class).
       // rVFC fires each time the browser produces a new decoded frame — use it only to count FPS.
       hiddenVideoElement.requestVideoFrameCallback(() => {
-        if (!renderActive) return;
+        if (!renderActive || generation !== renderGeneration) return;
         frameCount++;
         const currentTime = Date.now();
         if (currentTime - lastFrameTime >= 1000) {
@@ -994,16 +1001,17 @@
           lastFrameTime = currentTime;
           updatePerformanceDisplay();
         }
-        scheduleVideoFrameCallback();
+        scheduleVideoFrameCallback(generation);
       });
     }
 
     function startRenderingLoop() {
       renderActive = true;
+      const generation = ++renderGeneration;
       lastFrameTime = Date.now();
       lastFallbackDecodedFrames = hiddenVideoElement.getVideoPlaybackQuality?.().totalVideoFrames || 0;
       if (useVFC) {
-        scheduleVideoFrameCallback();
+        scheduleVideoFrameCallback(generation);
       } else {
         animationId = requestAnimationFrame(renderVideoToCanvas);
       }
@@ -1011,23 +1019,38 @@
 
     function stopRenderingLoop() {
       renderActive = false;
+      renderGeneration++;
       if (animationId) {
         cancelAnimationFrame(animationId);
         animationId = null;
+      }
+      if (activeStatsTimer) {
+        clearInterval(activeStatsTimer);
+        activeStatsTimer = null;
       }
       hiddenVideoElement.classList.remove('bg-video');
     }
 
     function log(message, level = 'info') {
-      console.log(message);
+      let text;
+      try {
+        text = typeof message === 'string' ? message : JSON.stringify(message);
+      } catch (_) {
+        text = String(message);
+      }
+      if (typeof text !== 'string') text = String(message);
+      console.log(text);
       
       const timestamp = new Date().toLocaleTimeString();
       const logEntry = document.createElement('div');
       logEntry.className = 'log-entry';
-      logEntry.innerHTML = `
-        <span class="log-timestamp">[${timestamp}]</span>
-        <span class="log-level-${level}">${typeof message === 'string' ? message : JSON.stringify(message)}</span>
-      `;
+      const timestampNode = document.createElement('span');
+      timestampNode.className = 'log-timestamp';
+      timestampNode.textContent = `[${timestamp}] `;
+      const messageNode = document.createElement('span');
+      messageNode.className = `log-level-${level}`;
+      messageNode.textContent = text;
+      logEntry.append(timestampNode, messageNode);
       
       debugLog.appendChild(logEntry);
       debugLog.scrollTop = debugLog.scrollHeight;
@@ -1036,9 +1059,9 @@
         debugLog.removeChild(debugLog.firstChild);
       }
 
-      if (message.includes('Connected to signaling server')) {
+      if (text.includes('Connected to signaling server')) {
         showLoadingOverlay('Connected to Server', 'Initializing WebRTC connection...');
-      } else if (message.includes('Video started playing')) {
+      } else if (text.includes('Video started playing')) {
         hideLoadingOverlay();
         updateConnectionStatus('connected', 'Connected');
       }
@@ -1066,14 +1089,11 @@
     }
 
     const throttledSendMouseMove = throttle((event) => {
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      
+      const position = getRemotePointerPosition(event);
       const mouseData = {
         type: "mousemove",
-        x: Math.round((event.clientX - rect.left) * scaleX),
-        y: Math.round((event.clientY - rect.top) * scaleY),
+        x: position.x,
+        y: position.y,
         client_send_time: Date.now(),
       };
 
@@ -1084,7 +1104,16 @@
 
     function connectToSignalingServer(roomId, signalingUrl = serverUrlBase) {
       currentRoomId = roomId;
-      const serverUrl = `${signalingUrl}?roomId=${roomId}`;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+        ws.onclose = null;
+        ws.close(1000, 'Replaced by a new signaling connection');
+      }
+      const generation = ++signalingGeneration;
+      const serverUrl = `${signalingUrl}?roomId=${encodeURIComponent(roomId)}`;
       log(`Attempting to connect to WebSocket server at ${serverUrl}...`);
       updateConnectionStatus('connecting', 'Connecting...');
       try {
@@ -1095,8 +1124,10 @@
         updateConnectionStatus('disconnected', 'Error');
         return;
       }
+      const socket = ws;
 
-      ws.onopen = () => {
+      socket.onopen = () => {
+        if (generation !== signalingGeneration || socket !== ws) return;
         log('Connected to signaling server');
         updateConnectionStatus('connected', 'Server Connected');
         startConnection();
@@ -1105,7 +1136,8 @@
       // Browser WebSocket automatically handles ping/pong at protocol level
       // No need for manual ping handling
 
-      ws.onmessage = async (event) => {
+      socket.onmessage = async (event) => {
+        if (generation !== signalingGeneration || socket !== ws) return;
         try {
           const msg = JSON.parse(event.data);
           if (msg.sdp && msg.sdp.length > 100) {
@@ -1117,12 +1149,8 @@
           switch (msg.type) {
             case 'peer-disconnected':
               log('Peer has disconnected. Closing connection.', 'warn');
-              log('Peer-disconnected received. Not closing UI automatically; waiting for reconnect or manual action.');
               updateConnectionStatus('disconnected', 'Peer Left');
-              if (ws) {
-                ws.onclose = null; // Prevent the default onclose handler from trying to reconnect
-                ws.close();
-              }
+              socket.close();
               break;
             case 'answer':
               await handleAnswer(msg);
@@ -1167,37 +1195,41 @@
         }
       };
 
-      ws.onerror = (event) => {
+      socket.onerror = (event) => {
+        if (generation !== signalingGeneration || socket !== ws) return;
         log('WebSocket Error occurred. Check browser console.', 'error');
         updateConnectionStatus('disconnected', 'Connection Error');
         console.error("WebSocket Error Event:", event);
       };
 
-      ws.onclose = (event) => {
+      socket.onclose = (event) => {
+        if (generation !== signalingGeneration || socket !== ws) return;
         log(`WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason || 'N/A'}`, 'warn');
         updateConnectionStatus('disconnected', 'Disconnected');
         stopRenderingLoop();
         // Reset stats on disconnect
         fps = 0; netFps = 0; bitrateKbps = 0;
         updatePerformanceDisplay();
+        releaseAllPressedInput('signaling_closed');
         peerConnection?.close();
         peerConnection = null;
         dataChannel = null;
+        mouseChannel = null;
+        hiddenVideoElement.srcObject = null;
+        if (hiddenAudioElement) hiddenAudioElement.srcObject = null;
+        pendingRemoteIceCandidates.length = 0;
         showLoadingOverlay('Connection Lost', 'Attempting to reconnect...');
 
         // Exponential backoff reconnect
-        let attempt = 0;
         const maxDelay = 15000; // 15s
-        const tryReconnect = () => {
-          attempt++;
-          const delay = Math.min(1000 * Math.pow(2, attempt - 1), maxDelay);
-          log(`Reconnecting in ${Math.round(delay/1000)}s...`);
-          setTimeout(() => {
-            if (ws && ws.readyState === WebSocket.OPEN) return;
-            connectToSignalingServer(currentRoomId);
-          }, delay);
-        };
-        tryReconnect();
+        reconnectAttempt++;
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempt - 1), maxDelay);
+        log(`Reconnecting in ${Math.round(delay/1000)}s...`);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          if (generation !== signalingGeneration || socket !== ws) return;
+          connectToSignalingServer(currentRoomId, signalingUrl);
+        }, delay);
       };
     }
 
@@ -1220,8 +1252,10 @@
         updateConnectionStatus('disconnected', 'Error');
         return;
       }
+      const pc = peerConnection;
 
-      peerConnection.ontrack = (event) => {
+      pc.ontrack = (event) => {
+        if (peerConnection !== pc) return;
         log(`Received remote track: Kind=${event.track.kind}, ID=${event.track.id}`);
         if (event.track.kind === 'video') {
           const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
@@ -1248,6 +1282,7 @@
             }
 
             hiddenVideoElement.play().then(() => {
+              if (peerConnection !== pc) return;
               logVideoState('after play() resolved');
               log('Video started playing, activating direct hardware video rendering...');
               // Bypass the canvas/Skia path: show the video element directly so the
@@ -1263,6 +1298,10 @@
             // Canvas no longer used as a draw surface — video renders directly.
             // No canvas resize needed.
             hiddenVideoElement.onresize = () => {
+              if (hiddenVideoElement.videoWidth > 0 && hiddenVideoElement.videoHeight > 0) {
+                canvas.width = hiddenVideoElement.videoWidth;
+                canvas.height = hiddenVideoElement.videoHeight;
+              }
               logVideoState('onresize');
             };
 
@@ -1274,13 +1313,26 @@
             let lastFramesDecoded = 0;
             let lastBytes = 0;
             let lastStatsTime = performance.now();
-            activeStatsTimer = setInterval(async () => {
-              if (!peerConnection) { clearInterval(activeStatsTimer); activeStatsTimer = null; return; }
+            const statsTimer = setInterval(async () => {
+              if (peerConnection !== pc) {
+                clearInterval(statsTimer);
+                if (activeStatsTimer === statsTimer) activeStatsTimer = null;
+                return;
+              }
               try {
-                const stats = await peerConnection.getStats();
+                const stats = await pc.getStats();
+                if (peerConnection !== pc) return;
                 let inbound = null;
+                let currentRttSeconds = null;
                 stats.forEach(report => {
                   if (report.type === 'inbound-rtp' && report.kind === 'video') inbound = report;
+                  if (report.type === 'candidate-pair' && report.state === 'succeeded' &&
+                      (report.nominated || report.selected) && Number.isFinite(report.currentRoundTripTime)) {
+                    currentRttSeconds = report.currentRoundTripTime;
+                  } else if (currentRttSeconds === null && report.type === 'remote-inbound-rtp' &&
+                             Number.isFinite(report.roundTripTime)) {
+                    currentRttSeconds = report.roundTripTime;
+                  }
                 });
                 if (!inbound) return;
                 const now = performance.now();
@@ -1289,12 +1341,14 @@
                 const bytes = inbound.bytesReceived || 0;
                 netFps = Math.round(((frames - lastFramesDecoded) * 1000) / dt);
                 bitrateKbps = Math.round(((bytes - lastBytes) * 8) / dt);
+                if (currentRttSeconds !== null) latency = (currentRttSeconds * 1000).toFixed(1);
                 lastFramesDecoded = frames;
                 lastBytes = bytes;
                 lastStatsTime = now;
                 updatePerformanceDisplay();
               } catch (e) {}
             }, 1000);
+            activeStatsTimer = statsTimer;
           }
         } else if (event.track.kind === 'audio') {
           log('Received audio track, setting up dedicated audio playback');
@@ -1356,9 +1410,9 @@
         }
       };
 
-      peerConnection.onicecandidate = (event) => {
+      pc.onicecandidate = (event) => {
+        if (peerConnection !== pc) return;
         if (event.candidate) {
-          console.log('Local ICE Candidate:', JSON.stringify(event.candidate, null, 2));
           log(`Generated local ICE candidate (type: ${event.candidate.type || 'unknown'}). Sending...`);
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
@@ -1375,36 +1429,40 @@
         }
       };
 
-      peerConnection.oniceconnectionstatechange = () => {
-        log('ICE connection state changed to: ' + peerConnection.iceConnectionState);
-        if (peerConnection.iceConnectionState === 'connected') {
+      pc.oniceconnectionstatechange = () => {
+        if (peerConnection !== pc) return;
+        log('ICE connection state changed to: ' + pc.iceConnectionState);
+        if (pc.iceConnectionState === 'connected') {
           updateConnectionStatus('connected', 'ICE Connected');
-        } else if (peerConnection.iceConnectionState === 'disconnected') {
+        } else if (pc.iceConnectionState === 'disconnected') {
           updateConnectionStatus('disconnected', 'ICE Disconnected');
-          stopRenderingLoop();
-          fps = 0; netFps = 0; bitrateKbps = 0; updatePerformanceDisplay();
-        } else if (peerConnection.iceConnectionState === 'failed' || peerConnection.iceConnectionState === 'closed') {
+        } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
           stopRenderingLoop();
           fps = 0; netFps = 0; bitrateKbps = 0; updatePerformanceDisplay();
         }
       };
       
-      peerConnection.onicegatheringstatechange = () => {
-        log('ICE gathering state changed to: ' + peerConnection.iceGatheringState);
+      pc.onicegatheringstatechange = () => {
+        if (peerConnection !== pc) return;
+        log('ICE gathering state changed to: ' + pc.iceGatheringState);
       };
-      peerConnection.onconnectionstatechange = () => {
-        log('PeerConnection state changed to: ' + peerConnection.connectionState);
-        if (['disconnected','failed','closed'].includes(peerConnection.connectionState)) {
+      pc.onconnectionstatechange = () => {
+        if (peerConnection !== pc) return;
+        log('PeerConnection state changed to: ' + pc.connectionState);
+        if (['failed','closed'].includes(pc.connectionState)) {
           stopRenderingLoop();
           fps = 0; netFps = 0; bitrateKbps = 0; updatePerformanceDisplay();
         }
       };
-      peerConnection.onsignalingstatechange = () => {
-        log('Signaling state changed to: ' + peerConnection.signalingState);
+      pc.onsignalingstatechange = () => {
+        if (peerConnection !== pc) return;
+        log('Signaling state changed to: ' + pc.signalingState);
       };
 
-      dataChannel = peerConnection.createDataChannel("keyPressChannel", { ordered: true });
-      mouseChannel = peerConnection.createDataChannel("mouseChannel", { ordered: false, maxRetransmits: 0 });
+      dataChannel = pc.createDataChannel("keyPressChannel", { ordered: true });
+      // Movement is disposable and must never head-of-line block controls.
+      // Buttons and wheel events travel on the reliable ordered key channel.
+      mouseChannel = pc.createDataChannel("mouseChannel", { ordered: false, maxRetransmits: 0 });
       log(`Client attempting to create data channel "${dataChannel.label}", initial state: ${dataChannel.readyState}`);
       log(`Client attempting to create data channel "${mouseChannel.label}", initial state: ${mouseChannel.readyState}`);
 
@@ -1417,9 +1475,20 @@
         for (const code of keyState) {
           pendingKeyEvents.set(code, { key: code, code, type: 'keydown', client_send_time: Date.now() });
         }
+        for (const button of mouseButtonState) {
+          pendingMouseButtons.set(button, {
+            type: 'mousedown', button,
+            x: mousePosition.x, y: mousePosition.y,
+            client_send_time: Date.now(),
+          });
+        }
         flushPendingKeyEvents();
+        flushPendingMouseEvents();
       };
-      dataChannel.onbufferedamountlow = flushPendingKeyEvents;
+      dataChannel.onbufferedamountlow = () => {
+        flushPendingKeyEvents();
+        flushPendingMouseEvents();
+      };
       dataChannel.onmessage = (event) => {
         log(`Received Message on Data Channel "${dataChannel.label}": ${event.data}`);
       };
@@ -1430,13 +1499,12 @@
           log(`Data Channel Closed (channel object was null).`);
         }
       };
-      dataChannel.onerror = (event) => {
-        // Handle error
-      };
-
       mouseChannel.onopen = () => {
         log(`Mouse Channel Opened: "${mouseChannel.label}", ReadyState: ${mouseChannel.readyState}`);
+        mouseChannel.bufferedAmountLowThreshold = 4096;
+        flushPendingMouseEvents();
       };
+      mouseChannel.onbufferedamountlow = flushPendingMouseEvents;
       mouseChannel.onclose = () => {
         if (mouseChannel) {
           log(`Mouse Channel Closed: "${mouseChannel.label}"`);
@@ -1444,53 +1512,7 @@
           log(`Mouse Channel Closed (channel object was null).`);
         }
       };
-      mouseChannel.onerror = (event) => {
-        // Handle error
-      };
-
       
-
-      videoFeedbackChannel = peerConnection.createDataChannel("videoFeedbackChannel", { ordered: false, maxRetransmits: 0 });
-      log(`Client attempting to create data channel "${videoFeedbackChannel.label}", initial state: ${videoFeedbackChannel.readyState}`);
-
-      videoFeedbackChannel.onopen = () => {
-          log(`Video Feedback Channel Opened: "${videoFeedbackChannel.label}", ReadyState: ${videoFeedbackChannel.readyState}`);
-      };
-
-      videoFeedbackChannel.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-
-        if (message.type === "video_frame_ping") {
-          // log(`[CLIENT] [PING] Received video_frame_ping for frame ${message.frame_id}`);
-
-          const pongMessage = {
-            type: "video_frame_pong",
-            frame_id: message.frame_id,
-            host_send_time: message.host_send_time,
-          };
-
-          if (videoFeedbackChannel && videoFeedbackChannel.readyState === 'open') {
-            videoFeedbackChannel.send(JSON.stringify(pongMessage));
-            // log(`[CLIENT] [PONG] Sent video_frame_pong for frame ${message.frame_id}`);
-          } else {
-            // log("[CLIENT] videoFeedbackChannel not open, cannot send pong.", 'warn');
-          }
-        } else if (message.type === "rtt_update") {
-          latency = message.rtt.toFixed(1); // Update global latency variable
-          updatePerformanceDisplay(); // Update UI with new latency
-        }
-      };
-
-      videoFeedbackChannel.onclose = () => {
-          if (videoFeedbackChannel) {
-              log(`Video Feedback Channel Closed: "${videoFeedbackChannel.label}"`);
-          } else {
-              log(`Video Feedback Channel Closed (channel object was null).`);
-          }
-      };
-      videoFeedbackChannel.onerror = (event) => {
-        // Handle error
-      };
     }
 
     async function handleAnswer(answerMsg) {
@@ -1498,16 +1520,22 @@
         log("Received answer but PeerConnection is not ready or not expecting an answer.", 'warn');
         return;
       }
+      const pc = peerConnection;
       log('Received SDP in answer.');
-      console.log("Answer SDP:", answerMsg.sdp);
       if (!answerMsg.sdp || typeof answerMsg.sdp !== 'string' || !answerMsg.sdp.startsWith('v=')) {
         log('Invalid or missing SDP in answer.', 'error');
         return;
       }
       try {
         const remoteDesc = new RTCSessionDescription({ type: 'answer', sdp: answerMsg.sdp });
-        await peerConnection.setRemoteDescription(remoteDesc);
+        await pc.setRemoteDescription(remoteDesc);
+        if (peerConnection !== pc) return;
+        reconnectAttempt = 0;
         log('Remote description (answer) set.');
+        while (pendingRemoteIceCandidates.length > 0) {
+          const candidate = pendingRemoteIceCandidates.shift();
+          await pc.addIceCandidate(candidate);
+        }
       } catch (err) {
         log('Error setting remote description: ' + err.message, 'error');
       }
@@ -1515,18 +1543,22 @@
 
     async function handleRemoteIceCandidate(candidate) {
       if (!peerConnection) {
-        log("Received ICE candidate but PeerConnection doesn't exist.", 'warn');
+        pendingRemoteIceCandidates.push(new RTCIceCandidate(candidate));
+        return;
+      }
+      const iceCandidate = new RTCIceCandidate(candidate);
+      const pc = peerConnection;
+      if (!pc.remoteDescription) {
+        pendingRemoteIceCandidates.push(iceCandidate);
         return;
       }
       try {
-        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        await pc.addIceCandidate(iceCandidate);
+        if (peerConnection !== pc) return;
         log('Added remote ICE candidate.');
-        console.log("Added remote candidate:", candidate);
       } catch (err) {
-        if (!err.message.includes("Cannot add ICE candidate before setting remote description")) {
-          log('Error adding received ICE candidate: ' + err.message, 'error');
-          console.error("Candidate causing error:", candidate);
-        }
+        log('Error adding received ICE candidate: ' + err.message, 'error');
+        console.error("Candidate causing error:", candidate);
       }
     }
 
@@ -1573,12 +1605,93 @@
     }
 
     function sendMouseEvent(mouseData) {
-      if (mouseChannel && mouseChannel.readyState === 'open' && mouseChannel.bufferedAmount < 65536) {
-        const message = JSON.stringify(mouseData);
-        mouseChannel.send(message);
-      } else {
-        console.warn('Mouse channel not open or buffer full, cannot send mouse event: ' + JSON.stringify(mouseData));
+      const isMove = mouseData.type === 'mousemove';
+      const channel = isMove ? mouseChannel : dataChannel;
+      const highWater = isMove ? MOUSE_CHANNEL_HIGH_WATER : KEY_CHANNEL_HIGH_WATER;
+      const hasPending = isMove
+        ? pendingMouseMove !== null
+        : pendingMouseButtons.size > 0 || pendingMouseWheel !== null;
+      if (!channel || channel.readyState !== 'open' ||
+          channel.bufferedAmount >= highWater || hasPending) {
+        if (isMove) pendingMouseMove = mouseData;
+        else if (Number.isInteger(mouseData.button)) pendingMouseButtons.set(mouseData.button, mouseData);
+        else if (mouseData.type === 'wheel') {
+          if (pendingMouseWheel) {
+            pendingMouseWheel.deltaX += mouseData.deltaX;
+            pendingMouseWheel.deltaY += mouseData.deltaY;
+            pendingMouseWheel.client_send_time = mouseData.client_send_time;
+          } else {
+            pendingMouseWheel = { ...mouseData };
+          }
+        }
+        flushPendingMouseEvents();
+        return;
       }
+
+      transmitMouseEvent(mouseData);
+    }
+
+    function transmitMouseEvent(mouseData) {
+      const channel = mouseData.type === 'mousemove' ? mouseChannel : dataChannel;
+      if (!channel || channel.readyState !== 'open') return false;
+      try {
+        channel.send(JSON.stringify(mouseData));
+        return true;
+      } catch (_) {
+        if (mouseData.type === 'mousemove') pendingMouseMove = mouseData;
+        else if (Number.isInteger(mouseData.button)) pendingMouseButtons.set(mouseData.button, mouseData);
+        else if (mouseData.type === 'wheel') pendingMouseWheel = { ...mouseData };
+        return false;
+      }
+    }
+
+    function flushPendingMouseEvents() {
+      if (dataChannel && dataChannel.readyState === 'open') {
+        for (const [button, mouseData] of pendingMouseButtons) {
+          if (dataChannel.bufferedAmount >= KEY_CHANNEL_HIGH_WATER) return;
+          pendingMouseButtons.delete(button);
+          if (!transmitMouseEvent(mouseData)) return;
+        }
+        if (pendingMouseWheel && dataChannel.bufferedAmount < KEY_CHANNEL_HIGH_WATER) {
+          const wheel = pendingMouseWheel;
+          pendingMouseWheel = null;
+          if (!transmitMouseEvent(wheel)) return;
+        }
+      }
+      if (mouseChannel && mouseChannel.readyState === 'open' && pendingMouseMove &&
+          mouseChannel.bufferedAmount < MOUSE_CHANNEL_HIGH_WATER) {
+        const move = pendingMouseMove;
+        pendingMouseMove = null;
+        transmitMouseEvent(move);
+      }
+    }
+
+    function releaseAllPressedMouseButtons(reason) {
+      const now = Date.now();
+      for (const button of mouseButtonState) {
+        sendMouseEvent({
+          type: 'mouseup', button,
+          x: mousePosition.x, y: mousePosition.y,
+          client_send_time: now, reason,
+        });
+      }
+      mouseButtonState.clear();
+    }
+
+    function releaseAllPressedInput(reason) {
+      releaseAllPressedKeys(reason);
+      releaseAllPressedMouseButtons(reason);
+    }
+
+    function getRemotePointerPosition(event) {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return { ...mousePosition };
+      return {
+        x: Math.max(0, Math.min(canvas.width - 1,
+          Math.round((event.clientX - rect.left) * canvas.width / rect.width))),
+        y: Math.max(0, Math.min(canvas.height - 1,
+          Math.round((event.clientY - rect.top) * canvas.height / rect.height))),
+      };
     }
 
     function handleKeyDown(event) {
@@ -1622,17 +1735,16 @@
     function handleMouseDown(event) {
       event.preventDefault();
       mouseButtonState.add(event.button);
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      
+      const position = getRemotePointerPosition(event);
       const mouseData = {
         type: 'mousedown',
-        x: Math.round((event.clientX - rect.left) * scaleX),
-        y: Math.round((event.clientY - rect.top) * scaleY),
+        x: position.x,
+        y: position.y,
         button: event.button,
         client_send_time: Date.now(),
       };
+      mousePosition.x = position.x;
+      mousePosition.y = position.y;
       sendMouseEvent(mouseData);
     }
 
@@ -1640,18 +1752,32 @@
       event.preventDefault();
       if (!mouseButtonState.has(event.button)) return;
       mouseButtonState.delete(event.button);
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      
+      const position = getRemotePointerPosition(event);
       const mouseData = {
         type: 'mouseup',
-        x: Math.round((event.clientX - rect.left) * scaleX),
-        y: Math.round((event.clientY - rect.top) * scaleY),
+        x: position.x,
+        y: position.y,
         button: event.button,
         client_send_time: Date.now(),
       };
+      mousePosition.x = position.x;
+      mousePosition.y = position.y;
       sendMouseEvent(mouseData);
+    }
+
+    function handleMouseWheel(event) {
+      event.preventDefault();
+      const position = getRemotePointerPosition(event);
+      mousePosition.x = position.x;
+      mousePosition.y = position.y;
+      sendMouseEvent({
+        type: 'wheel',
+        x: position.x,
+        y: position.y,
+        deltaX: event.deltaX,
+        deltaY: event.deltaY,
+        client_send_time: Date.now(),
+      });
     }
 
     function handleContextMenu(event) {
@@ -1665,40 +1791,44 @@
       } else {
         log("PeerConnection already exists.");
       }
+      if (!peerConnection) return;
+      const pc = peerConnection;
+      const socket = ws;
 
-      if (!peerConnection.getTransceivers().some(t => t.receiver?.track?.kind === 'video')) {
-        peerConnection.addTransceiver('video', { direction: 'recvonly' });
+      if (!pc.getTransceivers().some(t => t.receiver?.track?.kind === 'video')) {
+        pc.addTransceiver('video', { direction: 'recvonly' });
         log("Added video transceiver.");
       } else {
         log("Video transceiver already exists.");
       }
 
-      if (!peerConnection.getTransceivers().some(t => t.receiver?.track?.kind === 'audio')) {
-        peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+      if (!pc.getTransceivers().some(t => t.receiver?.track?.kind === 'audio')) {
+        pc.addTransceiver('audio', { direction: 'recvonly' });
         log("Added audio transceiver.");
       } else {
         log("Audio transceiver already exists.");
       }
 
       try {
-        if (peerConnection.signalingState === 'stable' || peerConnection.signalingState === 'new') {
+        if (pc.signalingState === 'stable' || pc.signalingState === 'new') {
           log("Creating offer...");
-          const offer = await peerConnection.createOffer();
+          const offer = await pc.createOffer();
+          if (peerConnection !== pc || ws !== socket) return;
           log("Setting local description (offer)...");
-          await peerConnection.setLocalDescription(offer);
+          await pc.setLocalDescription(offer);
+          if (peerConnection !== pc || ws !== socket) return;
 
-          if (ws && ws.readyState === WebSocket.OPEN) {
+          if (socket && socket.readyState === WebSocket.OPEN) {
             log("Sending offer to signaling server...");
-            ws.send(JSON.stringify({
+            socket.send(JSON.stringify({
               type: 'offer',
               sdp: offer.sdp
             }));
-            console.log('Offer SDP:', offer.sdp);
           } else {
             log("WebSocket not open, cannot send offer.", 'warn');
           }
         } else {
-          log(`Not creating offer, signaling state is: ${peerConnection.signalingState}`);
+          log(`Not creating offer, signaling state is: ${pc.signalingState}`);
         }
       } catch (err) {
         log('Error creating/setting/sending offer: ' + err.message, 'error');
@@ -1714,16 +1844,17 @@
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
-    window.addEventListener('blur', () => releaseAllPressedKeys('window_blur'));
-    window.addEventListener('pagehide', () => releaseAllPressedKeys('page_hide'));
+    window.addEventListener('blur', () => releaseAllPressedInput('window_blur'));
+    window.addEventListener('pagehide', () => releaseAllPressedInput('page_hide'));
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden) releaseAllPressedKeys('document_hidden');
+      if (document.hidden) releaseAllPressedInput('document_hidden');
     });
 
     const inputOverlay = document.getElementById('input-overlay');
     inputOverlay.addEventListener('mousemove', handleMouseMove);
     inputOverlay.addEventListener('mousedown', handleMouseDown);
-    inputOverlay.addEventListener('mouseup', handleMouseUp);
+    inputOverlay.addEventListener('wheel', handleMouseWheel, { passive: false });
+    window.addEventListener('mouseup', handleMouseUp);
     inputOverlay.addEventListener('contextmenu', handleContextMenu);
 
     canvas.addEventListener('dragstart', (e) => e.preventDefault());

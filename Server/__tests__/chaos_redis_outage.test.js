@@ -34,6 +34,7 @@ async function waitForReady(healthPort, timeoutMs = 25000) {
 }
 
 function waitForExit(child, timeoutMs = 15000) {
+	if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => reject(new Error('Child did not exit in time')), timeoutMs);
 		child.once('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });

@@ -37,7 +37,6 @@ async function testMatchmaker() {
         if (data.found) {
             console.log('   Match Found!');
             console.log(`   Room ID: ${data.roomId}`);
-            console.log(`   Signaling URL: ${data.signalingUrl}`);
             console.log('\n3. Verifying ICE Servers...');
             if (data.iceServers && data.iceServers.length > 0) {
                 console.log('   Received ICE Servers:', JSON.stringify(data.iceServers, null, 2));

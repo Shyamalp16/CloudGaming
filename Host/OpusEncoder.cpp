@@ -2,8 +2,6 @@
 #include <opus/opus.h>
 #include <algorithm>
 #include <iostream>
-#include <chrono>
-#include <cfloat>
 
 OpusEncoderWrapper::OpusEncoderWrapper() = default;
 OpusEncoderWrapper::~OpusEncoderWrapper() { shutdown(); }
@@ -70,41 +68,6 @@ int OpusEncoderWrapper::encodeFrameToBuffer(const float* pcmInterleaved, uint8_t
         return -1;
     }
 
-    // Debug: Check input audio levels before encoding (reduced frequency to avoid log spam)
-    static int debugCount = 0;
-    debugCount++;
-    // FIX: Reduce logging frequency - log first 3 frames, then every 1000 frames (was 100)
-    if (debugCount <= 3 || debugCount % 1000 == 0) {
-        float maxVal = -FLT_MAX, minVal = FLT_MAX, sumSquares = 0.0f;
-        int validSamples = 0;
-
-        for (int i = 0; i < m_frameSize * m_channels; ++i) {
-            float sample = pcmInterleaved[i];
-
-            // Check for valid audio range (-1.0 to 1.0)
-            if (sample >= -1.0f && sample <= 1.0f) {
-                if (sample > maxVal) maxVal = sample;
-                if (sample < minVal) minVal = sample;
-                sumSquares += sample * sample;
-                validSamples++;
-            }
-        }
-
-        float rmsVal = 0.0f;
-        if (validSamples > 0) {
-            rmsVal = sqrtf(sumSquares / validSamples);
-        }
-
-        std::cout << "[OpusEncoder] Input check - Valid samples: " << validSamples << "/" << (m_frameSize * m_channels)
-                  << ", RMS: " << rmsVal << ", Max: " << maxVal << ", Min: " << minVal << std::endl;
-
-        // Warn about invalid samples
-        if (validSamples < m_frameSize * m_channels) {
-            std::cout << "[OpusEncoder] WARNING: " << ((m_frameSize * m_channels) - validSamples)
-                      << " samples are out of valid audio range!" << std::endl;
-        }
-    }
-
     int numSamplesPerChannel = m_frameSize;
 
     // Validate input range; if any samples are outside [-1,1] or non-finite, clamp into a scratch buffer
@@ -140,33 +103,6 @@ int OpusEncoderWrapper::encodeFrameToBuffer(const float* pcmInterleaved, uint8_t
     if (ret < 0) {
         std::cout << "[OpusEncoder] Encoding error: " << ret << std::endl;
         return -1; // Error
-    }
-
-    // Treat tiny 3-byte Opus packets as expected silence/CN, not warnings.
-    static int comfortNoiseCount = 0;
-    static int nonComfortNoiseCount = 0;
-    if (ret == 3) {
-        comfortNoiseCount++;
-    } else {
-        nonComfortNoiseCount++;
-    }
-
-    // Debug: Log encoding results every 5 seconds
-    static int encodeCount = 0;
-    static auto lastEncodeLog = std::chrono::steady_clock::now();
-    encodeCount++;
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastEncodeLog).count();
-
-    if (elapsed >= 5000) {  // 5 seconds
-        std::cout << "[OpusEncoder] Frames encoded in last 5s: " << encodeCount << ", Last frame size: " << ret << " bytes" << std::endl;
-        if (comfortNoiseCount > 0 && nonComfortNoiseCount == 0) {
-            std::cout << "[OpusEncoder] Audio appears silent (comfort-noise packets only in last 5s)." << std::endl;
-        }
-        lastEncodeLog = now;
-        encodeCount = 0;  // Reset counter
-        comfortNoiseCount = 0;
-        nonComfortNoiseCount = 0;
     }
 
     return ret; // Return actual encoded size

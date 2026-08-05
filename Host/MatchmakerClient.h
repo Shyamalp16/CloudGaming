@@ -17,10 +17,5 @@ namespace MatchmakerClient {
     // Stop the heartbeat thread gracefully
     void stopHeartbeatThread();
 
-    // Check if the matchmaker client is initialized
-    bool isInitialized();
-
-    // Check if the heartbeat thread is running
-    bool isHeartbeatRunning();
 }
 

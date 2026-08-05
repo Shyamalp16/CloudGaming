@@ -9,11 +9,10 @@
 #include <condition_variable>
 #include <thread>
 #include <chrono>
-#include "Metrics.h"
+#include <vector>
 #include "WindowUtils.h"
 #include "InputSchema.h"
 #include "InputInjection.h"
-#include "InputStats.h"
 #include "MouseCoordinateTransform.h"
 #include "InputSequenceManager.h"
 #include "InputConfig.h"
@@ -24,78 +23,8 @@ using json = nlohmann::json;
 
 namespace MouseInputHandler {
 
-// Mouse move coalescing structure with time-based window
-struct CoalescedMouseMove {
-    int x = -1;
-    int y = -1;
-    bool hasPendingMove = false;
-    std::chrono::steady_clock::time_point lastUpdateTime;
-    std::chrono::steady_clock::time_point windowStartTime;
-    static constexpr std::chrono::milliseconds COALESCE_WINDOW_MS{4}; // <4ms window to prevent visible lag
-    static constexpr int MAX_COALESCED_EVENTS = 10; // Prevent excessive coalescing
-    int coalescedEventCount = 0;
-
-    void update(int newX, int newY) {
-        auto now = std::chrono::steady_clock::now();
-
-        // If we don't have a pending move or the window has expired, start a new window
-        if (!hasPendingMove ||
-            (now - windowStartTime) > COALESCE_WINDOW_MS ||
-            coalescedEventCount >= MAX_COALESCED_EVENTS) {
-            // Process the previous move if it exists
-            if (hasPendingMove) {
-                // Previous move will be processed before this new one
-            }
-            // Start new coalescing window
-            windowStartTime = now;
-            coalescedEventCount = 0;
-        }
-
-        // Update with latest coordinates
-        x = newX;
-        y = newY;
-        hasPendingMove = true;
-        lastUpdateTime = now;
-        coalescedEventCount++;
-    }
-
-    void clear() {
-        hasPendingMove = false;
-        x = -1;
-        y = -1;
-        coalescedEventCount = 0;
-    }
-
-    // Check if the coalescing window has expired
-    bool hasWindowExpired() const {
-        if (!hasPendingMove) return false;
-        auto now = std::chrono::steady_clock::now();
-        return (now - windowStartTime) > COALESCE_WINDOW_MS;
-    }
-};
-
-// Global coalesced mouse move instance
-CoalescedMouseMove globalCoalescedMouseMove;
-
-	// Configuration for coordinate transformation
-	static int gClientViewWidth = 1920;  // Default client view width
-	static int gClientViewHeight = 1080; // Default client view height
-	static MouseCoordinateTransform::TransformConfig gCoordTransformConfig = {
-		false, // enableClipping
-		false, // enableClipCursor
-		true,  // accountForScaling
-		1.0,   // captureScaleX
-		1.0    // captureScaleY
-	};
-
-	// Function to update coordinate transformation configuration
-	void updateCoordinateTransformConfig(int clientWidth, int clientHeight,
-										 const MouseCoordinateTransform::TransformConfig& config) {
-		gClientViewWidth = clientWidth;
-		gClientViewHeight = clientHeight;
-		gCoordTransformConfig = config;
-		MouseCoordinateTransform::updateGlobalConfig(config);
-	}
+	constexpr int kClientViewWidth = 1920;
+	constexpr int kClientViewHeight = 1080;
     // Simple configurable logging (0=ERROR,1=WARN,2=INFO,3=DEBUG)
     static std::atomic<int> gMouseLogLevel{1};
     static inline void SetMouseLogLevelFromEnv() {
@@ -107,22 +36,13 @@ CoalescedMouseMove globalCoalescedMouseMove;
         }
     }
     static inline bool MouseShouldLog(int level) { return level <= gMouseLogLevel.load(); }
-    static inline void MouseLogInfo(const std::string& s) { if (MouseShouldLog(2)) std::cout << s << std::endl; }
     static inline void MouseLogDebug(const std::string& s) { if (MouseShouldLog(3)) std::cout << s << std::endl; }
     static inline void MouseLogWarn(const std::string& s) { if (MouseShouldLog(1)) std::cout << s << std::endl; }
 
-    // Feature flags and accumulators
-    static std::atomic_bool gSplitClickMove{false};
+    // Wheel accumulators
     static int gWheelAccumY = 0;
     static int gWheelAccumX = 0;
     static int gInvalidButtonWarns = 0;
-
-    static inline void SetMouseFeatureFlagsFromEnv() {
-        const char* split = std::getenv("INPUT_SPLIT_CLICK");
-        if (split && (split[0] == '1' || split[0] == 't' || split[0] == 'T' || split[0] == 'y' || split[0] == 'Y')) {
-            gSplitClickMove.store(true);
-        }
-    }
 	static std::atomic_bool isRunning;
 	static std::thread mouseMessageThread;
 	static std::set<int> clientReportedMouseButtonsDown;
@@ -136,7 +56,6 @@ CoalescedMouseMove globalCoalescedMouseMove;
 	static std::mutex queueMutex;
 	static std::condition_variable queueCondition;
 	static bool shutdownRequested = false;
-
 	void mouseMessagePollingLoop();
 	void simulateWindowsMouseEvent(const std::string& eventType, int x, int y, int button);
 	void simulateMouseMove(int x, int y);
@@ -172,20 +91,13 @@ CoalescedMouseMove globalCoalescedMouseMove;
 		// Log significant clamping changes (more than 10 pixels to avoid spam)
 		if (logSignificantChanges && wasClamped && ((abs(x - originalX) > 10) || (abs(y - originalY) > 10))) {
 			// Log coordinate clamping only if per-event logging is enabled
-			if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+			if (InputConfig::globalInputConfig.enablePerEventLogging) {
 				std::cout << "[MouseInputHandler] Clamped coordinates: (" << originalX << ", " << originalY << ") -> (" << x << ", " << y << ")" << std::endl;
 			}
 		}
 	}
 
 	// Blocking queue functions
-	void enqueueMouseMessage(const std::string& message) {
-		std::unique_lock<std::mutex> lock(queueMutex);
-		mouseMessageQueue.push(message);
-		lock.unlock();
-		queueCondition.notify_one();
-	}
-
 	void wakeMouseThreadInternal() {
 		std::unique_lock<std::mutex> lock(queueMutex);
 		shutdownRequested = true;
@@ -195,9 +107,34 @@ CoalescedMouseMove globalCoalescedMouseMove;
 
 	// Public function to enqueue messages from WebSocket handler
 	void enqueueMessage(const std::string& message) {
-		std::unique_lock<std::mutex> lock(queueMutex);
-		mouseMessageQueue.push(message);
-		lock.unlock();
+		bool overflowed = false;
+		{
+			std::lock_guard<std::mutex> lock(queueMutex);
+			const size_t maxPending = static_cast<size_t>((std::max)(16, InputConfig::globalInputConfig.maxPendingMessages));
+			if (mouseMessageQueue.size() >= maxPending) {
+				std::queue<std::string> empty;
+				mouseMessageQueue.swap(empty);
+				overflowed = true;
+			}
+			mouseMessageQueue.push(message);
+		}
+
+		if (overflowed) {
+			std::vector<int> buttonsToRelease;
+			int releaseX = 0;
+			int releaseY = 0;
+			{
+				std::lock_guard<std::mutex> stateLock(mouseStateMutex);
+				buttonsToRelease.assign(clientReportedMouseButtonsDown.begin(), clientReportedMouseButtonsDown.end());
+				clientReportedMouseButtonsDown.clear();
+				releaseX = lastKnownCursorX;
+				releaseY = lastKnownCursorY;
+			}
+			for (int button : buttonsToRelease) {
+				simulateWindowsMouseEvent("mouseup", releaseX, releaseY, button);
+			}
+			MouseLogWarn("[MouseInputHandler] Queue overflow: discarded stale events and released held buttons");
+		}
 		queueCondition.notify_one();
 	}
 
@@ -232,29 +169,22 @@ CoalescedMouseMove globalCoalescedMouseMove;
 
 			// Use new DPI-aware coordinate transformation
 			HWND targetWindow = WindowUtils::GetTargetWindow();
-			auto transformResult = MouseCoordinateTransform::globalTransformer.transformClientToAbsolute(
-				x, y, targetWindow, gClientViewWidth, gClientViewHeight);
+			auto transformResult = MouseCoordinateTransform::transformClientToAbsolute(
+				x, y, targetWindow, kClientViewWidth, kClientViewHeight);
 
 			if (transformResult.isValid) {
 				input.mi.dx = transformResult.absoluteX;
 				input.mi.dy = transformResult.absoluteY;
 				input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
 
-				InputMetrics::inc(InputMetrics::mouseCoordTransformSuccess());
-
-				if (transformResult.wasClipped) {
-					InputMetrics::inc(InputMetrics::mouseCoordClipped());
-				}
-
 				// Log transformation details only if per-event logging is enabled
-				if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+				if (InputConfig::globalInputConfig.enablePerEventLogging) {
 					std::cout << "[MouseInputHandler] Transformed Mouse Move: (" << x << ", " << y << ") -> "
 							 << "Virtual Desktop (" << transformResult.virtualDesktopX << ", " << transformResult.virtualDesktopY << ") -> "
 							 << "Absolute (" << input.mi.dx << ", " << input.mi.dy << ")"
 							 << (transformResult.wasClipped ? " [CLIPPED]" : "") << std::endl;
 				}
 			} else {
-				InputMetrics::inc(InputMetrics::mouseCoordTransformErrors());
 				std::cerr << "[MouseInputHandler] Coordinate transformation failed: " << transformResult.errorMessage << std::endl;
 				return;
 			}
@@ -287,27 +217,22 @@ CoalescedMouseMove globalCoalescedMouseMove;
 
 			// Coordinate transformation is now handled in the individual branches above
 
-			if (gSplitClickMove.load()) {
+			// Move and click are submitted in one ordered SendInput batch so the
+			// button event always lands at the requested streamed coordinate.
 				// First, move absolutely to the requested position
 				INPUT moveInput = { 0 };
 				moveInput.type = INPUT_MOUSE;
 
 				// Use new DPI-aware coordinate transformation for move
 				HWND targetWindow = WindowUtils::GetTargetWindow();
-				auto moveTransformResult = MouseCoordinateTransform::globalTransformer.transformClientToAbsolute(
-					x, y, targetWindow, gClientViewWidth, gClientViewHeight);
+				auto moveTransformResult = MouseCoordinateTransform::transformClientToAbsolute(
+					x, y, targetWindow, kClientViewWidth, kClientViewHeight);
 
 				if (moveTransformResult.isValid) {
 					moveInput.mi.dx = moveTransformResult.absoluteX;
 					moveInput.mi.dy = moveTransformResult.absoluteY;
 					moveInput.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-
-					InputMetrics::inc(InputMetrics::mouseCoordTransformSuccess());
-					if (moveTransformResult.wasClipped) {
-						InputMetrics::inc(InputMetrics::mouseCoordClipped());
-					}
 				} else {
-					InputMetrics::inc(InputMetrics::mouseCoordTransformErrors());
 					std::cerr << "[MouseInputHandler] Move coordinate transformation failed: " << moveTransformResult.errorMessage << std::endl;
 					return;
 				}
@@ -321,7 +246,7 @@ CoalescedMouseMove globalCoalescedMouseMove;
 				INPUT inputs[2] = { moveInput, btnInput };
 
 				// Check injection preconditions before sending input
-				if (!InputInjection::shouldInjectInput(InputInjection::getDefaultPolicy(), "mouse")) {
+				if (!InputInjection::shouldInjectInput("mouse")) {
 					return; // Skip injection based on policy
 				}
 
@@ -330,34 +255,8 @@ CoalescedMouseMove globalCoalescedMouseMove;
 					DWORD errorCode = GetLastError();
 					std::cerr << "[MouseInputHandler] SendInput split click failed! Error Code: " << errorCode
 						<< ", Error Message: " << std::system_category().message(errorCode) << std::endl;
-				} else {
-					InputInjection::markInjectionSuccess();
 				}
 				return;
-			} else {
-				// Combined move + button flags (legacy behavior)
-				// Use new DPI-aware coordinate transformation for combined move+click
-				HWND targetWindow = WindowUtils::GetTargetWindow();
-				auto clickTransformResult = MouseCoordinateTransform::globalTransformer.transformClientToAbsolute(
-					x, y, targetWindow, gClientViewWidth, gClientViewHeight);
-
-				if (clickTransformResult.isValid) {
-					input.mi.dx = clickTransformResult.absoluteX;
-					input.mi.dy = clickTransformResult.absoluteY;
-					input.mi.dwFlags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-
-					InputMetrics::inc(InputMetrics::mouseCoordTransformSuccess());
-					if (clickTransformResult.wasClipped) {
-						InputMetrics::inc(InputMetrics::mouseCoordClipped());
-					}
-
-					MouseLogDebug(std::string("[MouseInputHandler] Transformed Mouse Button ") + std::to_string(button) + " " + eventType + " at (" + std::to_string(x) + ", " + std::to_string(y) + ") -> Virtual Desktop (" + std::to_string(clickTransformResult.virtualDesktopX) + ", " + std::to_string(clickTransformResult.virtualDesktopY) + ") -> Absolute (" + std::to_string(input.mi.dx) + ", " + std::to_string(input.mi.dy) + ")");
-				} else {
-					InputMetrics::inc(InputMetrics::mouseCoordTransformErrors());
-					std::cerr << "[MouseInputHandler] Click coordinate transformation failed: " << clickTransformResult.errorMessage << std::endl;
-					return;
-				}
-			}
 		}
 		else if (eventType == "wheel") {
 			// Handle vertical wheel events
@@ -367,7 +266,6 @@ CoalescedMouseMove globalCoalescedMouseMove;
 
 			// Accumulate and normalize using configurable wheel scale (threshold),
 			// but send multiples of WHEEL_DELTA to Windows
-			InputConfig::initialize();
 			const int wheelScale = InputConfig::getWheelScale();
 			gWheelAccumY += y;
 			int steps = gWheelAccumY / wheelScale;
@@ -380,7 +278,7 @@ CoalescedMouseMove globalCoalescedMouseMove;
 			input.mi.mouseData = steps * WHEEL_DELTA;
 
 			// Log wheel simulation details only if per-event logging is enabled
-			if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+			if (InputConfig::globalInputConfig.enablePerEventLogging) {
 				std::cout << "[MouseInputHandler] Simulating Vertical Wheel - DeltaY: " << y << " -> mouseData: " << input.mi.mouseData << std::endl;
 			}
 		}
@@ -392,7 +290,6 @@ CoalescedMouseMove globalCoalescedMouseMove;
 
 			// Accumulate and normalize using configurable wheel scale (threshold),
 			// but send multiples of WHEEL_DELTA to Windows
-			InputConfig::initialize();
 			const int wheelScaleX = InputConfig::getWheelScale();
 			gWheelAccumX += x;
 			int steps = gWheelAccumX / wheelScaleX;
@@ -405,7 +302,7 @@ CoalescedMouseMove globalCoalescedMouseMove;
 			input.mi.mouseData = steps * WHEEL_DELTA;
 
 			// Log horizontal wheel simulation details only if per-event logging is enabled
-			if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+			if (InputConfig::globalInputConfig.enablePerEventLogging) {
 				std::cout << "[MouseInputHandler] Simulating Horizontal Wheel - DeltaX: " << x << " -> mouseData: " << input.mi.mouseData << std::endl;
 			}
 		}
@@ -415,25 +312,21 @@ CoalescedMouseMove globalCoalescedMouseMove;
 		}
 
 		// Check injection preconditions before sending input
-		if (!InputInjection::shouldInjectInput(InputInjection::getDefaultPolicy(), "mouse")) {
+		if (!InputInjection::shouldInjectInput("mouse")) {
 			return; // Skip injection based on policy
 		}
 
 		UINT sent = SendInput(1, &input, sizeof(INPUT));
 		if (sent != 1) {
 			DWORD errorCode = GetLastError();
-			InputMetrics::inc(InputMetrics::injectErrors());
-			InputMetrics::setLastError(static_cast<uint32_t>(errorCode));
 			std::cerr << "[MouseInputHandler] SendInput failed for mouse event '" << eventType << "'! Error Code: " << errorCode
 				<< ", Error Message: " << std::system_category().message(errorCode) << std::endl;
 		}
 		else {
-			InputMetrics::inc(InputMetrics::injectedMouse());
 			// Log SendInput success only if per-event logging is enabled
-			if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+			if (InputConfig::globalInputConfig.enablePerEventLogging) {
 				std::cout << "[MouseInputHandler] SendInput succeeded for mouse event '" << eventType << "'" << std::endl;
 			}
-			InputInjection::markInjectionSuccess();
 		}
 	}
 
@@ -469,7 +362,6 @@ CoalescedMouseMove globalCoalescedMouseMove;
 			}
 
 			if (!message.empty()) {
-				auto processingStart = std::chrono::steady_clock::now();
 				try {
 					MouseLogDebug(std::string("[MouseInputHandler] Processing mouse message from queue: ") + message);
 					json j = json::parse(message);
@@ -482,11 +374,10 @@ CoalescedMouseMove globalCoalescedMouseMove;
 
 						// Process sequence ID through sequence manager (if enabled for mouse events)
 						if (InputConfig::globalInputConfig.enableMouseSequencing && sequenceId > 0) {
-							auto gapResult = InputSequenceManager::globalSequenceManager.processSequence(sequenceId, "mouse");
+							InputSequenceManager::globalSequenceManager.processSequence(sequenceId);
 						}
 
 						// Track mouse event received
-						InputStats::Track::mouseEventReceived();
 
 						std::string jsType = j[InputSchema::kType].get<std::string>();
 						int x = -1, y = -1, button = -1;
@@ -496,37 +387,8 @@ CoalescedMouseMove globalCoalescedMouseMove;
 								x = j[InputSchema::kX].get<int>();
 								y = j[InputSchema::kY].get<int>();
 
-								// Handle mouse move coalescing with time-based window
-								if (InputStats::globalLoggingConfig.enableMouseMoveCoalescing) {
-									// Update coalesced move with time-based window
-									globalCoalescedMouseMove.update(x, y);
-									InputStats::Track::mouseEventCoalesced();
-
-									// Check if we should process the coalesced move
-									bool shouldProcess = false;
-
-									if (globalCoalescedMouseMove.hasPendingMove) {
-										// Process if window has expired or this is a significant move
-										if (globalCoalescedMouseMove.hasWindowExpired()) {
-											shouldProcess = true;
-										} else {
-											// Skip processing this move (will be replaced by next one in window)
-											continue;
-										}
-									}
-
-									if (shouldProcess) {
-										x = globalCoalescedMouseMove.x;
-										y = globalCoalescedMouseMove.y;
-										globalCoalescedMouseMove.clear();
-									} else {
-										// Skip processing this move (will be replaced by next one)
-										continue;
-									}
-								}
-
 								// Conditional logging - only log if detailed logging is enabled
-								if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+								if (InputConfig::globalInputConfig.enablePerEventLogging) {
 									std::cout << "[MouseInput] MOVE x=" << x << " y=" << y << std::endl;
 								}
 								// Update last known cursor position
@@ -539,9 +401,7 @@ CoalescedMouseMove globalCoalescedMouseMove;
 									HWND target = WindowUtils::GetTargetWindow();
 									if (target && GetForegroundWindow() == target) {
 										simulateWindowsMouseEvent(jsType, x, y, -1);
-										InputStats::Track::mouseEventInjected();
 									} else {
-										InputStats::Track::mouseEventSkippedForeground();
 										MouseLogDebug("[MouseInput] Skipping MOVE inject; target window not foreground");
 									}
 								}
@@ -556,7 +416,7 @@ CoalescedMouseMove globalCoalescedMouseMove;
 								y = j[InputSchema::kY].get<int>();
 								button = j[InputSchema::kButton].get<int>();
 								// Log mouse button events only if per-event logging is enabled
-								if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+								if (InputConfig::globalInputConfig.enablePerEventLogging) {
 									std::cout << "[MouseInput] " << (jsType == "mousedown" ? "DOWN" : "UP  ")
 											  << " btn=" << button << " x=" << x << " y=" << y << std::endl;
 								}
@@ -568,10 +428,9 @@ CoalescedMouseMove globalCoalescedMouseMove;
 
 								// Pre-validate button number to avoid lock if invalid
 								if ((jsType == "mousedown" || jsType == "mouseup") && (button < 0 || button > 4)) {
-									if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+									if (InputConfig::globalInputConfig.enablePerEventLogging) {
 										std::cerr << "[MouseInputHandler] Invalid button number: " << button << ". Ignoring event." << std::endl;
 									}
-									InputStats::Track::mouseEventDroppedInvalid();
 									continue;
 								}
 
@@ -589,7 +448,7 @@ CoalescedMouseMove globalCoalescedMouseMove;
 										else {
 											// Only log if enabled and not too frequent to avoid spam
 											static int duplicateDownCount = 0;
-											if (InputStats::globalLoggingConfig.enablePerEventLogging && ++duplicateDownCount % 100 == 0) {
+											if (InputConfig::globalInputConfig.enablePerEventLogging && ++duplicateDownCount % 100 == 0) {
 												std::cout << "[MouseInputHandler] State: Mouse button " << button << " already down (" << duplicateDownCount << " duplicates)" << std::endl;
 											}
 										}
@@ -602,7 +461,7 @@ CoalescedMouseMove globalCoalescedMouseMove;
 										else {
 											// Only log if enabled and not too frequent to avoid spam
 											static int duplicateUpCount = 0;
-											if (InputStats::globalLoggingConfig.enablePerEventLogging && ++duplicateUpCount % 100 == 0) {
+											if (InputConfig::globalInputConfig.enablePerEventLogging && ++duplicateUpCount % 100 == 0) {
 												std::cout << "[MouseInputHandler] State: Mouse button " << button << " was not reported down (" << duplicateUpCount << " duplicates)" << std::endl;
 											}
 										}
@@ -611,13 +470,10 @@ CoalescedMouseMove globalCoalescedMouseMove;
 
 								// SendInput outside the lock
 								if (simulateAction) 								{
-									InputStats::Track::mouseClickProcessed();
 									HWND target = WindowUtils::GetTargetWindow();
 									if (target && GetForegroundWindow() == target) {
 										simulateWindowsMouseEvent(actionType, actionX, actionY, actionButton);
-										InputStats::Track::mouseEventInjected();
 									} else {
-										InputStats::Track::mouseEventSkippedForeground();
 										MouseLogDebug("[MouseInput] Skipping click inject; target window not foreground");
 									}
 								}
@@ -639,14 +495,10 @@ CoalescedMouseMove globalCoalescedMouseMove;
 									deltaY = j["deltaY"].get<int>();
 								}
 
-								std::cout << "[MouseInputHandler] Parsed - Type: " << jsType << ", DeltaX: " << deltaX << ", DeltaY: " << deltaY << std::endl;
-
 								// For wheel events, we pass deltaX/deltaY as x/y parameters
 								// and use button parameter to distinguish wheel type (0=vertical, 1=horizontal)
 								int wheelType = (jsType == "hwheel") ? 1 : 0;
-								InputStats::Track::mouseWheelEvent();
 								simulateWindowsMouseEvent(jsType, deltaX, deltaY, wheelType);
-								InputStats::Track::mouseEventInjected();
 							}
 							else {
 								std::cerr << "[MouseInputHandler] Malformed wheel message (missing deltaX/deltaY): " << message << std::endl;
@@ -660,32 +512,12 @@ CoalescedMouseMove globalCoalescedMouseMove;
 						std::cerr << "[MouseInputHandler] Ignoring message: Invalid JSON format or missing 'type'. Message: " << message << std::endl;
 					}
 
-					// Record processing latency
-					auto processingEnd = std::chrono::steady_clock::now();
-					auto processingTime = std::chrono::duration_cast<std::chrono::microseconds>(processingEnd - processingStart);
-
-					// Track latency histogram
-					if (processingTime.count() < 1000) { // < 1ms
-						InputStats::Track::mouseEventProcessedUnder1ms();
-					} else if (processingTime.count() < 5000) { // < 5ms
-						InputStats::Track::mouseEventProcessedUnder5ms();
-					} else if (processingTime.count() < 10000) { // < 10ms
-						InputStats::Track::mouseEventProcessedUnder10ms();
-					} else { // > 10ms
-						InputStats::Track::mouseEventProcessedOver10ms();
-					}
-
-					// Record processing time for average calculation
-					InputStats::Track::recordProcessingTime(processingTime);
-
 				}
 				catch (const json::parse_error& e) {
 					std::cerr << "[MouseInputHandler] JSON Parsing Error: " << e.what() << ". Message: " << message << std::endl;
-					InputStats::Track::mouseEventDroppedInvalid();
 				}
 				catch (const std::exception& e) {
 					std::cerr << "[MouseInputHandler] Generic Error Processing Message: " << e.what() << ". Message: " << message << std::endl;
-					InputStats::Track::mouseEventDroppedInvalid();
 				}
 			}
 		}
@@ -717,7 +549,6 @@ CoalescedMouseMove globalCoalescedMouseMove;
 
 	void initializeMouseChannel() {
 		SetMouseLogLevelFromEnv();
-		SetMouseFeatureFlagsFromEnv();
 
 		// Initialize thread priority manager for low-latency input
 		ThreadPriorityManager::initializeGlobalConfig();

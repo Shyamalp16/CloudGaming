@@ -25,7 +25,6 @@
 int main()
 {
     AppInit::InitializeProcess();
-    AppInit::InitializeRtcBindings();
 
     // --- Load Configuration ---
     nlohmann::json config;
@@ -43,19 +42,6 @@ int main()
         std::cout << "[main] No input configuration found in config.json, using defaults" << std::endl;
         InputConfig::resetToDefaults();
     }
-
-    // Initialize input integration layer
-    if (!InputIntegrationLayer::initialize()) {
-        std::cerr << "[main] Failed to initialize input integration layer" << std::endl;
-        return -1;
-    }
-
-    if (!InputIntegrationLayer::start()) {
-        std::cerr << "[main] Failed to start input integration layer" << std::endl;
-        return -1;
-    }
-
-    std::cout << "[main] Input integration layer started successfully" << std::endl;
 
     std::string targetProcessName = "";
     if (!ConfigUtils::GetTargetProcessName(config, targetProcessName)) {
@@ -103,7 +89,6 @@ int main()
     GraphicsAndCapture::D3DContext d3d;
     if (!GraphicsAndCapture::InitializeDevice(d3d)) return -1;
 
-    Sleep(2000);
     HWND hwnd = nullptr; DWORD pid = 0;
     if (!WindowUtils::PickWindowByProcessName(wideTargetProcessName.c_str(), hwnd, pid) || !hwnd) {
         std::wcerr << L"[main] No window with the specified process name found." << std::endl;
@@ -128,8 +113,23 @@ int main()
 
     GraphicsAndCapture::CaptureContext cap;
     if (!GraphicsAndCapture::InitializeCapture(cap, d3d, item)) return -1;
-    GraphicsAndCapture::Start(cap);
+
+    // Do not start the Go/WebRTC runtime until all configuration, device, window,
+    // and capture setup that can fail has succeeded.  Otherwise an early return
+    // leaves its background goroutines running until process termination.
+    AppInit::InitializeRtcBindings();
     StartCapture();
+    GraphicsAndCapture::Start(cap);
+
+    // Start background input threads only after every fallible startup step.
+    // Earlier failures must not leave joinable threads alive during process exit.
+    if (!InputIntegrationLayer::initialize() || !InputIntegrationLayer::start()) {
+        std::cerr << "[main] Failed to start input integration layer" << std::endl;
+        GraphicsAndCapture::Stop(cap);
+        closeGo();
+        return -1;
+    }
+    std::cout << "[main] Input integration layer started successfully" << std::endl;
 
     std::cout << "[main] Signaling URL: " << signalingUrl << std::endl;
     initWebsocket(roomId, signalingUrl);
@@ -151,24 +151,10 @@ int main()
     }
     // -------------------------------
     
-    // Optional metrics export to signaling channel
-    if (config.contains("host") && config["host"].contains("video")) {
-        auto vcfg = config["host"]["video"];
-        bool exportMetrics = vcfg.value("exportMetrics", false);
-        if (exportMetrics) {
-            extern void startMetricsExport(bool enable);
-            startMetricsExport(true);
-        }
-    }
     AudioCapturer audioCapturer;
-    std::wcout << L"[main] Waiting for 2 seconds before starting audio capture..." << std::endl;
-    Sleep(2000);
-    // Start audio capture first (this initializes the audio device and format)
-    audioCapturer.StartCapture(pid, targetProcessName);
-
-    // Give audio capture time to initialize before starting WAV recording
-    std::wcout << L"[main] Waiting for audio capture initialization..." << std::endl;
-    Sleep(1000); // 1 second delay to allow audio device setup
+    if (!audioCapturer.StartCapture(pid, targetProcessName)) {
+        std::wcerr << L"[main] Audio capture failed to start; continuing with video only" << std::endl;
+    }
 
     // Start WAV recording for debugging if enabled in config
     bool enableWAV = false;

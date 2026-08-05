@@ -1,6 +1,6 @@
 const http = require('http');
 const { startHealthServer } = require('../health');
-const { register, stopDefaultMetrics } = require('../metrics');
+const { stopDefaultMetrics } = require('../metrics');
 
 jest.setTimeout(20000);
 

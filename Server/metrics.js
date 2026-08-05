@@ -2,7 +2,11 @@ const client = require('prom-client');
 
 // Create a Registry to register the metrics
 const register = new client.Registry();
-client.collectDefaultMetrics({ register });
+let _stopDefaultMetrics = null;
+try {
+	const rv = client.collectDefaultMetrics({ register });
+	if (typeof rv === 'function') _stopDefaultMetrics = rv;
+} catch (_) {}
 
 // Gauges
 const gaugeActiveConnections = new client.Gauge({
@@ -87,13 +91,6 @@ async function metricsHandler(req, res) {
 		res.end('metrics_error');
 	}
 }
-
-// Optional: allow tests to stop default metrics collection to avoid open handle warnings
-let _stopDefaultMetrics = null;
-try {
-	const rv = client.collectDefaultMetrics({ register });
-	if (typeof rv === 'function') _stopDefaultMetrics = rv;
-} catch (_) {}
 
 module.exports = {
 	register,

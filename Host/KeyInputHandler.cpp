@@ -1,8 +1,6 @@
 #include "KeyInputHandler.h"
 #include "ShutdownManager.h"
 #include "pion_webrtc.h"
-#include "Logging.h"
-#include "Metrics.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <atomic>
@@ -17,22 +15,12 @@
 #include "InputSchema.h"
 #include "InputInjection.h"
 #include "InputStateMachine.h"
-#include "InputStats.h"
 #include "InputSequenceManager.h"
-#include "KeyMappingTest.h"
 #include "InputConfig.h"
 
 
 using json = nlohmann::json;
 
-// Initialize logging system
-static inline void InitializeInputLogging() {
-    // TODO: Implement proper logging initialization
-    // For now, this is a stub
-    LOG_INFO("Input logging initialized");
-}
-
-// Temporary simple logging to fix compilation
 #define LOG_ERROR(msg) std::cout << "[ERROR] " << msg << std::endl
 #define LOG_WARN(msg) std::cout << "[WARN] " << msg << std::endl
 #define LOG_INFO(msg) std::cout << "[INFO] " << msg << std::endl
@@ -60,23 +48,7 @@ namespace KeyInputHandler {
 		return blockedKeys.find(jsCode) != blockedKeys.end();
 	}
 
-	// Function to customize the list of blocked keys
-	void setBlockedKeys(const std::unordered_set<std::string>& keys) {
-		// This would need to be implemented if we want runtime configuration
-		// For now, blocked keys are fixed at compile time
-	}
-
-	// FSM instance for state management and recovery
-	static InputStateMachine::FSMConfig fsmConfig = []() {
-		InputStateMachine::FSMConfig config;
-		config.modifierKeyTimeout = std::chrono::milliseconds(5000); // 5 seconds for modifiers
-		config.regularKeyTimeout = std::chrono::milliseconds(30000); // 30 seconds for regular keys
-		config.enableRegularKeyTimeout = false; // Disable regular key timeout by default
-		config.onlyRecoverModifiers = true; // Only recover modifier keys
-		config.enableRecovery = false; // Legitimate held modifiers must not be released by elapsed time.
-		return config;
-	}();
-	static InputStateMachine::KeyStateFSM keyStateFSM{fsmConfig};
+	static InputStateMachine::KeyStateFSM keyStateFSM;
 
 	// Blocking queue infrastructure
 	static std::queue<std::string> keyboardMessageQueue;
@@ -390,32 +362,6 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 		queueCondition.notify_one();
 	}
 
-    // Observability
-    static Stats g_stats;
-    const Stats& getStats() { return g_stats; }
-
-	void simulateKeyPress(const std::string& key) {
-		LOG_DEBUG("Simulating key press for: '" + key + "'");
-
-		// Validate the key code
-		WORD virtualKeyCode = MapJavaScriptCodeToVK(key);
-		if (virtualKeyCode == 0) {
-			LOG_ERROR("Invalid key code '" + key + "'. Cannot simulate key press.");
-			return;
-		}
-
-		// Simulate key down
-		SimulateWindowsKeyEvent(key, true);
-
-		// Small delay between down and up (optional, helps with some applications)
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-
-		// Simulate key up
-		SimulateWindowsKeyEvent(key, false);
-
-		LOG_DEBUG("Key press simulation completed for: '" + key + "'");
-	}
-
 	void SimulateWindowsKeyEvent(const std::string& eventCode, bool isKeyDown){
 		WORD virtualKeyCode = MapJavaScriptCodeToVK(eventCode);
 		if (virtualKeyCode == 0) {
@@ -509,7 +455,7 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 		}
 
 		// Check injection preconditions before sending input
-		if (!InputInjection::shouldInjectInput(InputInjection::getDefaultPolicy(), "keyboard")) {
+		if (!InputInjection::shouldInjectInput("keyboard")) {
 			return; // Skip injection based on policy
 		}
 
@@ -523,7 +469,6 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 			LOG_ERROR("SendInput failed for '" + eventCode + "' (" + (isKeyDown ? "DOWN" : "UP") + "). Error Code: " + std::to_string(errorCode) + ", Message: " + std::string(errorMsg));
 		} else {
 			LOG_TRACE("SendInput succeeded for '" + eventCode + "' (" + (isKeyDown ? "DOWN" : "UP") + ")");
-			InputInjection::markInjectionSuccess();
 		}
 	}
 
@@ -561,10 +506,9 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 						}
 
 						// Process sequence ID through sequence manager
-						auto gapResult = InputSequenceManager::globalSequenceManager.processSequence(sequenceId, "keyboard");
+						InputSequenceManager::globalSequenceManager.processSequence(sequenceId);
 
 						// Track keyboard event received
-						InputStats::Track::keyboardEventReceived();
 
 						std::string jsCode = j[InputSchema::kCode].get<std::string>();
 						std::string jsType = j[InputSchema::kType].get<std::string>();
@@ -572,9 +516,8 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 
 						// Check if this key should be blocked (never injected)
 						if (shouldBlockKey(jsCode)) {
-							InputStats::Track::keyboardEventBlocked();
 							// Conditional logging - only log if detailed logging is enabled
-							if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+							if (InputConfig::globalInputConfig.enablePerEventLogging) {
 								std::cout << "[KeyInput] BLOCKED " << (isClientKeyDown ? "DOWN" : "UP  ")
 									<< " code=" << jsCode << " (Windows key blocked)" << std::endl;
 							}
@@ -583,7 +526,7 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 
 						LOG_DEBUG("Parsed - Code: " + jsCode + ", Type: " + jsType);
 						// Conditional logging - only log if detailed logging is enabled
-						if (InputStats::globalLoggingConfig.enablePerEventLogging) {
+						if (InputConfig::globalInputConfig.enablePerEventLogging) {
 							std::cout << "[KeyInput] " << (isClientKeyDown ? "DOWN" : "UP  ")
 								<< " code=" << jsCode << std::endl;
 						}
@@ -641,44 +584,22 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 
 						// Process through FSM for state management and recovery
 						if (simulateAction && !jsForInject.empty()) {
-							auto eventTime = std::chrono::steady_clock::now();
-							auto transitionResult = keyStateFSM.processKeyEvent(jsForInject, actionIsDown, eventTime);
+							auto transitionResult = keyStateFSM.processKeyEvent(jsForInject, actionIsDown);
 
 							switch (transitionResult) {
 								case InputStateMachine::TransitionResult::ACCEPTED:
 									// Check injection preconditions before injecting
-									if (!InputInjection::shouldInjectInput(InputInjection::getDefaultPolicy(), "keyboard")) {
-										// Skip injection based on policy (logged by shouldInjectInput)
-										InputStats::Track::keyboardEventSkippedForeground();
+									if (!InputInjection::shouldInjectInput("keyboard")) {
 										break;
 									}
 
 									// Inject the key event
 									SimulateWindowsKeyEvent(jsForInject, actionIsDown);
-									InputInjection::markInjectionSuccess();
 
-									// Track successful injection
-									InputStats::Track::keyboardEventInjected();
-
-									// Update legacy metrics for compatibility
-									if (!actionIsDown) {
-										InputMetrics::inc(InputMetrics::injectedKeys());
-									}
 									break;
 
 								case InputStateMachine::TransitionResult::IGNORED_INVALID:
-									InputStats::Track::keyboardEventDroppedInvalid();
 									std::cout << "[KeyInput] FSM ignored invalid transition for '" << jsForInject << "' (" << (actionIsDown ? "down" : "up") << ")" << std::endl;
-									break;
-
-								case InputStateMachine::TransitionResult::IGNORED_STALE:
-									InputStats::Track::keyboardEventStaleIgnored();
-									std::cout << "[KeyInput] FSM ignored stale event for '" << jsForInject << "' (" << (actionIsDown ? "down" : "up") << ")" << std::endl;
-									break;
-
-								case InputStateMachine::TransitionResult::RECOVERED:
-									InputStats::Track::keyboardRecoverySuccess();
-									std::cout << "[KeyInput] FSM recovered stuck key '" << jsForInject << "'" << std::endl;
 									break;
 							}
 						}
@@ -726,7 +647,6 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 
 	void initializeDataChannel() {
 		if (!isRunning.load()) {
-			InitializeInputLogging();
 			isRunning.store(true);
 			std::lock_guard<std::mutex> lock(clientKeysMutex);
 			clientReportedKeysDown.clear();
@@ -746,7 +666,6 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 			keyStateFSM.initialize([](const std::string& jsCode, bool isDown) {
 				SimulateWindowsKeyEvent(jsCode, isDown);
 			});
-			keyStateFSM.startWatchdog();
 
 			// Initialize sequence manager with recovery callbacks
 			InputSequenceManager::globalSequenceManager.setRecoveryCallback(
@@ -754,18 +673,6 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 					switch (action) {
 						case InputSequenceManager::RecoveryAction::RELEASE_MODIFIERS:
 							std::cout << "[InputSequenceManager] Executing recovery: RELEASE_MODIFIERS" << std::endl;
-							keyStateFSM.releaseAllKeys();
-							break;
-
-						case InputSequenceManager::RecoveryAction::REQUEST_SNAPSHOT:
-							// No snapshot protocol exists on the browser channel. Releasing
-							// tracked keys is the only safe recovery from a large gap.
-							keyStateFSM.releaseAllKeys();
-							break;
-
-						case InputSequenceManager::RecoveryAction::RESET_STATE:
-							std::cout << "[InputSequenceManager] Executing recovery: RESET_STATE" << std::endl;
-							InputSequenceManager::globalSequenceManager.reset();
 							keyStateFSM.releaseAllKeys();
 							break;
 
@@ -785,8 +692,6 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 	void cleanup() {
 		if (isRunning.load()) {
 			isRunning.store(false);
-			// Stop FSM watchdog
-			keyStateFSM.stopWatchdog();
 			// Wake the blocking thread for shutdown
 			wakeKeyboardThreadInternal();
 			if (messageThread.joinable()) {
@@ -816,42 +721,4 @@ extern "C" void emergencyReleaseAllKeys() {
 	std::cout << "[KeyInputHandler] Emergency release of all keys requested" << std::endl;
 	// Access keyStateFSM through a namespace function that can access it
 	KeyInputHandler::releaseAllKeysEmergency();
-	InputStats::Track::keyboardEmergencyRelease();
-	InputMetrics::inc(InputMetrics::fsmEmergencyReleases());
-}
-
-extern "C" const char* getInputStatsSummary() {
-	static std::string statsString;
-	statsString = InputStats::getStatsSummary();
-	return statsString.c_str();
-}
-
-extern "C" void resetInputStats() {
-	InputStats::resetAllStats();
-}
-
-// Sequence management API implementation
-extern "C" void resetSequenceState() {
-	InputSequenceManager::globalSequenceManager.reset();
-}
-
-extern "C" const char* getSequenceStats() {
-	static std::string statsString;
-	const auto& state = InputSequenceManager::globalSequenceManager.getState();
-
-	statsString = "Sequence Stats: last_seq=" + std::to_string(state.lastReceivedSeq.load()) +
-	              ", expected=" + std::to_string(state.expectedSeq.load()) +
-	              ", gaps=" + std::to_string(state.gapsDetected.load()) +
-	              ", recoveries=" + std::to_string(state.recoveriesTriggered.load()) +
-	              ", snapshots_req=" + std::to_string(state.snapshotsRequested.load()) +
-	              ", snapshots_recv=" + std::to_string(state.snapshotsReceived.load());
-
-	return statsString.c_str();
-}
-
-// namespace KeyInputHandler
-
-// Key mapping test API implementation
-extern "C" bool runKeyMappingTests() {
-	return KeyMappingTest::runAllKeyMappingTests();
 }

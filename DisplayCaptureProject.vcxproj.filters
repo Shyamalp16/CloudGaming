@@ -31,16 +31,10 @@
     <ClInclude Include="Host\InputStateMachine.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Host\InputStats.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Host\MouseCoordinateTransform.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Host\InputSequenceManager.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Host\KeyMappingTest.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Host\ErrorUtils.h">
@@ -56,9 +50,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Host\InputIntegrationLayer.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Host\LegacyWebSocketCompat.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Host\ThreadPriorityManager.h">
@@ -129,34 +120,19 @@
     <ClInclude Include="Host\ShutdownManager.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Host\PacketQueue.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Host\IdGenerator.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Host\Logging.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Host\WebRTCWrapper.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Host\Metrics.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClCompile Include="Host\InputStateMachine.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Host\InputStats.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Host\MouseCoordinateTransform.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Host\InputSequenceManager.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Host\KeyMappingTest.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Host\ErrorUtils.cpp">
@@ -172,9 +148,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Host\InputIntegrationLayer.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Host\LegacyWebSocketCompat.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Host\ThreadPriorityManager.cpp">
@@ -218,13 +191,7 @@
     <ClCompile Include="Host\ShutdownManager.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Host\PacketQueue.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="Host\OpusEncoder.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Host\Logging.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Host\WebRTCWrapper.cpp">

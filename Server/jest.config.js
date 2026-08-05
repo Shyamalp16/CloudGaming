@@ -8,7 +8,6 @@ module.exports = {
 	coveragePathIgnorePatterns: [
 		'/node_modules/',
 		'/__tests__/',
-		'/obselete/',
 		'/Client/',
 		'/Host/',
 		'/gortc_main/',

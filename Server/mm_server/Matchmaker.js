@@ -11,8 +11,12 @@ process.on('unhandledRejection',  (reason) => console.error('[FATAL] unhandledRe
 
 // ─── Metered TURN helper ─────────────────────────────────────────────────────
 // Fetches short-lived ICE server credentials from the Metered API.
-// Called once per match so credentials are always fresh and expire with the session.
+// Cached briefly so simultaneous matches do not trigger duplicate external API calls.
 // Falls back to Google STUN-only if Metered is not configured.
+let iceServerCache = null;
+let iceServerCacheExpiresAt = 0;
+let iceServerRequest = null;
+
 async function getIceServers() {
 	const { domain, apiKey, expirySeconds } = config.metered;
 	const fallback = [{ urls: 'stun:stun.l.google.com:19302' }];
@@ -20,7 +24,10 @@ async function getIceServers() {
 	if (!domain || !apiKey) {
 		return fallback;
 	}
+	if (iceServerCache && Date.now() < iceServerCacheExpiresAt) return iceServerCache;
+	if (iceServerRequest) return iceServerRequest;
 
+	iceServerRequest = (async () => {
 	try {
 		// Step 1: create an expiring credential
 		const createRes = await fetchJson(
@@ -44,10 +51,19 @@ async function getIceServers() {
 		}
 
 		// Always include a STUN server alongside the TURN servers
-		return [{ urls: 'stun:stun.l.google.com:19302' }, ...iceServers];
+		iceServerCache = [{ urls: 'stun:stun.l.google.com:19302' }, ...iceServers];
+		const cacheSeconds = Math.max(30, Math.min(600, expirySeconds - 60));
+		iceServerCacheExpiresAt = Date.now() + cacheSeconds * 1000;
+		return iceServerCache;
 	} catch (err) {
 		log('error', 'Failed to fetch Metered TURN credentials', { error: String(err && err.message || err) });
 		return fallback;
+	}
+	})();
+	try {
+		return await iceServerRequest;
+	} finally {
+		iceServerRequest = null;
 	}
 }
 
@@ -66,13 +82,21 @@ function fetchJson(url, method, body) {
 		};
 		const req = https.request(options, (res) => {
 			let raw = '';
-			res.on('data', (chunk) => { raw += chunk; });
+			res.on('data', (chunk) => {
+				raw += chunk;
+				if (raw.length > 1024 * 1024) req.destroy(new Error('Response too large'));
+			});
 			res.on('end', () => {
+				if (res.statusCode < 200 || res.statusCode >= 300) {
+					reject(new Error(`HTTP ${res.statusCode}: ${raw.slice(0, 200)}`));
+					return;
+				}
 				try { resolve(JSON.parse(raw)); }
 				catch (e) { reject(new Error(`JSON parse failed: ${raw.slice(0, 200)}`)); }
 			});
 		});
 		req.on('error', reject);
+		req.setTimeout(5000, () => req.destroy(new Error('Request timed out')));
 		if (data) req.write(data);
 		req.end();
 	});
@@ -90,7 +114,6 @@ app.use((req, res, next) => {
 	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 	res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Request-Id');
 	res.setHeader('Access-Control-Max-Age', '86400');
-	console.log('CORS headers set for', req.method, req.path);
 	if (req.method === 'OPTIONS') return res.sendStatus(204);
 	next();
 });
@@ -102,7 +125,7 @@ app.use(express.json());
 // Railway (and other platforms) hit these before routing real traffic.
 // Respond immediately so the container is never killed for a missing probe.
 app.get('/healthz',  (_req, res) => res.sendStatus(200));
-app.get('/readyz',   (_req, res) => res.sendStatus(200));
+app.get('/readyz',   (_req, res) => res.sendStatus(redisClient.isReady ? 200 : 503));
 app.get('/health',   (_req, res) => res.sendStatus(200));
 app.get('/', (_, res) => res.send('ok'));
 // ─────────────────────────────────────────────────────────────────────────────
@@ -125,11 +148,6 @@ app.use((req, res, next) => {
 	res.setHeader('x-request-id', reqId);
 	next();
 });
-
-app.use((req, res, next) => {
-	console.log('Incoming request:', req.method, req.url);
-	next();
-});	
 
 function formatZodIssues(zodError) {
 	return zodError.errors.map((e) => ({
@@ -186,16 +204,59 @@ function weightedPick(items) {
 	return null;
 }
 
+const HEARTBEAT_SCRIPT = `
+local host = cjson.decode(ARGV[1])
+local capacity = tonumber(host.capacity) or 1
+local available = tonumber(host.availableSlots) or capacity
+local reserved = tonumber(redis.call('GET', KEYS[3]) or '0')
+available = math.max(0, math.min(capacity, available - reserved))
+host.availableSlots = available
+host.status = available > 0 and 'idle' or 'busy'
+redis.call('SET', KEYS[1], cjson.encode(host), 'EX', ARGV[3])
+if available > 0 then
+  redis.call('SADD', KEYS[2], ARGV[2])
+else
+  redis.call('SREM', KEYS[2], ARGV[2])
+end
+return available
+`;
+
+const CLAIM_HOST_SCRIPT = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then
+  redis.call('SREM', KEYS[2], ARGV[1])
+  return nil
+end
+local host = cjson.decode(raw)
+local capacity = tonumber(host.capacity) or 1
+local available = tonumber(host.availableSlots) or capacity
+if available <= 0 then
+  redis.call('SREM', KEYS[2], ARGV[1])
+  return nil
+end
+available = available - 1
+host.capacity = capacity
+host.availableSlots = available
+host.status = available > 0 and 'idle' or 'busy'
+redis.call('INCR', KEYS[3])
+redis.call('EXPIRE', KEYS[3], ARGV[3])
+redis.call('SET', KEYS[1], cjson.encode(host), 'EX', ARGV[2])
+if available > 0 then
+  redis.call('SADD', KEYS[2], ARGV[1])
+else
+  redis.call('SREM', KEYS[2], ARGV[1])
+end
+return cjson.encode(host)
+`;
+
 async function pruneStaleIdleHosts() {
 	try {
-		const stale = [];
 		const ids = await redisClient.sMembers('idle_hosts');
-		for (const id of ids) {
-			const ttl = await redisClient.ttl(`host:${id}`);
-			if (ttl === -2) {
-				stale.push(id);
-			}
-		}
+		if (ids.length === 0) return;
+		const multi = redisClient.multi();
+		ids.forEach((id) => multi.ttl(`host:${id}`));
+		const ttls = await multi.exec();
+		const stale = ids.filter((_, index) => ttls[index] === -2);
 		if (stale.length > 0) {
 			await redisClient.sRem('idle_hosts', stale);
 			log('info', 'Pruned stale idle hosts', { staleCount: stale.length, ids: stale });
@@ -225,7 +286,7 @@ app.post('/api/host/heartbeat', async(req, res) => {
 		return res.status(400).json({ success: false, error: 'Missing hostId or roomId' });
 	}
 	const key = `host:${hostId}`;
-	const value = JSON.stringify({
+	const host = {
 		hostId,
 		roomId,
 		region: region || 'local',
@@ -233,21 +294,15 @@ app.post('/api/host/heartbeat', async(req, res) => {
 		capacity,
 		availableSlots,
 		lastHeartbeat: Date.now(),
-	});
+	};
 
 	try {
-		const isIdle = availableSlots > 0;
-		const multi = redisClient.multi();
-		multi.set(key, value, { EX: 30 });
-
-		if (isIdle) {
-			multi.sAdd('idle_hosts', hostId);
-		} else {
-			multi.sRem('idle_hosts', hostId);
-		}
-		await multi.exec();
+		await redisClient.eval(HEARTBEAT_SCRIPT, {
+			keys: [key, 'idle_hosts', `host_reservations:${hostId}`],
+			arguments: [JSON.stringify(host), hostId, String(config.hostTtlSeconds)],
+		});
 		log('info', 'Heartbeat accepted', { requestId: req.id, hostId, status: status || 'idle' });
-		res.json({ success: true, ttl: 30 });
+		res.json({ success: true, ttl: config.hostTtlSeconds });
 	} catch (err) {
 		log('error', 'Failed to set heartbeat', { requestId: req.id, error: String(err && err.message || err) });
 		res.status(500).json({ success: false, error: 'Failed to set heartbeat' });
@@ -276,15 +331,15 @@ app.get('/api/hosts/ttl', async (req, res) => {
 	try {
 		await pruneStaleIdleHosts();
 		const hostIds = await redisClient.sMembers('idle_hosts');
-		const ttlEntries = [];
-		for (const id of hostIds) {
-			const ttl = await redisClient.ttl(`host:${id}`);
-			if (ttl === -2) {
-				await redisClient.sRem('idle_hosts', id);
-				continue;
-			}
-			ttlEntries.push({ hostId: id, ttlSeconds: ttl });
-		}
+		const multi = redisClient.multi();
+		hostIds.forEach((id) => multi.ttl(`host:${id}`));
+		const ttls = hostIds.length > 0 ? await multi.exec() : [];
+		const stale = [];
+		const ttlEntries = hostIds.flatMap((id, index) => {
+			if (ttls[index] === -2) { stale.push(id); return []; }
+			return [{ hostId: id, ttlSeconds: ttls[index] }];
+		});
+		if (stale.length > 0) await redisClient.sRem('idle_hosts', stale);
 		res.json(ttlEntries);
 	} catch (error) {
 		log('error', 'Failed to fetch host TTLs', { requestId: req.id, error: String(error && error.message || error) });
@@ -319,18 +374,20 @@ app.post('/api/match/find', async(req, res) => {
 		}
 
 		const candidates = [];
-		for (const currentHostId of candidateIds) {
-			const key = `host:${currentHostId}`;
-			const json = await redisClient.get(key);
+		const candidateJson = await redisClient.mGet(candidateIds.map((id) => `host:${id}`));
+		const invalidIds = [];
+		for (let index = 0; index < candidateIds.length; index++) {
+			const currentHostId = candidateIds[index];
+			const json = candidateJson[index];
 			if (!json) {
-				await redisClient.sRem('idle_hosts', currentHostId);
+				invalidIds.push(currentHostId);
 				continue;
 			}
 			let host;
 			try {
 				host = JSON.parse(json);
 			} catch (_) {
-				await redisClient.sRem('idle_hosts', currentHostId);
+				invalidIds.push(currentHostId);
 				continue;
 			}
 			const capacity = Math.max(1, host.capacity || 1);
@@ -340,6 +397,7 @@ app.post('/api/match/find', async(req, res) => {
 			const weight = regionsMatch ? 5 : 1;
 			candidates.push({ hostId: currentHostId, host: { ...host, availableSlots, capacity }, weight });
 		}
+		if (invalidIds.length > 0) await redisClient.sRem('idle_hosts', invalidIds);
 
 		if (candidates.length === 0) {
 			return res.status(404).json({ found: false, message: 'No hosts available' });
@@ -354,62 +412,16 @@ app.post('/api/match/find', async(req, res) => {
 			const pick = weightedPick(pool);
 			if (!pick) break;
 			const { hostId: currentHostId } = pick;
-			const key = `host:${currentHostId}`;
-
-			await redisClient.watch(key);
-			const json = await redisClient.get(key);
-			if (!json) {
-				await redisClient.sRem('idle_hosts', currentHostId);
-				await redisClient.unwatch();
-				pool.splice(pool.indexOf(pick), 1);
-				continue;
+			const claimedJson = await redisClient.eval(CLAIM_HOST_SCRIPT, {
+				keys: [`host:${currentHostId}`, 'idle_hosts', `host_reservations:${currentHostId}`],
+				arguments: [currentHostId, String(config.hostTtlSeconds), String(config.allocationReservationSeconds)],
+			});
+			if (claimedJson) {
+				const host = JSON.parse(claimedJson);
+				const iceServers = await getIceServers();
+				return res.json({ found: true, roomId: host.roomId, iceServers });
 			}
-			let host;
-			try { host = JSON.parse(json); } catch (_) {
-				await redisClient.unwatch();
-				pool.splice(pool.indexOf(pick), 1);
-				continue;
-			}
-
-			const capacity = Math.max(1, host.capacity || 1);
-			const availableSlotsCurrent = Math.max(0, Math.min(capacity, (typeof host.availableSlots === 'number') ? host.availableSlots : capacity));
-			const isIdle = availableSlotsCurrent > 0;
-			const regionsMatch = !region || host.region === region;
-			log('debug', 'Match check', { requestId: req.id, hostId: currentHostId, isIdle, regionsMatch, region, hostRegion: host.region, availableSlots: availableSlotsCurrent, capacity });
-
-			if (isIdle && regionsMatch) {
-				const remainingSlots = Math.max(0, availableSlotsCurrent - 1);
-				host.availableSlots = remainingSlots;
-				host.capacity = capacity;
-				host.status = remainingSlots > 0 ? 'idle' : 'busy';
-				const multi = redisClient.multi()
-					.set(key, JSON.stringify(host), { EX: 30 });
-				if (remainingSlots > 0) {
-					multi.sAdd('idle_hosts', currentHostId);
-				} else {
-					multi.sRem('idle_hosts', currentHostId);
-				}
-
-				const results = await multi.exec();
-				log('info', 'Transaction results', { requestId: req.id, hostId: currentHostId, results, remainingSlots });
-
-				if (results) {
-					const signalingUrl = config.signalingPublicUrl || `ws://localhost:${config.wsPort}`;
-					const iceServers   = await getIceServers();
-
-					return res.json({
-						found: true,
-						roomId: host.roomId,
-						signalingUrl,
-						iceServers,
-					});
-				} else {
-					log('info', 'Allocation race detected, retrying host', { requestId: req.id, hostId: currentHostId });
-					continue;
-				}
-			}
-
-			await redisClient.unwatch();
+			log('info', 'Allocation race detected, retrying host', { requestId: req.id, hostId: currentHostId });
 			pool.splice(pool.indexOf(pick), 1);
 		}
 

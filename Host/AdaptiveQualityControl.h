@@ -119,7 +119,6 @@ public:
 
     // Configuration
     void setConfig(const DroppingConfig& newConfig);
-    const DroppingConfig& getConfig() const { return config; }
 
     // Control
     void enable();
@@ -131,18 +130,10 @@ public:
 
     // Stats management
     void updateNetworkStats(const NetworkStats& stats);
-    const NetworkStats& getCurrentStats() const { return currentStats; }
 
     // Network condition assessment
     NetworkCondition assessNetworkCondition() const;
 
-    // Statistics
-    uint32_t getTotalFramesDropped() const { return droppingState.framesDropped; }
-    uint32_t getTotalFramesSent() const { return droppingState.framesSent; }
-    double getDropRate() const;
-
-    // Reset statistics
-    void resetStats();
 };
 
 // Global instance
@@ -153,33 +144,8 @@ inline void enableAdaptiveQualityControl() {
     globalQualityController.enable();
 }
 
-inline void disableAdaptiveQualityControl() {
-    globalQualityController.disable();
-}
-
 inline QualityDecision checkFrameDropping() {
     return globalQualityController.shouldDropFrame();
-}
-
-// Configuration helpers
-inline void configureForLowLatency() {
-    DroppingConfig config;
-    config.rttExcellentThreshold = 5.0;    // Very low RTT threshold
-    config.lossExcellentThreshold = 0.005; // 0.5% loss threshold
-    config.fairDropRatio = 0.1;            // Conservative dropping
-    config.poorDropRatio = 0.25;           // Moderate dropping
-    config.criticalDropRatio = 0.5;        // Aggressive dropping
-    globalQualityController.setConfig(config);
-}
-
-inline void configureForHighThroughput() {
-    DroppingConfig config;
-    config.rttExcellentThreshold = 20.0;   // Higher RTT tolerance
-    config.lossExcellentThreshold = 0.02;  // 2% loss tolerance
-    config.fairDropRatio = 0.0;            // No dropping until poor conditions
-    config.poorDropRatio = 0.1;            // Light dropping
-    config.criticalDropRatio = 0.25;       // Moderate dropping
-    globalQualityController.setConfig(config);
 }
 
 } // namespace AdaptiveQualityControl

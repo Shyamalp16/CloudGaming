@@ -54,24 +54,6 @@ CreateCaptureItemForWindow(HWND hwnd)
     return item;
 }
 
-winrt::Windows::Graphics::Capture::GraphicsCaptureItem
-CreateCaptureItemForMonitor(HMONITOR hmon)
-{
-    using namespace winrt::Windows::Graphics::Capture;
-    if (!hmon) return nullptr;
-    auto interopFactory = winrt::get_activation_factory<
-        GraphicsCaptureItem,
-        IGraphicsCaptureItemInterop>();
-
-    GraphicsCaptureItem item{ nullptr };
-    HRESULT hr = interopFactory->CreateForMonitor(
-        hmon,
-        winrt::guid_of<GraphicsCaptureItem>(),
-        winrt::put_abi(item));
-    if (FAILED(hr)) return nullptr;
-    return item;
-}
-
 bool GetClientAreaSize(HWND hwnd, int& outWidth, int& outHeight)
 {
     outWidth = outHeight = 0;
@@ -214,18 +196,6 @@ std::vector<WindowInfo> FindWindowsByProcessName(const std::wstring& processName
     for (auto& w : allWindows) {
         if (!_wcsicmp(w.processName.c_str(), processName.c_str())) {
 			matched.push_back(w);
-        }
-    }
-    return matched;
-}
-
-std::vector<WindowInfo> FindWindowByTitle(const std::wstring& title) {
-	auto allWindows = EnumerateAllWindows();
-    std::vector<WindowInfo> matched;
-
-    for (auto& w : allWindows) {
-        if (!_wcsicmp(w.title.c_str(), title.c_str())) {
-            matched.push_back(w);
         }
     }
     return matched;

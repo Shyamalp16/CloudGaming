@@ -331,11 +331,6 @@ public:
         isElevated = false;
     }
 
-    // Check if thread is currently elevated
-    bool isElevatedPriority() const {
-        std::lock_guard<std::mutex> lock(mutex);
-        return isElevated;
-    }
 };
 
 // RAII wrapper for automatic priority management
@@ -365,21 +360,6 @@ extern MMCSSHandle globalInputInjectionHandle;
 
 // Initialize global priority configuration from environment/config
 void initializeGlobalConfig();
-
-// Apply priority elevation to current thread (for input injection)
-inline bool elevateCurrentThreadForInput() {
-    return globalInputInjectionHandle.elevate(globalPriorityConfig);
-}
-
-// Check if current thread has elevated priority
-inline bool isCurrentThreadElevated() {
-    return globalInputInjectionHandle.isElevatedPriority();
-}
-
-// Demote current thread priority
-inline void demoteCurrentThread() {
-    globalInputInjectionHandle.demote();
-}
 
 // Configuration API
 void setMMCSSClass(MMCSSClass mmcssClass);

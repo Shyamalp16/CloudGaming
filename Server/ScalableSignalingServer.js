@@ -55,6 +55,14 @@ const subscriber = redisClient.duplicate();
 const serverInstanceId = (crypto.randomUUID && crypto.randomUUID()) || `srv:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
 const rateLimiter = RateLimiter(redisClient);
 let redisCircuitOpenUntil = 0;
+let cachedJwks = null;
+let localConnectionCount = 0;
+let heartbeatTimer = null;
+
+function getJwks() {
+	if (!cachedJwks) cachedJwks = createRemoteJWKSet(new URL(config.jwt.jwksUrl));
+	return cachedJwks;
+}
 
 redisClient.on('error', (err) => {
 	setRedisUp(false);
@@ -176,6 +184,9 @@ function handleRedisMessage(message, channel) {
 }
 
 async function handleNewConnection(ws, request) {
+	let closedDuringSetup = false;
+	const setupCloseHandler = () => { closedDuringSetup = true; };
+	ws.once('close', setupCloseHandler);
 	try {
 		if (Date.now() < redisCircuitOpenUntil) {
 			log('warn', 'Refusing connection due to Redis circuit open');
@@ -217,6 +228,7 @@ async function handleNewConnection(ws, request) {
 			if (!allowed) {
 				log('warn', 'Origin not allowed', { origin, allowedOrigins: config.allowedOrigins });
 				ws.close(1008, 'Origin not allowed');
+				return;
 			}
 		}
 		if (config.subprotocol) {
@@ -240,8 +252,7 @@ async function handleNewConnection(ws, request) {
 			try {
 				let payload;
 				if (config.jwt.jwksUrl) {
-					const JWKS = createRemoteJWKSet(new URL(config.jwt.jwksUrl));
-					const { payload: pl } = await jwtVerify(token, JWKS, { issuer: config.jwt.issuer, audience: config.jwt.audience });
+					const { payload: pl } = await jwtVerify(token, getJwks(), { issuer: config.jwt.issuer, audience: config.jwt.audience });
 					payload = pl;
 				} else {
 					payload = jwt.verify(token, config.jwt.secret, { algorithms: [config.jwt.alg], issuer: config.jwt.issuer, audience: config.jwt.audience });
@@ -292,6 +303,10 @@ async function handleNewConnection(ws, request) {
 			ws.close(1011, 'Internal error');
 			return;
 		}
+		if (closedDuringSetup || ws.readyState !== WebSocket.OPEN) {
+			try { await atomicLeave(redisClient, roomKey, clientId, config.roomTtlSeconds); } catch (_) {}
+			return;
+		}
 
 		ws.roomId = roomId;
 		ws.clientId = clientId;
@@ -300,31 +315,32 @@ async function handleNewConnection(ws, request) {
 
 		if (!localRooms.has(roomId)) localRooms.set(roomId, new Set());
 		localRooms.get(roomId).add(ws);
-		setActiveConnections([...localRooms.values()].reduce((acc, set) => acc + set.size, 0));
+		localConnectionCount++;
+		setActiveConnections(localConnectionCount);
 		setLocalRooms(localRooms.size);
 
 		log('info', 'Client joined room', { clientId, roomId, localCount: localRooms.get(roomId).size });
 
-		const heartbeat = setInterval(() => {
-			if (!ws || ws.readyState !== WebSocket.OPEN) return;
-			if (!ws.isAlive) {
-				log('warn', 'Terminating unresponsive client', { clientId: ws.clientId, roomId: ws.roomId });
-				try { ws.terminate(); } catch (_) {}
-				return;
-			}
-			log('debug', 'Sending ping to client', { clientId: ws.clientId, wasAlive: ws.isAlive });
-			ws.isAlive = false;
-			try { ws.ping(); } catch (e) {
-				log('warn', 'Failed to send ping', { clientId: ws.clientId, err: e });
-			}
-		}, config.heartbeatIntervalMs);
-		ws._heartbeat = heartbeat;
 		ws.on('pong', () => {
 			ws.isAlive = true;
 			log('debug', 'Received pong from client', { clientId: ws.clientId });
 		});
 
-		ws.on('message', (message) => handleMessage(ws, roomKey, message));
+		ws._messageChain = Promise.resolve();
+		ws._pendingMessages = 0;
+		ws.on('message', (message) => {
+			if (ws._pendingMessages >= 64) {
+				incBackpressureCloses();
+				try { ws.close(1013, 'Too many pending messages'); } catch (_) {}
+				return;
+			}
+			ws._pendingMessages++;
+			ws._messageChain = ws._messageChain
+				.then(() => handleMessage(ws, roomKey, message))
+				.catch((err) => log('error', 'Queued message handler failed', { clientId, roomId, err }))
+				.finally(() => { ws._pendingMessages--; });
+		});
+		ws.off('close', setupCloseHandler);
 		ws.on('close', () => handleDisconnection(ws, roomKey));
 		ws.on('error', (err) => {
 			log('warn', 'WebSocket error', { clientId: ws.clientId, roomId: ws.roomId, err });
@@ -339,13 +355,14 @@ function refillTokens(rate) {
 	const now = Date.now();
 	const elapsed = now - rate.lastRefill;
 	if (elapsed <= 0) return;
-	const tokensToAdd = Math.floor((config.rateLimitMessagesPer10s / 10000) * elapsed);
+	const tokensToAdd = (config.rateLimitMessagesPer10s / 10000) * elapsed;
 	rate.tokens = Math.min(config.rateLimitMessagesPer10s, rate.tokens + tokensToAdd);
 	rate.lastRefill = now;
 }
 
 async function handleMessage(ws, roomKey, message) {
 	try {
+		if (ws._disconnected) return;
 		if (typeof message === 'string') {
 			if (Buffer.byteLength(message) > config.messageMaxBytes) {
 				log('warn', 'Dropping oversized text message', { clientId: ws.clientId, roomId: ws.roomId });
@@ -439,8 +456,8 @@ async function handleMessage(ws, roomKey, message) {
 }
 
 async function handleDisconnection(ws, roomKey) {
-	// Ensure this handler is idempotent
-	try { if (ws._heartbeat) clearInterval(ws._heartbeat); } catch (_) {}
+	if (ws._disconnected) return;
+	ws._disconnected = true;
 	const roomId = ws.roomId;
 	const clientId = ws.clientId;
 	log('info', 'Client disconnected', { clientId, roomId });
@@ -449,7 +466,7 @@ async function handleDisconnection(ws, roomKey) {
 	try {
 		const roomClients = localRooms.get(roomId);
 		if (roomClients) {
-			roomClients.delete(ws);
+			if (roomClients.delete(ws)) localConnectionCount = Math.max(0, localConnectionCount - 1);
 			if (roomClients.size === 0) {
 				localRooms.delete(roomId);
 				log('info', 'Room now empty on this instance', { roomId });
@@ -458,6 +475,9 @@ async function handleDisconnection(ws, roomKey) {
 	} catch (e) {
 		log('warn', 'Local room cleanup failed', { roomId, err: e });
 	}
+	setActiveConnections(localConnectionCount);
+	setLocalRooms(localRooms.size);
+	if (!roomId || !clientId) return;
 
 	// Redis cleanup and notify peers
 	try {
@@ -502,6 +522,21 @@ async function main() {
 		handleNewConnection(ws, request);
 	});
 	server.on('error', (err) => log('error', 'WebSocket server error', { err }));
+	heartbeatTimer = setInterval(() => {
+		server.clients.forEach((ws) => {
+			if (ws.readyState !== WebSocket.OPEN) return;
+			if (!ws.isAlive) {
+				log('warn', 'Terminating unresponsive client', { clientId: ws.clientId, roomId: ws.roomId });
+				try { ws.terminate(); } catch (_) {}
+				return;
+			}
+			ws.isAlive = false;
+			try { ws.ping(); } catch (e) {
+				log('warn', 'Failed to send ping', { clientId: ws.clientId, err: e });
+			}
+		});
+	}, config.heartbeatIntervalMs);
+	if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
 
 	// Start the combined HTTP+WS server on Railway's injected PORT (or local fallback)
 	const listenPort = process.env.PORT || config.wsPort;
@@ -520,6 +555,7 @@ async function shutdown() {
 	log('info', 'Shutting down gracefully...');
 	// Enter drain mode
 	draining = true;
+	if (heartbeatTimer) clearInterval(heartbeatTimer);
 	try { server.close(); } catch (_) {}
 
 	// Best-effort close of all clients and Redis membership cleanup, and wait for close frames to flush
