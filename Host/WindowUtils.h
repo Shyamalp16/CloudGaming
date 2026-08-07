@@ -6,8 +6,17 @@
 #include <nlohmann/json.hpp>
 
 namespace WindowUtils {
-    // Find first window by process name; logs matches; returns HWND and processId
-    bool PickWindowByProcessName(const std::wstring& processName, HWND& outHwnd, DWORD& outProcessId);
+    // Ranks viable top-level windows by title preference, foreground state,
+    // ownership, minimization, and client area.
+    bool PickWindowByProcessName(const std::wstring& processName, HWND& outHwnd,
+                                 DWORD& outProcessId,
+                                 const std::wstring& preferredTitle = L"",
+                                 bool logCandidates = true);
+
+    // Waits for games that create their main window after the host starts.
+    bool WaitForWindowByProcessName(const std::wstring& processName, HWND& outHwnd,
+                                    DWORD& outProcessId, int timeoutMs, int pollIntervalMs,
+                                    const std::wstring& preferredTitle = L"");
 
     // Optionally resize client area from config
     void MaybeResizeClientArea(HWND hwnd, const nlohmann::json& config);

@@ -13,7 +13,7 @@ namespace GraphicsAndCapture {
         D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_1;
     };
 
-    bool InitializeDevice(D3DContext& out);
+    bool InitializeDevice(D3DContext& out, HWND captureWindow = nullptr);
 
     struct CaptureContext {
         winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{ nullptr };

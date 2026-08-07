@@ -23,8 +23,8 @@ using json = nlohmann::json;
 
 namespace MouseInputHandler {
 
-	constexpr int kClientViewWidth = 1920;
-	constexpr int kClientViewHeight = 1080;
+	static std::atomic<int> gClientViewWidth{1920};
+	static std::atomic<int> gClientViewHeight{1080};
     // Simple configurable logging (0=ERROR,1=WARN,2=INFO,3=DEBUG)
     static std::atomic<int> gMouseLogLevel{1};
     static inline void SetMouseLogLevelFromEnv() {
@@ -170,7 +170,7 @@ namespace MouseInputHandler {
 			// Use new DPI-aware coordinate transformation
 			HWND targetWindow = WindowUtils::GetTargetWindow();
 			auto transformResult = MouseCoordinateTransform::transformClientToAbsolute(
-				x, y, targetWindow, kClientViewWidth, kClientViewHeight);
+				x, y, targetWindow, gClientViewWidth.load(), gClientViewHeight.load());
 
 			if (transformResult.isValid) {
 				input.mi.dx = transformResult.absoluteX;
@@ -226,7 +226,7 @@ namespace MouseInputHandler {
 				// Use new DPI-aware coordinate transformation for move
 				HWND targetWindow = WindowUtils::GetTargetWindow();
 				auto moveTransformResult = MouseCoordinateTransform::transformClientToAbsolute(
-					x, y, targetWindow, kClientViewWidth, kClientViewHeight);
+					x, y, targetWindow, gClientViewWidth.load(), gClientViewHeight.load());
 
 				if (moveTransformResult.isValid) {
 					moveInput.mi.dx = moveTransformResult.absoluteX;
@@ -381,6 +381,13 @@ namespace MouseInputHandler {
 
 						std::string jsType = j[InputSchema::kType].get<std::string>();
 						int x = -1, y = -1, button = -1;
+						const int reportedViewWidth = j.value("viewWidth", gClientViewWidth.load());
+						const int reportedViewHeight = j.value("viewHeight", gClientViewHeight.load());
+						if (reportedViewWidth >= 320 && reportedViewWidth <= 7680 &&
+							reportedViewHeight >= 180 && reportedViewHeight <= 4320) {
+							gClientViewWidth.store(reportedViewWidth);
+							gClientViewHeight.store(reportedViewHeight);
+						}
 
 						if (jsType == InputSchema::kMouseMove) {
 							if (j.contains(InputSchema::kX) && j.contains(InputSchema::kY)) {

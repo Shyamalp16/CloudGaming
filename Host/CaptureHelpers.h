@@ -40,6 +40,10 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
 // Configure capture/encoder target FPS used when initializing the encoder
 void SetCaptureTargetFps(int fps);
 
+// Applies a validated live encode profile. The capture worker reinitializes the
+// hardware encoder on its own thread at the next frame boundary.
+bool ApplyStreamProfile(int width, int height, int fps);
+
 // Configure maximum queued frames for capture backpressure
 void SetMaxQueuedFrames(int maxDepth);
 

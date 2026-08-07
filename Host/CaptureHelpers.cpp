@@ -73,7 +73,29 @@ static std::atomic<uint64_t> g_fallbackTimeFrames{ 0 }; // frames using audio re
 static std::atomic<uint64_t> g_outOfOrder{ 0 }; // frames observed out of order
 
 static std::atomic<int> g_targetFps{kDefaultTargetFps};
-void SetCaptureTargetFps(int fps) { if (fps > 0) g_targetFps.store(fps); }
+static std::atomic<uint64_t> g_streamConfigGeneration{0};
+void SetCaptureTargetFps(int fps) {
+    if (fps > 0 && g_targetFps.exchange(fps) != fps) {
+        g_streamConfigGeneration.fetch_add(1, std::memory_order_release);
+    }
+}
+
+bool ApplyStreamProfile(int width, int height, int fps) {
+    const bool validResolution =
+        (width == 1280 && height == 720) ||
+        (width == 1920 && height == 1080) ||
+        (width == 2560 && height == 1440);
+    const bool validFps = fps == 30 || fps == 60 || fps == 90 || fps == 120;
+    if (!validResolution || !validFps) return false;
+
+    Encoder::SetEncodeSize(width, height);
+    g_targetFps.store(fps, std::memory_order_release);
+    SetMinUpdateInterval100ns(10000000LL / fps);
+    g_streamConfigGeneration.fetch_add(1, std::memory_order_release);
+    std::wcout << L"[StreamConfig] Queued live profile " << width << L"x" << height
+               << L" @ " << fps << L" fps" << std::endl;
+    return true;
+}
 
 void SetMaxQueuedFrames(int maxDepth) {
     if (maxDepth < 1) maxDepth = 1;
@@ -101,9 +123,20 @@ void SetCursorCaptureEnabled(bool enable) { g_cursorCaptureEnabled.store(enable)
 void SetBorderRequired(bool required) { g_borderRequired.store(required); }
 // MinUpdateInterval (100ns units). 0 means not set
 static std::atomic<long long> g_minUpdateInterval100ns{0};
+static std::mutex g_captureSessionMutex;
+static GraphicsCaptureSession g_activeCaptureSession{nullptr};
 void SetMinUpdateInterval100ns(long long interval100ns) {
     if (interval100ns < 0) interval100ns = 0;
     g_minUpdateInterval100ns.store(interval100ns);
+    std::lock_guard<std::mutex> lock(g_captureSessionMutex);
+    if (g_activeCaptureSession && interval100ns > 0) {
+        try {
+            g_activeCaptureSession.MinUpdateInterval(
+                winrt::Windows::Foundation::TimeSpan{ interval100ns });
+        } catch (...) {
+            std::wcout << L"[WGC] Live MinUpdateInterval update unsupported; manual pacing remains active" << std::endl;
+        }
+    }
 }
 static int64_t SteadyNowUs() {
     return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
@@ -265,6 +298,10 @@ GraphicsCaptureSession createCaptureSession(
             // Older Windows builds may not support the property. Leaving it
             // unset is preferable to the old 10 fps fallback.
             std::wcout << L"[WGC] MinUpdateInterval unsupported; using compositor cadence" << std::endl;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_captureSessionMutex);
+            g_activeCaptureSession = session;
         }
     }
     catch (const winrt::hresult_error& e)
@@ -444,6 +481,8 @@ void StartCapture() {
         auto lastEncoderInitAttempt = std::chrono::steady_clock::now() - std::chrono::seconds(2);
         auto lastLog = std::chrono::steady_clock::now();
         int submitCount = 0;
+        int64_t lastPacedFrameUs = 0;
+        uint64_t appliedConfigGeneration = g_streamConfigGeneration.load(std::memory_order_acquire);
         uint64_t lastOverwriteDrops = 0;
         uint64_t lastBpSkips = 0;
         uint64_t lastOutOfOrder = 0;
@@ -478,6 +517,18 @@ void StartCapture() {
                 continue;
             }
 
+            // MinUpdateInterval is unavailable on older Windows builds. Keep a
+            // second, monotonic cap here so configured FPS remains authoritative.
+            const int targetFps = std::max(1, g_targetFps.load(std::memory_order_relaxed));
+            const int64_t nowUs = SteadyNowUs();
+            const int64_t minimumSpacingUs = 1000000LL / targetFps;
+            if (lastPacedFrameUs > 0 && nowUs - lastPacedFrameUs < minimumSpacingUs * 9 / 10) {
+                g_backpressureSkips.fetch_add(1, std::memory_order_relaxed);
+                RecycleFrameTexture(job);
+                continue;
+            }
+            lastPacedFrameUs = nowUs;
+
             // Content-size change detection
             {
                 static std::atomic<int> lastLoggedW{ 0 };
@@ -506,7 +557,9 @@ void StartCapture() {
             job.texture->GetDesc(&desc);
             int encW = static_cast<int>(desc.Width & ~1U);
             int encH = static_cast<int>(desc.Height & ~1U);
-            if (lastInitW != encW || lastInitH != encH) {
+            const uint64_t requestedConfigGeneration = g_streamConfigGeneration.load(std::memory_order_acquire);
+            if (lastInitW != encW || lastInitH != encH ||
+                appliedConfigGeneration != requestedConfigGeneration) {
                 const auto now = std::chrono::steady_clock::now();
                 if (now - lastEncoderInitAttempt < std::chrono::seconds(1)) {
                     RecycleFrameTexture(job);
@@ -520,6 +573,8 @@ void StartCapture() {
                 }
                 lastInitW = encW;
                 lastInitH = encH;
+                appliedConfigGeneration = requestedConfigGeneration;
+                lastPacedFrameUs = 0;
             }
 
             auto qualityDecision = AdaptiveQualityControl::checkFrameDropping();

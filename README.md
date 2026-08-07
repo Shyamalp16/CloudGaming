@@ -201,7 +201,9 @@ x64\Release\DisplayCaptureProject.exe
 ```
 
 Keep `config.json` in the executable's working directory. Release x64 is strongly
-recommended for capture and encode performance.
+recommended for capture and encode performance. The x64 post-build step copies
+the required FFmpeg, Opus/OpenSSL, and Go/Pion runtime DLLs beside the executable
+so it can be launched directly from `x64\Release` or `x64\Debug`.
 
 ## Configuration reference
 

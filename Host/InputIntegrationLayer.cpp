@@ -37,7 +37,7 @@ static void inputMessageHandler(const std::string& eventType, const std::string&
             eventType == "emergency_keyup" || eventType == "stuck_key_recovery") {
             KeyInputHandler::enqueueMessage(eventData);
         } else if (eventType == "mousedown" || eventType == "mouseup" ||
-                   eventType == "mousemove" || eventType == "wheel") {
+                   eventType == "mousemove" || eventType == "wheel" || eventType == "hwheel") {
             MouseInputHandler::enqueueMessage(eventData);
         } else {
             LOG_WARNING(ErrorUtils::ErrorCategory::INPUT,

@@ -234,6 +234,9 @@ private:
         struct ProcessLoopbackConfig {
             bool enabled = true;                 // Enable per-process loopback activation
             bool includeProcessTree = true;      // Include child processes of target
+            // Device loopback captures every sound on the host. Require an
+            // explicit opt-in before using it as a process-capture fallback.
+            bool fallbackToDeviceLoopback = false;
         } processLoopback;
 
         // Optional override: capture from a specific render device by endpoint ID

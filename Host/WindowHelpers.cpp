@@ -5,7 +5,9 @@
 #include <windows.graphics.capture.interop.h>
 #include <winrt/Windows.Graphics.Display.h>
 #include <ShellScalingAPI.h>
+#include <dwmapi.h>
 #pragma comment(lib, "Shcore.lib")
+#pragma comment(lib, "Dwmapi.lib")
 
 HWND fetchForegroundWindow()
 {
@@ -153,9 +155,9 @@ std::wstring GetWindowTitle(HWND hwnd) {
 	if (length == 0) {
 		return L"";
 	}
-	std::wstring titleBuffer(length, L'\0');
-	::GetWindowText(hwnd, &titleBuffer[0], length + 1);
-    return titleBuffer;
+	std::vector<wchar_t> titleBuffer(static_cast<size_t>(length) + 1, L'\0');
+	::GetWindowTextW(hwnd, titleBuffer.data(), length + 1);
+    return std::wstring(titleBuffer.data());
 }
 
 struct EnumData {
@@ -172,6 +174,21 @@ static BOOL CALLBACK EnumWindowProc(HWND hwnd, LPARAM lParam) {
 		return TRUE; //Skip invisible windows
 	}
 
+    const LONG_PTR exStyle = ::GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    const bool toolWindow = (exStyle & WS_EX_TOOLWINDOW) != 0;
+    const bool noActivate = (exStyle & WS_EX_NOACTIVATE) != 0;
+    if (toolWindow || noActivate) return TRUE;
+
+    BOOL cloaked = FALSE;
+    if (SUCCEEDED(::DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) {
+        return TRUE;
+    }
+
+    int clientWidth = 0, clientHeight = 0;
+    if (!GetClientAreaSize(hwnd, clientWidth, clientHeight) || clientWidth < 64 || clientHeight < 64) {
+        return TRUE;
+    }
+
     WindowInfo info;
     info.hwnd = hwnd;
     info.title = GetWindowTitle(hwnd);
@@ -179,6 +196,12 @@ static BOOL CALLBACK EnumWindowProc(HWND hwnd, LPARAM lParam) {
     DWORD processId = 0;
     GetWindowThreadProcessId(hwnd, &processId);
     info.processId = processId;
+	info.clientWidth = clientWidth;
+	info.clientHeight = clientHeight;
+	info.minimized = ::IsIconic(hwnd) != FALSE;
+	info.cloaked = cloaked != FALSE;
+	info.toolWindow = toolWindow;
+	info.owned = ::GetWindow(hwnd, GW_OWNER) != nullptr;
 	data->results.push_back(info);
     return TRUE;
 }

@@ -24,10 +24,16 @@ std::wstring GetProcessNameFromHWND(HWND hwnd);
 std::wstring GetWindowTitle(HWND hwnd);
 
 struct WindowInfo {
-	HWND hwnd;
+	HWND hwnd = nullptr;
 	std::wstring title;
 	std::wstring processName;
-	DWORD processId;
+	DWORD processId = 0;
+	int clientWidth = 0;
+	int clientHeight = 0;
+	bool minimized = false;
+	bool cloaked = false;
+	bool toolWindow = false;
+	bool owned = false;
 };
 
 std::vector<WindowInfo> EnumerateAllWindows();

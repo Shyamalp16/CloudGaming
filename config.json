@@ -8,12 +8,17 @@
     "window": {
       "resizeClientArea": true,
       "targetWidth": 1920,
-      "targetHeight": 1080
+      "targetHeight": 1080,
+      "preferredTitleContains": "",
+      "selectionTimeoutMs": 60000,
+      "pollIntervalMs": 500,
+      "reattach": true,
+      "reattachGraceMs": 1000
     },
     "video": {
         "fps": 60,
         "bitrateStart": 8000000,
-        "bitrateMin": 8000000,
+        "bitrateMin": 3000000,
         "bitrateMax": 12000000,
         "hwFramePoolSize": 3,
         "fullRange": false,
@@ -51,9 +56,10 @@
     "audio": {
       "processLoopback": {
         "enabled": true,
-        "includeProcessTree": true
+        "includeProcessTree": true,
+        "fallbackToDeviceLoopback": false
       },
-      "bitrate": 80000,
+      "bitrate": 96000,
       "complexity": 6,
       "expectedLossPerc": 5,
       "enableFec": true,

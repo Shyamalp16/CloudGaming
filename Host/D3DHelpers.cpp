@@ -39,7 +39,8 @@ std::wstring GetVendorName(UINT vendorId)
 bool SetupD3D(
     winrt::com_ptr<ID3D11Device>& d3dDevice,
     winrt::com_ptr<ID3D11DeviceContext>& d3dContext,
-    D3D_FEATURE_LEVEL& selectedFeatureLevel)
+    D3D_FEATURE_LEVEL& selectedFeatureLevel,
+    HWND captureWindow)
 {
     try
     {
@@ -49,7 +50,11 @@ bool SetupD3D(
 
         // Enumerate adapters
         winrt::com_ptr<IDXGIAdapter1> bestAdapter;
+        winrt::com_ptr<IDXGIAdapter1> displayAdapter;
         SIZE_T maxDedicatedVideoMemory = 0;
+        const HMONITOR captureMonitor = captureWindow
+            ? MonitorFromWindow(captureWindow, MONITOR_DEFAULTTONEAREST)
+            : nullptr;
 
         winrt::com_ptr<IDXGIAdapter1> currentAdapter;
         for (UINT i = 0; dxgiFactory->EnumAdapters1(i, currentAdapter.put()) != DXGI_ERROR_NOT_FOUND; ++i)
@@ -62,14 +67,47 @@ bool SetupD3D(
             std::wcout << L"  Vendor: " << GetVendorName(desc.VendorId) << L" (ID: 0x" << std::hex << desc.VendorId << L")" << std::endl;
             std::wcout << L"  Dedicated Video Memory: " << desc.DedicatedVideoMemory / 1024 / 1024 << L" MB" << std::endl;
 
-            // Choose the adapter with the most dedicated video memory
-            if (desc.DedicatedVideoMemory > maxDedicatedVideoMemory)
+            if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0)
+            {
+                std::wcout << L"  Skipping software adapter" << std::endl;
+                currentAdapter = nullptr;
+                continue;
+            }
+
+            // Prefer the adapter that owns the monitor containing the captured
+            // window. This avoids cross-adapter copies on hybrid-GPU laptops.
+            if (captureMonitor && !displayAdapter)
+            {
+                winrt::com_ptr<IDXGIOutput> output;
+                for (UINT outputIndex = 0;
+                     currentAdapter->EnumOutputs(outputIndex, output.put()) != DXGI_ERROR_NOT_FOUND;
+                     ++outputIndex)
+                {
+                    DXGI_OUTPUT_DESC outputDesc{};
+                    if (SUCCEEDED(output->GetDesc(&outputDesc)) && outputDesc.Monitor == captureMonitor)
+                    {
+                        displayAdapter = currentAdapter;
+                        std::wcout << L"  Matches capture window monitor" << std::endl;
+                        break;
+                    }
+                    output = nullptr;
+                }
+            }
+
+            // Fallback for headless/Optimus cases: choose the hardware adapter
+            // with the most dedicated memory. Accept zero-memory iGPUs too.
+            if (!bestAdapter || desc.DedicatedVideoMemory > maxDedicatedVideoMemory)
             {
                 maxDedicatedVideoMemory = desc.DedicatedVideoMemory;
                 bestAdapter = currentAdapter;
             }
 
             currentAdapter = nullptr;
+        }
+
+        if (displayAdapter)
+        {
+            bestAdapter = displayAdapter;
         }
 
         if (!bestAdapter)
@@ -82,6 +120,9 @@ bool SetupD3D(
         winrt::check_hresult(bestAdapter->GetDesc1(&bestDesc));
         g_vendorId = bestDesc.VendorId; // Store the vendor ID
         std::wcout << L"[SetupD3D] Selected Adapter: " << bestDesc.Description << std::endl;
+        std::wcout << L"  Selection reason: "
+                   << (displayAdapter ? L"capture monitor affinity" : L"hardware-memory fallback")
+                   << std::endl;
         std::wcout << L"  Vendor: " << GetVendorName(bestDesc.VendorId) << std::endl;
 
 

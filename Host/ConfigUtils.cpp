@@ -97,11 +97,11 @@ void ApplyVideoSettings(const nlohmann::json& config)
 {
     if (!(config.contains("host") && config["host"].contains("video"))) return;
     auto vcfg = config["host"]["video"];
-    int cfgFps = vcfg.value("fps", 120);
+    int cfgFps = std::clamp(vcfg.value("fps", 60), 15, 240);
     // WAN-friendly defaults: 8–15 Mbps for 1080p60; 20M/50M punishes real internet
-    int brStart = vcfg.value("bitrateStart", 8000000);
-    int brMin = vcfg.value("bitrateMin", 4000000);
-    int brMax = vcfg.value("bitrateMax", 12000000);
+    int brMin = std::clamp(vcfg.value("bitrateMin", 3000000), 500000, 100000000);
+    int brMax = std::clamp(vcfg.value("bitrateMax", 12000000), brMin, 100000000);
+    int brStart = std::clamp(vcfg.value("bitrateStart", 8000000), brMin, brMax);
     Encoder::SetBitrateConfig(brStart, brMin, brMax);
 
     // Bitrate controller: decreaseCooldown 500–1000ms for WAN; 5s was too slow on real loss
@@ -139,7 +139,10 @@ void ApplyVideoSettings(const nlohmann::json& config)
     if (vcfg.contains("encodeWidth") && vcfg.contains("encodeHeight")) {
         int encW = vcfg["encodeWidth"].get<int>();
         int encH = vcfg["encodeHeight"].get<int>();
-        if (encW > 0 && encH > 0) {
+        if (encW >= 320 && encH >= 180) {
+            // H.264 4:2:0 surfaces require even dimensions.
+            encW &= ~1;
+            encH &= ~1;
             Encoder::SetEncodeSize(encW, encH);
             std::wcout << L"[Config] Encode downscale: " << encW << L"x" << encH << std::endl;
         }
@@ -147,10 +150,10 @@ void ApplyVideoSettings(const nlohmann::json& config)
 
     std::string preset = vcfg.value("preset", std::string("p2"));
     std::string rc     = vcfg.value("rc", std::string("cbr"));
-    int bf             = vcfg.value("bf", 0);
-    int rcLookahead    = vcfg.value("rcLookahead", 0);
-    int asyncDepth     = vcfg.value("asyncDepth", 2);
-    int surfaces       = vcfg.value("surfaces", 8);
+    int bf             = std::clamp(vcfg.value("bf", 0), 0, 4);
+    int rcLookahead    = std::clamp(vcfg.value("rcLookahead", 0), 0, 32);
+    int asyncDepth     = std::clamp(vcfg.value("asyncDepth", 2), 1, 8);
+    int surfaces       = std::clamp(vcfg.value("surfaces", 8), 2, 32);
     Encoder::SetNvencOptions(preset.c_str(), rc.c_str(), bf, rcLookahead, asyncDepth, surfaces);
 
     if (vcfg.contains("hdrToneMapping")) {

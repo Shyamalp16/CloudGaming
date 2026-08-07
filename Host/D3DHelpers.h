@@ -4,6 +4,7 @@
 #include <d3d11_4.h>             // for ID3D11Device, etc.
 #include <dxgi.h>                // for IDXGIDevice
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#include <windows.h>
 
 winrt::com_ptr<ID3D11Device> GetD3DDevice();
 UINT GetGpuVendorId();
@@ -11,7 +12,8 @@ UINT GetGpuVendorId();
 bool SetupD3D(
     winrt::com_ptr<ID3D11Device>& d3dDevice,
     winrt::com_ptr<ID3D11DeviceContext>& d3dContext,
-    D3D_FEATURE_LEVEL& selectedFeatureLevel);
+    D3D_FEATURE_LEVEL& selectedFeatureLevel,
+    HWND captureWindow = nullptr);
 
 bool SetupDXGI(
     winrt::com_ptr<ID3D11Device> d3dDevice,

@@ -1495,8 +1495,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                         {
                                             m_pAudioClient = client; // Use process-specific IAudioClient
                                             std::wcout << L"[AudioCapturer] Process loopback activation succeeded for PID=" << targetProcessId << std::endl;
-                                            processLoopbackSucceeded = true;
-                                            processLoopbackFallbackReason = L"Success - Process loopback activated";
+                                            processLoopbackFallbackReason = L"Process loopback activated; initializing capture";
 
                                             // Initialize client for capture
                                             hr = m_pAudioClient->GetMixFormat(&pwfx);
@@ -1620,6 +1619,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                                                 << targetProcessId << L", includeTree="
                                                                 << (s_audioConfig.processLoopback.includeProcessTree ? L"true" : L"false")
                                                                 << L")" << std::endl;
+                                                            processLoopbackSucceeded = true;
+                                                            processLoopbackFallbackReason = L"Success - Process loopback capture ready";
                                                             // Skip endpoint enumeration and default fallback
                                                             goto AfterDeviceSelection;
                                                         }
@@ -1718,6 +1719,16 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     }
 
     AUDIO_LOG_INFO(L"[AudioCapturer] Target Process ID: " << targetProcessId);
+
+    if (s_audioConfig.processLoopback.enabled && !processLoopbackSucceeded &&
+        !s_audioConfig.processLoopback.fallbackToDeviceLoopback)
+    {
+        std::wcerr << L"[AudioCapturer] Process audio capture failed and device-loopback fallback is disabled." << std::endl;
+        std::wcerr << L"[AudioCapturer] Refusing to capture unrelated system audio. Reason: "
+                   << (processLoopbackFallbackReason.empty() ? L"Unknown" : processLoopbackFallbackReason)
+                   << std::endl;
+        goto Exit;
+    }
 
     hr = CoCreateInstance(
         __uuidof(MMDeviceEnumerator), NULL,
@@ -4162,10 +4173,13 @@ void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
             auto plCfg = config["processLoopback"];
             s_audioConfig.processLoopback.enabled = plCfg.value("enabled", true);
             s_audioConfig.processLoopback.includeProcessTree = plCfg.value("includeProcessTree", true);
+            s_audioConfig.processLoopback.fallbackToDeviceLoopback = plCfg.value("fallbackToDeviceLoopback", false);
             std::wcout << L"[AudioCapturer] Process loopback: enabled="
                        << (s_audioConfig.processLoopback.enabled ? L"true" : L"false")
                        << L", includeTree="
                        << (s_audioConfig.processLoopback.includeProcessTree ? L"true" : L"false")
+                       << L", deviceFallback="
+                       << (s_audioConfig.processLoopback.fallbackToDeviceLoopback ? L"enabled" : L"disabled")
                        << std::endl;
         }
 

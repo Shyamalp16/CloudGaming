@@ -21,6 +21,7 @@ extern "C" {
 #include <cstring>
 #include <list>
 #include <algorithm>  // std::find_if
+#include <atomic>
 #include <cmath>  // For std::abs in UpdatePacingFromTimestamp
 #include <avrt.h>
 #pragma comment(lib, "Avrt.lib")
@@ -48,8 +49,8 @@ static Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> g_vpEnumerator;
 static Microsoft::WRL::ComPtr<ID3D11VideoProcessor> g_videoProcessor;
 static int g_vpWidth = 0;
 static int g_vpHeight = 0;
-static int g_encodeWidth = 0;   // 0 = use capture size
-static int g_encodeHeight = 0;
+static std::atomic<int> g_encodeWidth{0};   // 0 = use capture size
+static std::atomic<int> g_encodeHeight{0};
 // LRU caches for D3D11 views to avoid per-frame allocations and prevent wholesale clears
 template<typename K, typename V, typename Hash = std::hash<K>>
 class LruCacheD3D {
@@ -188,6 +189,21 @@ static int g_nvSurfaces = 3; // Optimized: async_depth + 1 for minimal buffering
 static std::atomic<long long> g_lastCaptureTsUs{0};
 static std::atomic<long long> g_smoothedDurUs{0};
 static std::atomic<bool> g_forceIdrRequested{false};
+static std::atomic<uint64_t> g_hwAcquireFailures{0};
+static std::atomic<uint64_t> g_videoProcessorFailures{0};
+static std::atomic<uint64_t> g_encodeSubmitFailures{0};
+
+static void LogEncoderFailure(const char* stage, HRESULT hr = S_OK, int slot = -1) {
+    static std::mutex logMutex;
+    static std::unordered_map<std::string, uint64_t> lastLogged;
+    std::lock_guard<std::mutex> lock(logMutex);
+    const uint64_t count = ++lastLogged[stage];
+    if (count != 1 && (count % 120) != 0) return;
+    std::cerr << "[Encoder] " << stage << " failed (count=" << count;
+    if (slot >= 0) std::cerr << ", slot=" << slot;
+    if (hr != S_OK) std::cerr << ", HRESULT=0x" << std::hex << static_cast<unsigned long>(hr) << std::dec;
+    std::cerr << ")" << std::endl;
+}
 
 static inline int64_t ComputeFrameDurationUsLocked() {
     int fpsNum = codecCtx ? codecCtx->framerate.num : 60;
@@ -563,12 +579,21 @@ namespace Encoder {
 
     bool AcquireHwInputSurface(int &slotIndexOut, ID3D11Texture2D** nv12TextureOut) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
-        if (!codecCtx || g_hwFrames.empty()) return false;
+        if (!codecCtx || g_hwFrames.empty()) {
+            g_hwAcquireFailures.fetch_add(1, std::memory_order_relaxed);
+            LogEncoderFailure("AcquireHwInputSurface");
+            return false;
+        }
         slotIndexOut = g_hwFrameIndex;
         g_hwFrameIndex = (g_hwFrameIndex + 1) % static_cast<int>(g_hwFrames.size());
         AVFrame* hw = g_hwFrames[slotIndexOut];
         *nv12TextureOut = (ID3D11Texture2D*)hw->data[0];
-        return (*nv12TextureOut != nullptr);
+        if (!*nv12TextureOut) {
+            g_hwAcquireFailures.fetch_add(1, std::memory_order_relaxed);
+            LogEncoderFailure("AcquireHwInputSurface texture", S_OK, slotIndexOut);
+            return false;
+        }
+        return true;
     }
 
     bool VideoProcessorBltToSlot(ID3D11Texture2D* bgraSrcTexture, int slotIndex) {
@@ -595,7 +620,11 @@ namespace Encoder {
         HRESULT bltHr = E_FAIL;
         {
             std::lock_guard<std::mutex> lock(g_vpMutex);
-            if (!g_videoProcessor || !nv12) return false;
+            if (!g_videoProcessor || !nv12) {
+                g_videoProcessorFailures.fetch_add(1, std::memory_order_relaxed);
+                LogEncoderFailure("VideoProcessor resources", S_OK, slotIndex);
+                return false;
+            }
 
             // Create/reuse views (fast LRU operations)
             Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
@@ -603,14 +632,26 @@ namespace Encoder {
                 D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc{};
                 inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
                 inDesc.Texture2D.MipSlice = 0; inDesc.Texture2D.ArraySlice = 0;
-                if (FAILED(g_videoDevice->CreateVideoProcessorInputView(bgraSrcTexture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf()))) return false;
+                const HRESULT hr = g_videoDevice->CreateVideoProcessorInputView(
+                    bgraSrcTexture, g_vpEnumerator.Get(), &inDesc, inView.GetAddressOf());
+                if (FAILED(hr)) {
+                    g_videoProcessorFailures.fetch_add(1, std::memory_order_relaxed);
+                    LogEncoderFailure("CreateVideoProcessorInputView", hr, slotIndex);
+                    return false;
+                }
                 g_inputViewLru.put(bgraSrcTexture, inView);
             }
             const OutputSurfaceKey outputKey{nv12, arraySlice};
             Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
             if (!g_outputViewLru.get(outputKey, outView)) {
                 D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc = MakeOutputViewDesc(nv12, arraySlice);
-                if (FAILED(g_videoDevice->CreateVideoProcessorOutputView(nv12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf()))) return false;
+                const HRESULT hr = g_videoDevice->CreateVideoProcessorOutputView(
+                    nv12, g_vpEnumerator.Get(), &outDesc, outView.GetAddressOf());
+                if (FAILED(hr)) {
+                    g_videoProcessorFailures.fetch_add(1, std::memory_order_relaxed);
+                    LogEncoderFailure("CreateVideoProcessorOutputView", hr, slotIndex);
+                    return false;
+                }
                 g_outputViewLru.put(outputKey, outView);
             }
             D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = inView.Get();
@@ -618,7 +659,12 @@ namespace Encoder {
             bltHr = g_videoContext->VideoProcessorBlt(g_videoProcessor.Get(), outView.Get(), 0, 1, &stream);
         }
 
-        return SUCCEEDED(bltHr);
+        if (FAILED(bltHr)) {
+            g_videoProcessorFailures.fetch_add(1, std::memory_order_relaxed);
+            LogEncoderFailure("VideoProcessorBlt", bltHr, slotIndex);
+            return false;
+        }
+        return true;
     }
 
     bool SubmitHwFrame(int slotIndex, int64_t timestampUs) {
@@ -662,11 +708,23 @@ namespace Encoder {
                 }
                 ret = avcodec_send_frame(codecCtx, hw);
             }
-            if (ret < 0) return false;
+            if (ret < 0) {
+                g_encodeSubmitFailures.fetch_add(1, std::memory_order_relaxed);
+                char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
+                av_strerror(ret, errbuf, sizeof(errbuf));
+                LogEncoderFailure(errbuf, S_OK, slotIndex);
+                return false;
+            }
             for (;;) {
                 int r = avcodec_receive_packet(codecCtx, packet);
                 if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) break;
-                else if (r < 0) return false;
+                else if (r < 0) {
+                    g_encodeSubmitFailures.fetch_add(1, std::memory_order_relaxed);
+                    char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
+                    av_strerror(r, errbuf, sizeof(errbuf));
+                    LogEncoderFailure(errbuf, S_OK, slotIndex);
+                    return false;
+                }
                 auto sample = MakePendingSampleFromPacket(packet, codecCtx, timestampUs);
                 if (!sample.data.empty()) pendingSamples.push_back(std::move(sample));
                 av_packet_unref(packet);
@@ -720,8 +778,9 @@ namespace Encoder {
     }
 
     void SetEncodeSize(int width, int height) {
-        g_encodeWidth = (width > 0 && height > 0) ? width : 0;
-        g_encodeHeight = (width > 0 && height > 0) ? height : 0;
+        const bool valid = width > 0 && height > 0;
+        g_encodeWidth.store(valid ? width : 0, std::memory_order_release);
+        g_encodeHeight.store(valid ? height : 0, std::memory_order_release);
     }
     void SetBitrateConfig(int start_bps, int min_bps, int max_bps) {
         if (start_bps > 0) g_startBitrateBps = start_bps;
@@ -857,8 +916,10 @@ namespace Encoder {
         }
 
         std::wcout << L"[Encoder] Using " << (isHardware ? L"Hardware" : L"Software") << L" encoder: " << std::wstring(encoderName.begin(), encoderName.end()) << std::endl;
-        int encodeW = (g_encodeWidth > 0 && g_encodeHeight > 0) ? g_encodeWidth : width;
-        int encodeH = (g_encodeWidth > 0 && g_encodeHeight > 0) ? g_encodeHeight : height;
+        const int requestedWidth = g_encodeWidth.load(std::memory_order_acquire);
+        const int requestedHeight = g_encodeHeight.load(std::memory_order_acquire);
+        int encodeW = (requestedWidth > 0 && requestedHeight > 0) ? requestedWidth : width;
+        int encodeH = (requestedWidth > 0 && requestedHeight > 0) ? requestedHeight : height;
         if (encodeW != width || encodeH != height) {
             std::wcout << L"[Encoder] Downscale: capture " << width << L"x" << height << L" -> encode " << encodeW << L"x" << encodeH << std::endl;
         }

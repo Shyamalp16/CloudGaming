@@ -6,9 +6,9 @@
 
 namespace GraphicsAndCapture {
 
-bool InitializeDevice(D3DContext& out)
+bool InitializeDevice(D3DContext& out, HWND captureWindow)
 {
-    bool okD3D = SetupD3D(out.device, out.context, out.featureLevel);
+    bool okD3D = SetupD3D(out.device, out.context, out.featureLevel, captureWindow);
     bool okDXGI = SetupDXGI(out.device, out.dxgiDevice);
     if (!okD3D || !okDXGI) {
         std::wcerr << L"[gfx] Failed to init D3D or DXGI." << std::endl;

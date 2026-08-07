@@ -133,6 +133,21 @@
 ;swscale.lib;boost_regex-vc143-mt-x86-1_86.lib;boost_date_time-vc143-mt-x86-1_86.lib;boost_system-vc143-mt-x86-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib;ws2_32.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
+  <!-- Keep the native host runnable directly from its output directory. The
+       FFmpeg libraries are linked at build time but are runtime DLLs, and the
+       Go/Pion c-shared runtime is loaded by the host at startup. -->
+  <Target Name="DeployStreamingRuntime" AfterTargets="Build" Condition="'$(Platform)'=='x64'">
+    <ItemGroup>
+      <FfmpegRuntimeDll Include="C:\ffmpeg\bin\*.dll" />
+      <WebRtcRuntimeDll Include="$(ProjectDir)gortc_main\webrtc.dll" Condition="Exists('$(ProjectDir)gortc_main\webrtc.dll')" />
+      <VcpkgRuntimeDll Include="D:\vcpkg\installed\x64-windows\bin\opus.dll" Condition="Exists('D:\vcpkg\installed\x64-windows\bin\opus.dll')" />
+      <VcpkgRuntimeDll Include="D:\vcpkg\installed\x64-windows\bin\libssl-3-x64.dll" Condition="Exists('D:\vcpkg\installed\x64-windows\bin\libssl-3-x64.dll')" />
+      <VcpkgRuntimeDll Include="D:\vcpkg\installed\x64-windows\bin\libcrypto-3-x64.dll" Condition="Exists('D:\vcpkg\installed\x64-windows\bin\libcrypto-3-x64.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(FfmpegRuntimeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(WebRtcRuntimeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(VcpkgRuntimeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
   <ItemGroup>
     <ClInclude Include="Host\AdaptiveQualityControl.h" />
     <ClInclude Include="Host\AppInit.h" />
