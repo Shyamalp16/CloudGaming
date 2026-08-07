@@ -67,6 +67,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -164,7 +165,18 @@ func loadDotEnvFile(path string) (bool, error) {
 }
 
 func loadDotEnvIfPresent() {
-	for _, path := range []string{"gortc_main/.env", ".env", "gortc_main/env.local"} {
+	paths := []string{"gortc_main/.env", ".env", "gortc_main/env.local"}
+	if executable, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(executable)
+		// Support launching the host from x64\Debug/x64\Release, where the
+		// repository-relative working directory is not guaranteed.
+		paths = append(paths,
+			filepath.Join(exeDir, "env.local"),
+			filepath.Join(exeDir, "..", "..", "gortc_main", "env.local"),
+			filepath.Join(exeDir, "..", "..", ".env"),
+		)
+	}
+	for _, path := range paths {
 		loaded, err := loadDotEnvFile(path)
 		if err != nil {
 			log.Printf("[Go/Pion] Failed to load %s: %v", path, err)

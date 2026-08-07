@@ -1,6 +1,6 @@
 {
   "host": {
-    "targetProcessName": "vlc.exe",
+    "targetProcessName": "cs2.exe",
     "matchmaker": {
       "hostSecret": "HELLO-MFS",
       "heartbeatIntervalMs": 20000

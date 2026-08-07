@@ -52,22 +52,30 @@ bool LoadConfig(nlohmann::json& outConfig)
             std::wcout << L"[config] Current working directory: " << cwd << std::endl;
         }
 
-        std::string configPath = "config.json";
-        std::ifstream configFile(configPath);
+        std::vector<std::filesystem::path> candidates = {
+            std::filesystem::path("config.json")
+        };
+        std::ifstream configFile;
 
-        // If config.json not found in current directory, try the executable directory
-        if (!configFile.is_open()) {
-            char exePath[MAX_PATH];
-            if (GetModuleFileNameA(NULL, exePath, MAX_PATH)) {
-                std::string exeDir = exePath;
-                size_t lastSlash = exeDir.find_last_of("\\/");
-                if (lastSlash != std::string::npos) {
-                    exeDir = exeDir.substr(0, lastSlash);
-                    configPath = exeDir + "\\config.json";
-                    configFile.open(configPath);
-                    std::wcout << L"[config] Trying config path: " << configPath.c_str() << std::endl;
-                }
+        // Also resolve config relative to the executable. This makes launching
+        // x64\Debug\DisplayCaptureProject.exe or x64\Release\DisplayCaptureProject.exe
+        // from Explorer/Visual Studio behave exactly like launching from the repo root.
+        char exePath[MAX_PATH];
+        if (GetModuleFileNameA(NULL, exePath, MAX_PATH)) {
+            const auto exeDir = std::filesystem::path(exePath).parent_path();
+            candidates.push_back(exeDir / "config.json");
+            candidates.push_back(exeDir / ".." / "config.json");
+            candidates.push_back(exeDir / ".." / ".." / "config.json");
+        }
+
+        std::filesystem::path selectedPath;
+        for (const auto& candidate : candidates) {
+            configFile.open(candidate);
+            if (configFile.is_open()) {
+                selectedPath = std::filesystem::absolute(candidate).lexically_normal();
+                break;
             }
+            configFile.clear();
         }
 
         if (!configFile.is_open()) {
@@ -75,6 +83,8 @@ bool LoadConfig(nlohmann::json& outConfig)
             std::wcerr << L"[config] Make sure config.json exists in the working directory or executable directory" << std::endl;
             return false;
         }
+
+        std::wcout << L"[config] Loaded: " << selectedPath.wstring() << std::endl;
 
         configFile >> outConfig;
         return true;

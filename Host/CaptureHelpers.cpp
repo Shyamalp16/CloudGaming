@@ -197,7 +197,10 @@ static winrt::com_ptr<ID3D11Texture2D> AcquireCopyTextureLocked(
     copyDesc.SampleDesc.Count = 1;
     copyDesc.SampleDesc.Quality = 0;
     copyDesc.Usage = D3D11_USAGE_DEFAULT;
-    copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    // VideoProcessor input views accept DEFAULT textures with no bind flags.
+    // A standalone SHADER_RESOURCE bind is rejected by CreateVideoProcessorInputView
+    // with E_INVALIDARG on the NVIDIA driver.
+    copyDesc.BindFlags = 0;
     copyDesc.CPUAccessFlags = 0;
     copyDesc.MiscFlags = 0;
 

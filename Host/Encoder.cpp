@@ -335,7 +335,9 @@ static void PrimeCommonViews(ID3D11Device* device, int inputWidth, int inputHeig
     texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     texDesc.SampleDesc.Count = 1;
     texDesc.Usage = D3D11_USAGE_DEFAULT;
-    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    // BindFlags=0 is a valid VideoProcessor input surface. A standalone
+    // SHADER_RESOURCE bind is rejected by CreateVideoProcessorInputView.
+    texDesc.BindFlags = 0;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> dummyInputTex;
     if (SUCCEEDED(device->CreateTexture2D(&texDesc, nullptr, dummyInputTex.GetAddressOf()))) {
