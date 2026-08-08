@@ -5,12 +5,15 @@
 #include <chrono>
 #include <mutex>
 #include <string>
+#include <filesystem>
 
 #include <nlohmann/json.hpp>
 
 #include "AudioCapturer.h"
 #include "ConfigUtils.h"
 #include "GraphicsAndCapture.h"
+#include "SessionManager.h"
+#include "StreamProfileManager.h"
 
 namespace Runtime {
 
@@ -55,6 +58,8 @@ public:
     bool Restart();
 
     HostStatus GetStatus() const;
+    nlohmann::json GetHealthSnapshot() const;
+    bool CreateSupportBundle(std::filesystem::path& outputDirectory, std::string& error) const;
     bool IsStopRequested() const noexcept;
 
 private:
@@ -105,6 +110,8 @@ private:
     GraphicsAndCapture::D3DContext d3d_;
     GraphicsAndCapture::CaptureContext capture_;
     AudioCapturer audio_;
+    SessionManager session_;
+    StreamProfileManager streamProfiles_;
 };
 
 void PrintBanner(const std::string& roomId);

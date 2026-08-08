@@ -1,5 +1,6 @@
 const express = require('express');
 const { randomUUID } = require('crypto');
+const { signPairingToken } = require('../sessionTokens');
 const { config } = require('../config');
 const { createClient } = require('redis');
 const { z } = require('zod');
@@ -158,6 +159,7 @@ function formatZodIssues(zodError) {
 }
 
 const authenticateHost = (req, res, next) => {
+	if (!config.hostSecret && config.env !== 'production') return next();
 	const authHeader = req.headers.authorization;
 	if (!authHeader || !authHeader.startsWith('Bearer ')) {
 		return res.status(401).json({
@@ -419,7 +421,12 @@ app.post('/api/match/find', async(req, res) => {
 			if (claimedJson) {
 				const host = JSON.parse(claimedJson);
 				const iceServers = await getIceServers();
-				return res.json({ found: true, roomId: host.roomId, iceServers });
+				const sessionId = randomUUID();
+				const expiresAt = Date.now() + config.pairingTokenTtlSeconds * 1000;
+				const pairingToken = config.pairingTokenSecret
+					? signPairingToken({ roomId: host.roomId, sessionId, expiresAt }, config.pairingTokenSecret)
+					: undefined;
+				return res.json({ found: true, roomId: host.roomId, sessionId, pairingToken, expiresAt, iceServers });
 			}
 			log('info', 'Allocation race detected, retrying host', { requestId: req.id, hostId: currentHostId });
 			pool.splice(pool.indexOf(pick), 1);

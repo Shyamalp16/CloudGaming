@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <vector>
 #include <nlohmann/json.hpp>
-#include "CaptureHelpers.h"
 #include "InputSchema.h"
 #include "KeyInputHandler.h"
 
@@ -124,18 +123,6 @@ void Manager::processInputMessage(const InputTransportLayer::InputMessage& messa
             emergencyReleaseAllKeys(eventData.value("reason", std::string("transport_reset")));
             return;
         }
-        if (eventType == "stream_config") {
-            const int width = eventData.value("width", 0);
-            const int height = eventData.value("height", 0);
-            const int fps = eventData.value("fps", 0);
-            const bool applied = ApplyStreamProfile(width, height, fps);
-            if (!applied) {
-                LOG_WARNING(ErrorUtils::ErrorCategory::INPUT,
-                            "Rejected unsupported stream profile");
-            }
-            return;
-        }
-
         // Process based on message type
         if (message.type == "pion_data") {
             if (!eventType.empty()) {

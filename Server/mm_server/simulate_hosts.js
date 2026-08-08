@@ -2,7 +2,8 @@ const axios = require('axios');
 const crypto = require('crypto');
 
 const BASE_URL = 'http://localhost:3000';
-const HOST_SECRET = 'HELLO-MFS'; // Must match your .env or config
+const HOST_SECRET = process.env.HOST_SECRET;
+if (!HOST_SECRET) throw new Error('Set HOST_SECRET before running this helper');
 const NUM_HOSTS = 10;
 const HEARTBEAT_INTERVAL_MS = 20000; // 20 seconds
 

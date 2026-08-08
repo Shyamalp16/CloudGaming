@@ -2,6 +2,7 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#include "Diagnostics.h"
 
 namespace ErrorUtils {
 
@@ -57,6 +58,7 @@ void logError(ErrorSeverity severity, ErrorCategory category,
               const std::string& message, const std::string& details,
               bool logToStderr) {
     std::string fullMessage = createErrorMessage(severity, category, message, details);
+    Diagnostics::Log(severityToString(severity), categoryToString(category), message, details);
 
     // Always log to cout with appropriate stream
     if (severity == ErrorSeverity::ERROR || severity == ErrorSeverity::FATAL) {

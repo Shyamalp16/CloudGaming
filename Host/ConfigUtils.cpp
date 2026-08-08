@@ -112,7 +112,9 @@ void ApplyVideoSettings(const nlohmann::json& config)
     int brMin = std::clamp(vcfg.value("bitrateMin", 3000000), 500000, 100000000);
     int brMax = std::clamp(vcfg.value("bitrateMax", 12000000), brMin, 100000000);
     int brStart = std::clamp(vcfg.value("bitrateStart", 8000000), brMin, brMax);
-    Encoder::SetBitrateConfig(brStart, brMin, brMax);
+    Encoder::SetBitrateLimits(brMin, brMax);
+    (void)brStart; // Applied by the StreamProfileManager at a frame boundary.
+    (void)cfgFps;
 
     // Bitrate controller: decreaseCooldown 500–1000ms for WAN; 5s was too slow on real loss
     int increaseStep = 1000000;       // +1 Mbps
@@ -131,7 +133,6 @@ void ApplyVideoSettings(const nlohmann::json& config)
                                        decreaseCooldownMs,
                                        cleanSamplesRequired,
                                        increaseIntervalMs);
-    SetCaptureTargetFps(cfgFps);
 
     bool fullRange = vcfg.value("fullRange", true);
     Encoder::SetFullRangeColor(fullRange);
@@ -144,18 +145,6 @@ void ApplyVideoSettings(const nlohmann::json& config)
     if (vcfg.contains("hwFramePoolSize")) {
         int pool = vcfg["hwFramePoolSize"].get<int>();
         Encoder::SetHwFramePoolSize(pool);
-    }
-
-    if (vcfg.contains("encodeWidth") && vcfg.contains("encodeHeight")) {
-        int encW = vcfg["encodeWidth"].get<int>();
-        int encH = vcfg["encodeHeight"].get<int>();
-        if (encW >= 320 && encH >= 180) {
-            // H.264 4:2:0 surfaces require even dimensions.
-            encW &= ~1;
-            encH &= ~1;
-            Encoder::SetEncodeSize(encW, encH);
-            std::wcout << L"[Config] Encode downscale: " << encW << L"x" << encH << std::endl;
-        }
     }
 
     std::string preset = vcfg.value("preset", std::string("p2"));

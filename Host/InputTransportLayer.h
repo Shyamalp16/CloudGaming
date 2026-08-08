@@ -88,6 +88,8 @@ public:
      * @return Reference to current statistics
      */
     TransportStats getStats() const;
+    void authorizeSession(const std::string& sessionId);
+    void clearAuthorizedSession(const std::string& reason);
 
 private:
     // Configuration
@@ -112,6 +114,8 @@ private:
     // Statistics
     mutable std::mutex statsMutex;
     TransportStats stats;
+    mutable std::mutex sessionMutex;
+    std::string authorizedSessionId;
 
     // Private methods
     void pionMessageLoop();
@@ -149,5 +153,7 @@ void stopGlobalTransport();
  * @return Pointer to global instance (nullptr if not initialized)
  */
 Layer* getGlobalTransport();
+void authorizeSession(const std::string& sessionId);
+void clearAuthorizedSession(const std::string& reason);
 
 } // namespace InputTransportLayer

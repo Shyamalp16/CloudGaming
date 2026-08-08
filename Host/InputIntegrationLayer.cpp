@@ -202,4 +202,12 @@ void resetAllInput(const std::string& reason) {
     MouseInputHandler::releaseAllButtonsEmergency();
 }
 
+void authorizeSession(const std::string& sessionId) {
+    InputTransportLayer::authorizeSession(sessionId);
+}
+
+void clearAuthorizedSession(const std::string& reason) {
+    InputTransportLayer::clearAuthorizedSession(reason);
+}
+
 } // namespace InputIntegrationLayer

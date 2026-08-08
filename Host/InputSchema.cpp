@@ -124,17 +124,6 @@ ValidationResult Validate(const std::string& payload) {
             result.value["reason"].get_ref<const std::string&>().size() > 128)) {
             result.error = "Invalid reset reason"; return result;
         }
-    } else if (result.eventType == "stream_config") {
-        const std::unordered_set<std::string> allowed = {kType, "width", "height", "fps", "bitrate", "sessionId"};
-        if (!HasOnly(result.value, allowed, result.error)) return result;
-        for (const char* field : {"width", "height", "fps"}) {
-            if (!result.value.contains(field) || !result.value[field].is_number_integer()) {
-                result.error = std::string("Invalid stream profile field: ") + field; return result;
-            }
-        }
-        if (result.value.contains("bitrate") && !result.value["bitrate"].is_number_integer()) {
-            result.error = "Invalid stream profile bitrate"; return result;
-        }
     } else {
         result.error = "Unknown input event type"; return result;
     }

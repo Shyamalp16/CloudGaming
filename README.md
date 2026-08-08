@@ -16,6 +16,7 @@ Matchmaker (:3000) <----> Redis <----> Signaling server (:3002)
                                       |
                                       v
 Windows host (C++ / Go)
+  HostRuntime -> target/session/profile/audio/input service ownership
   WGC capture -> D3D11 BGRA -> GPU BGRA-to-NV12 -> FFmpeg HW H.264
                                                     |
   WASAPI process loopback -> resample -> Opus       | WebRTC/SRTP
@@ -110,8 +111,14 @@ Windows host (C++ / Go)
 
 ### Connection and server reliability
 
+- The native host has explicit `Stopped`, `Initializing`, `WaitingForTarget`,
+  `Ready`, `Streaming`, `Reconnecting`, `Stopping`, and `Failed` states. One
+  runtime controller owns startup, restart, target reattachment, and reverse-order cleanup.
+- A separate session state machine owns pairing/authorization/connection state.
+  Each match creates an expiring signed session token; stale or replayed session
+  messages are rejected by the browser, server, host signaling, and input queue.
 - Matchmaker HTTP responses are status-checked. Signaling reconnects with
-  exponential backoff capped at 15 seconds and queues ICE candidates until the
+  cancellable exponential backoff capped at 30 seconds plus bounded jitter and queues ICE candidates until the
   remote description exists.
 - WebSocket, peer-connection, track, DataChannel, and statistics callbacks carry
   a connection generation. Late callbacks from a closed session are ignored.
@@ -179,9 +186,10 @@ node mm_server/Matchmaker.js
 
 The default matchmaker endpoint is `http://localhost:3000`.
 
-Before starting the host, make sure `HOST_SECRET` in `Server/.env` exactly
-matches `host.matchmaker.hostSecret` in `config.json`; otherwise host
-registration is rejected.
+For authenticated local/LAN testing, put a random value of at least 32
+characters in `Server/.env` as `HOST_SECRET`, then set the same value in the
+host process as `CLOUDGAMING_HOST_SECRET`. Secrets are never stored in
+`config.json`.
 
 ### 4. Browser client
 
@@ -197,6 +205,7 @@ Open the URL for the selected mode from the table above.
 Build `DisplayCaptureProject.sln` as **Release x64**, then run:
 
 ```powershell
+$env:CLOUDGAMING_HOST_SECRET = '<same value as Server/.env HOST_SECRET>'
 x64\Release\DisplayCaptureProject.exe
 ```
 
@@ -222,7 +231,6 @@ so it can be launched directly from `x64\Release` or `x64\Debug`.
 | Key | Default | Description |
 |---|---|---|
 | `host.targetProcessName` | `vlc.exe` | Process whose window and audio are streamed |
-| `host.matchmaker.hostSecret` | `HELLO-MFS` | Shared host-registration secret; change for deployment |
 | `host.matchmaker.heartbeatIntervalMs` | `20000` | Host registration refresh interval |
 | `host.window.resizeClientArea` | `true` | Resize the target's client area at startup |
 | `host.window.targetWidth` / `targetHeight` | `1920` / `1080` | Requested client-area dimensions |
@@ -232,6 +240,8 @@ so it can be launched directly from `x64\Release` or `x64\Debug`.
 | Key | Default | Description |
 |---|---|---|
 | `fps` | `60` | Target capture and encode frame rate |
+| `defaultProfile` | `1920x1080`, 60 FPS, 8 Mbps | Persistent operator default; valid resolutions are 720p/1080p/1440p |
+| `allow120Fps` | `false` | Explicitly permit negotiated 120 FPS; otherwise only 30/60 are accepted |
 | `bitrateStart` | `8000000` | Initial H.264 bitrate in bits per second |
 | `bitrateMin` / `bitrateMax` | `8000000` / `12000000` | RTCP bitrate-controller limits |
 | `hwFramePoolSize` | `3` | Reusable FFmpeg hardware-frame surfaces |
@@ -263,6 +273,7 @@ so it can be launched directly from `x64\Release` or `x64\Debug`.
 |---|---|---|
 | `processLoopback.enabled` | `true` | Capture audio from the target process |
 | `processLoopback.includeProcessTree` | `true` | Include child-process audio |
+| `processLoopback.fallbackToDeviceLoopback` | `false` | Explicit consent for device-wide audio fallback; never enabled implicitly |
 | `bitrate` | `80000` | Initial Opus bitrate in bits per second |
 | `complexity` / `expectedLossPerc` | `6` / `5` | Opus CPU/quality and expected-loss settings |
 | `enableFec` / `enableDtx` | `true` / `false` | Opus FEC and discontinuous transmission |
@@ -305,12 +316,116 @@ The server reads `Server/.env`. Important defaults are:
 | `HEARTBEAT_INTERVAL_MS` | `30000` | Signaling WebSocket heartbeat interval |
 | `MESSAGE_MAX_BYTES` | `262144` | Maximum signaling message size |
 | `BACKPRESSURE_CLOSE_THRESHOLD_BYTES` | `5242880` | Close clients exceeding this buffered amount |
-| `HOST_SECRET` | `to-change-in-prod` | Expected host-registration secret |
+| `HOST_SECRET` | unset | Expected host-registration secret; required and 32+ characters in production |
+| `PAIRING_TOKEN_SECRET` | unset | HMAC key for short-lived pairing tokens; required and 32+ characters in production |
+| `PAIRING_TOKEN_TTL_SECONDS` | `120` | Pairing token lifetime, 30–600 seconds |
+| `ENABLE_SESSION_AUTH` | false outside production | Require role-bound signed sessions; always enabled in production |
 | `ENABLE_AUTH` | unset/false | Enable JWT validation for client signaling |
 | `REQUIRE_WSS` | unset/false | Reject non-secure WebSocket connections |
 | `ALLOWED_ORIGINS` | unset | Optional comma-separated WebSocket origins |
 | `METERED_DOMAIN` / `METERED_API_KEY` | unset | Optional Metered TURN credential source |
 
-In every environment, the server `HOST_SECRET` must match
-`host.matchmaker.hostSecret`. For deployment, use `wss://`/`https://`
-production endpoints and do not retain the example secret.
+The server `HOST_SECRET` must match the host process environment variable
+`CLOUDGAMING_HOST_SECRET`. For deployment, use unique random values and never
+put them in source-controlled JSON.
+
+## Stream profiles
+
+`StreamProfileManager` is the only native authority for requested and active
+profiles. The browser advertises H.264 receive limits over the authenticated
+signaling session, then requests one of 1280x720, 1920x1080, or 2560x1440 at
+30/60 FPS (120 only when explicitly enabled). Unsupported requests are rejected
+with a reason and the active profile remains unchanged. The capture consumer
+applies accepted changes between frames, refreshes IDR/header state, and keeps
+RTP timing monotonic. Resolution changes rebuild encoder surfaces; bitrate
+changes use the encoder's safe reconfiguration boundary.
+
+## Production deployment
+
+Production intentionally fails closed. Complete every item before changing
+`network-config.json` to `production`:
+
+1. Deploy Redis privately and set `REDIS_URL` on both Node services.
+2. Terminate TLS at the service or trusted proxy. Set the browser endpoints to
+   public `https://` matchmaker and `wss://` signaling URLs.
+3. Set `NODE_ENV=production`, `REQUIRE_WSS=true`, `ENABLE_SESSION_AUTH=true`, a
+   32+ character `HOST_SECRET`, and a different 32+ character
+   `PAIRING_TOKEN_SECRET` on the server.
+4. Configure `ALLOWED_ORIGINS` with the exact deployed browser origin. If JWT
+   client authentication is integrated, pass it separately as `accessToken`;
+   the `token` query parameter is reserved for the rotating pairing credential.
+5. Configure TURN. Metered can be used through `METERED_DOMAIN` and
+   `METERED_API_KEY`, or provide the host with `PION_TURN_URLS`,
+   `PION_TURN_USERNAME`, and `PION_TURN_CREDENTIAL`. The native host refuses to
+   start in production without complete TURN credentials.
+6. On the host, set `CLOUDGAMING_HOST_SECRET` to the server host secret and run
+   the Release x64 binary. Do not pass secrets in URLs or command-line arguments.
+
+Example host environment (use a secret manager in real deployment):
+
+```powershell
+$env:CLOUDGAMING_HOST_SECRET = '<32+ random characters>'
+$env:PION_TURN_URLS = 'turns:turn.example.com:5349?transport=tcp,turn:turn.example.com:3478?transport=udp'
+$env:PION_TURN_USERNAME = '<ephemeral username>'
+$env:PION_TURN_CREDENTIAL = '<ephemeral credential>'
+.\x64\Release\DisplayCaptureProject.exe
+```
+
+## Operations and diagnostics
+
+- Node exposes `/healthz`, `/readyz`, and Prometheus `/metrics`; readiness is
+  false while Redis is unavailable.
+- The host writes redacted structured JSONL logs to
+  `%LOCALAPPDATA%\CloudGamingHost\logs`, rotating at 5 MiB and retaining five
+  files. The directory and files receive a protected DACL for the current user
+  and SYSTEM.
+- Unhandled native crashes write minidumps under
+  `%LOCALAPPDATA%\CloudGamingHost\dumps`.
+- The runtime health snapshot aggregates lifecycle/session/profile state, peer
+  state, audio state/failure reason, input/capture queue depths and drops,
+  encoder state/bitrate, and logging failures every 30 seconds.
+- Generate a sanitized offline support bundle with:
+
+```powershell
+.\x64\Release\DisplayCaptureProject.exe --support-bundle
+```
+
+The command prints the protected output directory under
+`%LOCALAPPDATA%\CloudGamingHost\support`. It includes sanitized configuration,
+health metadata, and the current structured log. Secrets, tokens, passwords,
+credentials, and authorization values are redacted.
+
+## Verification and troubleshooting
+
+Run the focused native safety tests after every host change:
+
+```powershell
+.\x64\Release\DisplayCaptureProject.exe --self-test
+```
+
+Run server and Go checks with:
+
+```powershell
+cd Server
+npm.cmd test -- --runInBand
+npm.cmd run lint
+
+cd ..\gortc_main
+$env:CGO_ENABLED = '1'
+$env:Path = 'C:\msys64\mingw64\bin;' + $env:Path
+go test ./...
+```
+
+Common failures:
+
+- `WaitingForTarget`: verify `host.targetProcessName`, start the process, and
+  ensure it has a visible top-level window.
+- Production startup failure: verify WSS/HTTPS endpoints, all three TURN host
+  variables, and a 32+ character host secret.
+- No audio: inspect the audio failure reason in the health log. Device-wide
+  fallback occurs only when `fallbackToDeviceLoopback` is explicitly true.
+- Pairing rejected: ensure both server secrets are present, clocks are correct,
+  and the browser requested a fresh match instead of replaying an expired token.
+- Stuck input after loss: confirm input reset records appear. Queue overflow,
+  DataChannel close, signaling loss, peer replacement, and shutdown all force a
+  full release before new input is accepted.

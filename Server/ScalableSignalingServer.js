@@ -23,6 +23,7 @@ const {
 const jwt = require('jsonwebtoken');
 const { createRemoteJWKSet, jwtVerify } = require('jose');
 const { atomicJoin, atomicLeave } = require('./redisScripts');
+const { signPairingToken, verifyPairingToken } = require('./sessionTokens');
 
 function log(level, message, context) {
 	const validLevels = ['fatal', 'error', 'warn', 'info', 'debug', 'trace'];
@@ -145,6 +146,19 @@ function safeClientId() {
 	return `client:${Date.now()}:${crypto.randomBytes(8).toString('hex')}`;
 }
 
+function secureEqual(a, b) {
+	if (typeof a !== 'string' || typeof b !== 'string') return false;
+	const left = Buffer.from(a);
+	const right = Buffer.from(b);
+	return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function shouldRoute(senderRole, senderSessionId, target) {
+	if (!config.enableSessionAuth || senderRole === 'peer' || target.role === 'peer') return true;
+	if (senderRole === target.role) return false;
+	return !senderSessionId || !target.sessionId || senderSessionId === target.sessionId;
+}
+
 function handleRedisMessage(message, channel) {
 	try {
 		const roomId = channel.replace(/^room:/, '');
@@ -155,7 +169,7 @@ function handleRedisMessage(message, channel) {
 			log('warn', 'Dropping non-JSON message from Redis', { channel, err: e });
 			return;
 		}
-		const { senderId, data, originServerId } = payload || {};
+		const { senderId, senderRole, sessionId, data, originServerId } = payload || {};
 		if (originServerId && originServerId === serverInstanceId) {
 			return;
 		}
@@ -164,7 +178,8 @@ function handleRedisMessage(message, channel) {
 		const dataStr = JSON.stringify(data);
 		const endFanout = startFanoutTimer();
 		clientsInRoom.forEach(client => {
-			if (client.clientId !== senderId && client.readyState === WebSocket.OPEN) {
+			if (client.clientId !== senderId && client.readyState === WebSocket.OPEN &&
+				shouldRoute(senderRole || 'peer', sessionId, client)) {
 				if (client.bufferedAmount > config.backpressureCloseThresholdBytes) {
 					log('warn', 'Closing client due to excessive backpressure', { clientId: client.clientId, roomId });
 					incBackpressureCloses();
@@ -200,10 +215,35 @@ async function handleNewConnection(ws, request) {
 		}
 		const parameters = new url.URL(request.url, `ws://${request.headers.host}`).searchParams;
 		const roomId = parameters.get('roomId');
+		const role = parameters.get('role') || 'peer';
 		if (!validateRoomId(roomId)) {
 			log('warn', 'Invalid or missing roomId on connection', { roomId });
 			ws.close(1008, 'Invalid roomId');
 			return;
+		}
+		if (!['host', 'player', 'peer'].includes(role) || (config.enableSessionAuth && role === 'peer')) {
+			ws.close(1008, 'Invalid role');
+			return;
+		}
+
+		let authenticatedSessionId;
+		let pairingClaims;
+		if (config.enableSessionAuth) {
+			const authHeader = request.headers['authorization'] || '';
+			const bearer = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7) : '';
+			if (role === 'host') {
+				if (!secureEqual(bearer, config.hostSecret)) {
+					ws.close(1008, 'Unauthorized host');
+					return;
+				}
+			} else {
+				pairingClaims = verifyPairingToken(parameters.get('token'), config.pairingTokenSecret);
+				if (!pairingClaims || pairingClaims.roomId !== roomId) {
+					ws.close(1008, 'Invalid or expired pairing token');
+					return;
+				}
+				authenticatedSessionId = pairingClaims.sessionId;
+			}
 		}
 		const origin = request.headers['origin'];
 		const protocols = request.headers['sec-websocket-protocol'];
@@ -213,7 +253,7 @@ async function handleNewConnection(ws, request) {
 			return;
 		}
 		if (config.allowedOrigins.length > 0) {
-			const allowed = (!origin) || config.allowedOrigins.some((o) => {
+			const allowed = (role === 'host' && !origin) || config.allowedOrigins.some((o) => {
 				if (origin === o) return true;
 				try {
 					const originUrl = new URL(origin);
@@ -242,7 +282,7 @@ async function handleNewConnection(ws, request) {
 		}
 		if (config.enableAuth) {
 			const authHeader = request.headers['authorization'] || '';
-			let token = parameters.get('token');
+			let token = parameters.get(config.enableSessionAuth ? 'accessToken' : 'token');
 			if (!token && authHeader.toLowerCase().startsWith('bearer ')) token = authHeader.slice(7);
 			if (!token) {
 				log('warn', 'Missing JWT');
@@ -283,6 +323,20 @@ async function handleNewConnection(ws, request) {
 			ws.close(1013, 'Rate limited');
 			return;
 		}
+		if (pairingClaims) {
+			try {
+				const ttlMs = Math.max(1, pairingClaims.exp - Date.now());
+				const claimed = await redisClient.set(`pairing-used:${pairingClaims.jti}`, '1', { NX: true, PX: ttlMs });
+				if (claimed !== 'OK') {
+					ws.close(1008, 'Pairing token already used');
+					return;
+				}
+			} catch (e) {
+				log('error', 'Failed to claim pairing credential', { roomId, err: e });
+				ws.close(1011, 'Pairing service unavailable');
+				return;
+			}
+		}
 
 		const roomKey = `room:${roomId}`;
 		const clientId = safeClientId();
@@ -310,6 +364,8 @@ async function handleNewConnection(ws, request) {
 
 		ws.roomId = roomId;
 		ws.clientId = clientId;
+		ws.role = role;
+		ws.sessionId = authenticatedSessionId;
 		ws.isAlive = true;
 		ws._rate = { tokens: config.rateLimitMessagesPer10s, lastRefill: Date.now() };
 
@@ -320,6 +376,12 @@ async function handleNewConnection(ws, request) {
 		setLocalRooms(localRooms.size);
 
 		log('info', 'Client joined room', { clientId, roomId, localCount: localRooms.get(roomId).size });
+		if (pairingClaims && ws.readyState === WebSocket.OPEN) {
+			const nextToken = signPairingToken({ roomId, sessionId: authenticatedSessionId,
+				expiresAt: Date.now() + config.pairingTokenTtlSeconds * 1000 }, config.pairingTokenSecret);
+			ws.send(JSON.stringify({ type: 'control', sessionId: authenticatedSessionId,
+				action: 'session-ready', payload: { pairingToken: nextToken } }));
+		}
 
 		ws.on('pong', () => {
 			ws.isAlive = true;
@@ -408,6 +470,22 @@ async function handleMessage(ws, roomKey, message) {
 			incSchemaRejects();
 			return;
 		}
+		const messageSessionId = validation.data.sessionId;
+		if (config.enableSessionAuth) {
+			if (!messageSessionId) {
+				log('warn', 'Dropping signaling message without sessionId', { clientId: ws.clientId, roomId: ws.roomId });
+				return;
+			}
+			if (ws.role === 'player' && messageSessionId !== ws.sessionId) {
+				log('warn', 'Dropping stale or replayed player message', { clientId: ws.clientId, roomId: ws.roomId });
+				return;
+			}
+			if (ws.role === 'host') {
+				const peers = localRooms.get(ws.roomId);
+				const known = peers && [...peers].some(peer => peer.role === 'player' && peer.sessionId === messageSessionId);
+				if (!known) return;
+			}
+		}
 
 		// IP and room message rate limits
 		const ip = (ws._socket && ws._socket.remoteAddress) || 'unknown';
@@ -432,7 +510,8 @@ async function handleMessage(ws, roomKey, message) {
 			if (peers && peers.size > 0) {
 				const payload = JSON.stringify(validation.data);
 				peers.forEach((peer) => {
-					if (peer !== ws && peer.readyState === WebSocket.OPEN) {
+					if (peer !== ws && peer.readyState === WebSocket.OPEN &&
+						shouldRoute(ws.role, messageSessionId, peer)) {
 						if (peer.bufferedAmount <= config.backpressureCloseThresholdBytes) {
 							try { peer.send(payload); } catch (_) {}
 						}
@@ -443,7 +522,8 @@ async function handleMessage(ws, roomKey, message) {
 
 		try {
 			const ePub = startRedisTimer();
-			await redisClient.publish(roomKey, JSON.stringify({ senderId: ws.clientId, data: validation.data, originServerId: serverInstanceId }));
+			await redisClient.publish(roomKey, JSON.stringify({ senderId: ws.clientId, senderRole: ws.role,
+				sessionId: messageSessionId, data: validation.data, originServerId: serverInstanceId }));
 			ePub();
 			noteRedisSuccess();
 		} catch (e) {
@@ -485,7 +565,8 @@ async function handleDisconnection(ws, roomKey) {
 		await atomicLeave(redisClient, roomKey, clientId, config.roomTtlSeconds);
 		end();
 		noteRedisSuccess();
-		await redisClient.publish(roomKey, JSON.stringify({ senderId: clientId, data: { type: 'peer-disconnected' } }));
+		await redisClient.publish(roomKey, JSON.stringify({ senderId: clientId, senderRole: ws.role,
+			sessionId: ws.sessionId, data: { type: 'peer-disconnected', sessionId: ws.sessionId } }));
 	} catch (e) {
 		log('warn', 'Redis cleanup or notify failed', { roomId, clientId, err: e });
 		noteRedisFailure();

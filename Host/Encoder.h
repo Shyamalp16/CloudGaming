@@ -6,16 +6,29 @@
 #include <string>
 
 namespace Encoder {
+    struct Health {
+        bool initialized = false;
+        int width = 0;
+        int height = 0;
+        int fps = 0;
+        int bitrate = 0;
+        bool bitrateChangePending = false;
+        std::uint64_t hwAcquireFailures = 0;
+        std::uint64_t videoProcessorFailures = 0;
+        std::uint64_t submitFailures = 0;
+    };
     bool InitializeEncoder(int width, int height, int fps);
     void FinalizeEncoder();
 
     void AdjustBitrate(int new_bitrate);
     // True when RTCP requested a bitrate that the active encoder has not yet applied.
     bool HasPendingBitrateChange();
+    Health GetHealth();
     void RequestIDR();
 
     // Configure encoder bitrate defaults (used on InitializeEncoder)
     void SetBitrateConfig(int start_bitrate_bps, int min_bitrate_bps, int max_bitrate_bps);
+    void SetBitrateLimits(int min_bitrate_bps, int max_bitrate_bps);
 
     // Configure hardware frame pool size (ring of input D3D11 frames)
     void SetHwFramePoolSize(int pool_size);

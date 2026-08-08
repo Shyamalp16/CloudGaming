@@ -116,6 +116,19 @@ TransportStats Layer::getStats() const {
     return stats;
 }
 
+void Layer::authorizeSession(const std::string& sessionId) {
+    std::lock_guard<std::mutex> lock(sessionMutex);
+    authorizedSessionId = sessionId;
+}
+
+void Layer::clearAuthorizedSession(const std::string& reason) {
+    {
+        std::lock_guard<std::mutex> lock(sessionMutex);
+        authorizedSessionId.clear();
+    }
+    if (resetHandler) resetHandler(reason);
+}
+
 // Private methods
 void Layer::pionMessageLoop() {
     logTransportEvent("pion_loop_started", "Pion message loop starting");
@@ -224,6 +237,15 @@ void Layer::enqueueMessage(InputMessage&& message) {
         return;
     }
     message.eventType = validation.eventType;
+    if (message.eventType != "input_reset") {
+        const std::string suppliedSession = validation.value.value("sessionId", std::string{});
+        std::lock_guard<std::mutex> sessionLock(sessionMutex);
+        if (authorizedSessionId.empty() || suppliedSession != authorizedSessionId) {
+            std::lock_guard<std::mutex> statsLock(statsMutex);
+            stats.messagesDropped++;
+            return;
+        }
+    }
 
     bool overflowed = false;
     uint64_t dropped = 0;
@@ -311,6 +333,14 @@ void stopGlobalTransport() {
 
 Layer* getGlobalTransport() {
     return globalTransportLayer.get();
+}
+
+void authorizeSession(const std::string& sessionId) {
+    if (globalTransportLayer) globalTransportLayer->authorizeSession(sessionId);
+}
+
+void clearAuthorizedSession(const std::string& reason) {
+    if (globalTransportLayer) globalTransportLayer->clearAuthorizedSession(reason);
 }
 
 } // namespace InputTransportLayer

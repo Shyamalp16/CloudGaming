@@ -1,42 +1,39 @@
 #pragma once
 
-#include <string>
-#include <random>
-#include <sstream>
+#include <Windows.h>
+#include <bcrypt.h>
+#include <array>
 #include <iomanip>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#pragma comment(lib, "bcrypt.lib")
 
-// Generates a simple random alphanumeric string of a given length.
-// This is sufficient for creating a unique enough roomId for this use case.
-inline std::string generateRoomId(int length = 8) {
-    const std::string chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    std::random_device rd;
-    std::mt19937 generator(rd());
-    std::uniform_int_distribution<> distribution(0, static_cast<int>(chars.length() - 1));
-    
-    std::stringstream ss;
-    for (int i = 0; i < length; ++i) {
-        ss << chars[distribution(generator)];
-    }
-    return ss.str();
+inline std::array<unsigned char, 16> generateSecureIdBytes() {
+    std::array<unsigned char, 16> bytes{};
+    const NTSTATUS status = BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
+                                            BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (status < 0) throw std::runtime_error("BCryptGenRandom failed");
+    return bytes;
 }
 
-// Generates a UUID-like host identifier (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
-// This provides a unique identifier for each host instance across sessions.
+inline std::string generateRoomId() {
+    const auto bytes = generateSecureIdBytes();
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (unsigned char value : bytes) out << std::setw(2) << static_cast<unsigned>(value);
+    return out.str();
+}
+
 inline std::string generateHostId() {
-    std::random_device rd;
-    std::mt19937 generator(rd());
-    std::uniform_int_distribution<uint32_t> dist(0, 0xFFFFFFFF);
-    
-    std::stringstream ss;
-    ss << std::hex << std::setfill('0');
-    
-    // UUID format: 8-4-4-4-12
-    ss << std::setw(8) << dist(generator) << "-";
-    ss << std::setw(4) << (dist(generator) & 0xFFFF) << "-";
-    ss << std::setw(4) << ((dist(generator) & 0x0FFF) | 0x4000) << "-";  // Version 4
-    ss << std::setw(4) << ((dist(generator) & 0x3FFF) | 0x8000) << "-";  // Variant
-    ss << std::setw(8) << dist(generator);
-    ss << std::setw(4) << (dist(generator) & 0xFFFF);
-    
-    return ss.str();
+    auto bytes = generateSecureIdBytes();
+    bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0f) | 0x40);
+    bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3f) | 0x80);
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) out << '-';
+        out << std::setw(2) << static_cast<unsigned>(bytes[i]);
+    }
+    return out.str();
 }

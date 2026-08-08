@@ -29,9 +29,12 @@ const schema = z.object({
 	REQUIRE_WSS: z.string().optional(),
 	ALLOWED_ORIGINS: z.string().optional(),
 	SUBPROTOCOL: z.string().optional(),
-	HOST_SECRET: z.string().default('to-change-in-prod'),
+	HOST_SECRET: z.string().min(1).optional(),
 	HOST_SECRET_PREVIOUS: z.string().optional(),
 	ENABLE_AUTH: z.string().optional(),
+	ENABLE_SESSION_AUTH: z.string().optional(),
+	PAIRING_TOKEN_SECRET: z.string().min(1).optional(),
+	PAIRING_TOKEN_TTL_SECONDS: z.preprocess((v) => Number(v), z.number().int().min(30).max(600)).default(120),
 	JWT_ISSUER: z.string().optional(),
 	JWT_AUDIENCE: z.string().optional(),
 	JWT_ALG: z.string().optional(),
@@ -83,6 +86,9 @@ const config = {
 	hostSecret: parsed.HOST_SECRET,
 	hostSecretPrevious: parsed.HOST_SECRET_PREVIOUS,
 	enableAuth: parsed.ENABLE_AUTH === 'true',
+	enableSessionAuth: parsed.ENABLE_SESSION_AUTH === 'true' || parsed.NODE_ENV === 'production',
+	pairingTokenSecret: parsed.PAIRING_TOKEN_SECRET,
+	pairingTokenTtlSeconds: parsed.PAIRING_TOKEN_TTL_SECONDS,
 	jwt: {
 		issuer: parsed.JWT_ISSUER,
 		audience: parsed.JWT_AUDIENCE,
@@ -98,6 +104,14 @@ const config = {
 		expirySeconds:   parsed.TURN_EXPIRY_SECONDS,
 	},
 };
+
+if (config.env === 'production') {
+	const missing = [];
+	if (!config.requireWss) missing.push('REQUIRE_WSS=true');
+	if (!config.hostSecret || config.hostSecret.length < 32) missing.push('HOST_SECRET (at least 32 characters)');
+	if (!config.pairingTokenSecret || config.pairingTokenSecret.length < 32) missing.push('PAIRING_TOKEN_SECRET (at least 32 characters)');
+	if (missing.length) throw new Error(`Production security configuration missing: ${missing.join(', ')}`);
+}
 
 module.exports = { config };
 

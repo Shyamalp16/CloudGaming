@@ -13,6 +13,15 @@
     <ClInclude Include="Host\Runtime.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Host\SessionManager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Host\SelfTests.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Host\StreamProfileManager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="Host\WindowUtils.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -78,6 +87,15 @@
     <ClCompile Include="Host\Runtime.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Host\SessionManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\SelfTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\StreamProfileManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Host\WindowUtils.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -88,6 +106,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Host\D3DHelpers.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Host\Diagnostics.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Host\Encoder.h">
@@ -171,6 +192,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Host\D3DHelpers.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\Diagnostics.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Host\Encoder.cpp">

@@ -581,6 +581,10 @@
             alert('Please enter a Room ID.');
             return;
         }
+        if (networkMode === 'production') {
+          alert('Production sessions must be created through Find Match.');
+          return;
+        }
 
         // Create and arm audio element under user gesture (non-blocking)
         const audioEl = createHiddenAudioElement();
@@ -600,7 +604,7 @@
         document.getElementById('gameContainer').classList.remove('hidden');
 
         currentIceServers = defaultIceServers;
-        connectToSignalingServer(roomId);
+        connectToSignalingServer(roomId, serverUrlBase, crypto.randomUUID(), null);
     });
 
     // Find Match button handler - queries matchmaker for an available host
@@ -658,7 +662,11 @@
                 // The shared network profile is authoritative. In LAN mode the
                 // matchmaker runs on the host machine but cannot infer which LAN
                 // address the browser used to reach it.
-                connectToSignalingServer(data.roomId, serverUrlBase);
+                if (typeof data.sessionId !== 'string') throw new Error('Matchmaker did not return a session ID');
+                if (networkMode === 'production' && typeof data.pairingToken !== 'string') {
+                  throw new Error('Matchmaker did not return a pairing token');
+                }
+                connectToSignalingServer(data.roomId, serverUrlBase, data.sessionId, data.pairingToken || null);
             } else {
                 matchStatus.textContent = data.message || 'No hosts available. Try again later.';
                 matchStatus.className = 'match-status error';
@@ -758,6 +766,8 @@
     let debugVisible = false;
     let perfVisible = true;
     let currentRoomId = null;
+    let currentSessionId = null;
+    let currentPairingToken = null;
     let signalingGeneration = 0;
     let reconnectAttempt = 0;
     let reconnectTimer = null;
@@ -1102,8 +1112,11 @@
       mousePosition.y = mouseData.y;
     }, 8);
 
-    function connectToSignalingServer(roomId, signalingUrl = serverUrlBase) {
+    function connectToSignalingServer(roomId, signalingUrl = serverUrlBase,
+                                      sessionId = currentSessionId, pairingToken = currentPairingToken) {
       currentRoomId = roomId;
+      currentSessionId = sessionId;
+      currentPairingToken = pairingToken;
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -1113,8 +1126,9 @@
         ws.close(1000, 'Replaced by a new signaling connection');
       }
       const generation = ++signalingGeneration;
-      const serverUrl = `${signalingUrl}?roomId=${encodeURIComponent(roomId)}`;
-      log(`Attempting to connect to WebSocket server at ${serverUrl}...`);
+      const tokenQuery = pairingToken ? `&token=${encodeURIComponent(pairingToken)}` : '';
+      const serverUrl = `${signalingUrl}?roomId=${encodeURIComponent(roomId)}&role=player${tokenQuery}`;
+      log('Attempting to connect to signaling service...');
       updateConnectionStatus('connecting', 'Connecting...');
       try {
         ws = new WebSocket(serverUrl);
@@ -1140,7 +1154,13 @@
         if (generation !== signalingGeneration || socket !== ws) return;
         try {
           const msg = JSON.parse(event.data);
-          if (msg.sdp && msg.sdp.length > 100) {
+          if (msg.type !== 'peer-disconnected' && msg.type !== 'control' && msg.sessionId !== currentSessionId) {
+            log('Rejected stale or unknown-session signaling message', 'warn');
+            return;
+          }
+          if (msg.type === 'control' && msg.action === 'session-ready') {
+            log('Received session-ready control message.');
+          } else if (msg.sdp && msg.sdp.length > 100) {
             log(`Received from server: { type: ${msg.type}, sdp: '...', candidate: ${JSON.stringify(msg.candidate)} }`);
           } else {
             log('Received from server: ' + JSON.stringify(msg, null, 2));
@@ -1183,6 +1203,13 @@
               // Server sends schema errors or other control messages
               if (msg.action === 'schema-error') {
                 log('Server reported schema-error for last message. Check signaling payload shapes.', 'warn');
+              } else if (msg.action === 'session-ready' && typeof msg.payload?.pairingToken === 'string') {
+                currentPairingToken = msg.payload.pairingToken;
+                log('Session credential rotated for reconnect safety.');
+              } else if (msg.action === 'profile-accepted') {
+                log('Host accepted stream profile: ' + JSON.stringify(msg.payload));
+              } else if (msg.action === 'profile-rejected') {
+                log(`Host rejected stream profile: ${msg.payload?.reason || 'unknown reason'}`, 'warn');
               } else {
                 log('Control message: ' + JSON.stringify(msg));
               }
@@ -1228,7 +1255,7 @@
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
           if (generation !== signalingGeneration || socket !== ws) return;
-          connectToSignalingServer(currentRoomId, signalingUrl);
+          connectToSignalingServer(currentRoomId, signalingUrl, currentSessionId, currentPairingToken);
         }, delay);
       };
     }
@@ -1417,6 +1444,7 @@
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
               type: 'candidate',
+              sessionId: currentSessionId,
               candidate: event.candidate.candidate,
               sdpMid: event.candidate.sdpMid,
               sdpMLineIndex: event.candidate.sdpMLineIndex
@@ -1579,7 +1607,7 @@
     function transmitKeyEvent(keyData) {
       if (!dataChannel || dataChannel.readyState !== 'open') return false;
       try {
-        dataChannel.send(JSON.stringify({ ...keyData, sequenceId: ++keySequenceId }));
+        dataChannel.send(JSON.stringify({ ...keyData, sessionId: currentSessionId, sequenceId: ++keySequenceId }));
         return true;
       } catch (error) {
         pendingKeyEvents.set(keyData.code, keyData);
@@ -1635,7 +1663,7 @@
       const channel = mouseData.type === 'mousemove' ? mouseChannel : dataChannel;
       if (!channel || channel.readyState !== 'open') return false;
       try {
-        channel.send(JSON.stringify(mouseData));
+        channel.send(JSON.stringify({ ...mouseData, sessionId: currentSessionId }));
         return true;
       } catch (_) {
         if (mouseData.type === 'mousemove') pendingMouseMove = mouseData;
@@ -1822,8 +1850,10 @@
             log("Sending offer to signaling server...");
             socket.send(JSON.stringify({
               type: 'offer',
+              sessionId: currentSessionId,
               sdp: offer.sdp
             }));
+            sendPreferredStreamProfile(socket);
           } else {
             log("WebSocket not open, cannot send offer.", 'warn');
           }
@@ -1833,6 +1863,32 @@
       } catch (err) {
         log('Error creating/setting/sending offer: ' + err.message, 'error');
       }
+    }
+
+    function sendPreferredStreamProfile(socket) {
+      const codecs = RTCRtpReceiver.getCapabilities?.('video')?.codecs || [];
+      const h264 = codecs.some(codec => String(codec.mimeType).toLowerCase() === 'video/h264');
+      if (!h264 || !socket || socket.readyState !== WebSocket.OPEN) {
+        log('H.264 receive capability is unavailable; keeping the operator default profile.', 'warn');
+        return;
+      }
+      const pixelWidth = Math.max(screen.width, screen.height) * (window.devicePixelRatio || 1);
+      const pixelHeight = Math.min(screen.width, screen.height) * (window.devicePixelRatio || 1);
+      let width = 1280, height = 720, bitrate = 5000000;
+      if (pixelWidth >= 2560 && pixelHeight >= 1440) {
+        width = 2560; height = 1440; bitrate = 12000000;
+      } else if (pixelWidth >= 1920 && pixelHeight >= 1080) {
+        width = 1920; height = 1080; bitrate = 8000000;
+      }
+      socket.send(JSON.stringify({
+        type: 'stream-profile', sessionId: currentSessionId,
+        width, height, fps: 60, bitrate,
+        capabilities: {
+          maxWidth: 2560, maxHeight: 1440, maxFps: 60,
+          maxBitrate: 12000000, h264: true
+        }
+      }));
+      log(`Requested stream profile ${width}x${height}@60`);
     }
 
     if (hiddenVideoElement) {

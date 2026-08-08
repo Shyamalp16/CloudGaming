@@ -8,9 +8,12 @@
 
 #include "AppInit.h"
 #include "CaptureHelpers.h"
+#include "Diagnostics.h"
+#include "Encoder.h"
 #include "IdGenerator.h"
 #include "InputConfig.h"
 #include "InputIntegrationLayer.h"
+#include "InputTransportLayer.h"
 #include "KeyInputHandler.h"
 #include "MatchmakerClient.h"
 #include "MouseInputHandler.h"
@@ -23,6 +26,29 @@ namespace Runtime {
 
 namespace {
 constexpr wchar_t kInstanceMutexName[] = L"Local\\CloudGaming.DisplayCaptureProject.Host";
+
+std::string ReadEnvironment(const char* name) {
+    const DWORD length = GetEnvironmentVariableA(name, nullptr, 0);
+    if (length == 0) return {};
+    std::string value(length, '\0');
+    GetEnvironmentVariableA(name, value.data(), length);
+    if (!value.empty() && value.back() == '\0') value.pop_back();
+    return value;
+}
+
+bool HasValidIceUrlList(const std::string& urls) {
+    if (urls.empty()) return false;
+    size_t start = 0;
+    while (start < urls.size()) {
+        const size_t end = urls.find(',', start);
+        const auto entry = urls.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (entry.rfind("turn:", 0) != 0 && entry.rfind("turns:", 0) != 0 &&
+            entry.rfind("stun:", 0) != 0 && entry.rfind("stuns:", 0) != 0) return false;
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return true;
+}
 }
 
 const char* ToString(HostState state) noexcept {
@@ -52,6 +78,8 @@ void HostRuntime::SetState(HostState state, std::string failureReason) {
     }
     state_ = state;
     failureReason_ = std::move(failureReason);
+    Diagnostics::Log(state == HostState::Failed ? "ERROR" : "INFO", "LIFECYCLE",
+                     std::string("host state ") + ToString(state_), failureReason_);
 }
 
 bool HostRuntime::AcquireInstanceLock() {
@@ -104,15 +132,53 @@ bool HostRuntime::LoadAndValidateConfiguration() {
     }
 
     if (!ConfigUtils::LoadNetworkEndpoints(endpoints_)) return false;
+    const bool production = endpoints_.mode == "production";
+    if (production) {
+        if (endpoints_.signalingUrl.rfind("wss://", 0) != 0 ||
+            (!endpoints_.matchmakerUrl.empty() && endpoints_.matchmakerUrl.rfind("https://", 0) != 0)) {
+            SetState(HostState::Failed, "Production requires WSS signaling and HTTPS matchmaker endpoints");
+            return false;
+        }
+    } else if (endpoints_.mode != "local" && endpoints_.mode != "lan") {
+        SetState(HostState::Failed, "Unknown network mode");
+        return false;
+    }
+
+    hostSecret_ = ReadEnvironment("CLOUDGAMING_HOST_SECRET");
+    if (production && hostSecret_.size() < 32) {
+        SetState(HostState::Failed, "CLOUDGAMING_HOST_SECRET is required in production");
+        return false;
+    }
+    SetEnvironmentVariableA("PION_NETWORK_MODE", endpoints_.mode.c_str());
+    std::string turnUrls = ReadEnvironment("PION_TURN_URLS");
+    if (turnUrls.empty()) turnUrls = ReadEnvironment("PION_TURN_URL");
+    if (!turnUrls.empty() && (!HasValidIceUrlList(turnUrls) ||
+        ReadEnvironment("PION_TURN_USERNAME").empty() || ReadEnvironment("PION_TURN_CREDENTIAL").empty())) {
+        SetState(HostState::Failed, "TURN URLs and credentials are incomplete or invalid");
+        return false;
+    }
+    if (production && turnUrls.empty()) {
+        SetState(HostState::Failed, "Production requires configured TURN credentials");
+        return false;
+    }
     matchmakerEnabled_ = !endpoints_.matchmakerUrl.empty();
     if (config_.contains("host") && config_["host"].contains("matchmaker")) {
         const auto& matchmaker = config_["host"]["matchmaker"];
-        hostSecret_ = matchmaker.value("hostSecret", std::string{});
         heartbeatIntervalMs_ = std::max(1000, matchmaker.value("heartbeatIntervalMs", heartbeatIntervalMs_));
     }
 
     const int configuredFps = config_.contains("host") && config_["host"].contains("video")
         ? config_["host"]["video"].value("fps", 60) : 60;
+    if (!(config_.contains("host") && config_["host"].contains("video"))) {
+        SetState(HostState::Failed, "Missing host.video configuration");
+        return false;
+    }
+    std::string profileError;
+    if (!streamProfiles_.Configure(config_["host"]["video"], profileError)) {
+        SetState(HostState::Failed, "Invalid default stream profile: " + profileError);
+        return false;
+    }
+    SetStreamProfileManager(&streamProfiles_);
     ConfigUtils::ApplyVideoSettings(config_);
     ConfigUtils::ApplyCaptureSettings(config_, configuredFps);
     ConfigUtils::ApplyAudioSettings(config_);
@@ -134,7 +200,7 @@ bool HostRuntime::StartCoreServices() {
     }
     inputIntegrationStarted_ = true;
 
-    initWebsocket(roomId_, endpoints_.signalingUrl);
+    initWebsocket(roomId_, endpoints_.signalingUrl, hostSecret_, endpoints_.mode, &session_, &streamProfiles_);
     websocketStarted_ = true;
 
     if (matchmakerEnabled_) {
@@ -280,8 +346,13 @@ void HostRuntime::Tick() {
 }
 
 void HostRuntime::Run() {
+    auto nextHealthLog = std::chrono::steady_clock::now();
     while (!IsStopRequested()) {
         Tick();
+        if (std::chrono::steady_clock::now() >= nextHealthLog) {
+            Diagnostics::Log("INFO", "HEALTH", "periodic health snapshot", GetHealthSnapshot().dump());
+            nextHealthLog = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     Stop();
@@ -353,6 +424,60 @@ HostStatus HostRuntime::GetStatus() const {
     status.targetWindow = targetWindow_;
     status.peerConnectionState = lastPeerState_;
     return status;
+}
+
+nlohmann::json HostRuntime::GetHealthSnapshot() const {
+    const auto runtime = GetStatus();
+    const auto session = session_.GetStatus();
+    const auto profile = streamProfiles_.GetStatus();
+    const auto audio = audio_.GetStatus();
+    const auto capture = GetCaptureHealth();
+    const auto encoder = Encoder::GetHealth();
+    const auto logging = Diagnostics::GetStatus();
+    nlohmann::json input{{"running", InputIntegrationLayer::isRunning()}};
+    if (auto* transport = InputTransportLayer::getGlobalTransport()) {
+        const auto stats = transport->getStats();
+        input.update({{"received", stats.messagesReceived}, {"processed", stats.messagesProcessed},
+                      {"dropped", stats.messagesDropped}, {"queueDepth", stats.queueSize},
+                      {"maxQueueDepth", stats.maxQueueSize}});
+    }
+    auto profileJson = [](const std::optional<StreamProfileManager::Profile>& value) -> nlohmann::json {
+        if (!value) return nullptr;
+        return {{"width", value->width}, {"height", value->height},
+                {"fps", value->fps}, {"bitrate", value->bitrate}};
+    };
+    return {
+        {"runtime", {{"state", ToString(runtime.state)}, {"failureReason", runtime.failureReason},
+                     {"hostId", runtime.hostId}, {"roomId", runtime.roomId},
+                     {"targetProcess", runtime.targetProcessName}, {"targetPid", runtime.targetPid},
+                     {"peerConnectionState", runtime.peerConnectionState}, {"networkMode", endpoints_.mode}}},
+        {"session", {{"state", SessionManager::StateName(session.state)},
+                     {"sessionId", session.sessionId}, {"failureReason", session.failureReason}}},
+        {"profile", {{"state", StreamProfileManager::StateName(profile.state)},
+                     {"requested", profileJson(profile.requested)}, {"active", profileJson(profile.active)},
+                     {"rejectionReason", profile.rejectionReason}, {"generation", profile.generation}}},
+        {"input", input},
+        {"audio", {{"state", AudioCapturer::StateName(audio.state)}, {"failureReason", audio.failureReason},
+                   {"processId", audio.processId}, {"captureQueueDepth", audio.captureQueueDepth},
+                   {"encodedQueueDepth", audio.encodedQueueDepth}, {"captureDrops", audio.droppedCaptureFrames},
+                   {"encodedDrops", audio.droppedEncodedPackets}, {"bitrate", audio.bitrate}}},
+        {"capture", {{"running", capture.running}, {"targetFps", capture.targetFps},
+                     {"framesArrived", capture.framesArrived}, {"queueDepth", capture.queueDepth},
+                     {"overwriteDrops", capture.overwriteDrops}, {"backpressureSkips", capture.backpressureSkips},
+                     {"outOfOrderFrames", capture.outOfOrderFrames}}},
+        {"encoder", {{"initialized", encoder.initialized}, {"width", encoder.width},
+                     {"height", encoder.height}, {"fps", encoder.fps}, {"bitrate", encoder.bitrate},
+                     {"bitrateChangePending", encoder.bitrateChangePending},
+                     {"hwAcquireFailures", encoder.hwAcquireFailures},
+                     {"videoProcessorFailures", encoder.videoProcessorFailures},
+                     {"submitFailures", encoder.submitFailures}}},
+        {"logging", {{"initialized", logging.initialized}, {"activeLog", logging.activeLog.string()},
+                     {"recordsWritten", logging.recordsWritten}, {"writeFailures", logging.writeFailures}}}
+    };
+}
+
+bool HostRuntime::CreateSupportBundle(std::filesystem::path& outputDirectory, std::string& error) const {
+    return Diagnostics::CreateSupportBundle(GetHealthSnapshot(), config_, outputDirectory, error);
 }
 
 void PrintBanner(const std::string& roomId) {

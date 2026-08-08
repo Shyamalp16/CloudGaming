@@ -25,6 +25,27 @@ describe('validation module', () => {
         expect(res.data).toEqual({ type: 'control', action: 'ping', payload: { x: 1 } });
     });
 
+    it('accepts a strict negotiated stream profile', () => {
+        const res = validateSignalingMessage({
+            type: 'stream-profile',
+            sessionId: '01234567-89ab-4cde-8fab-0123456789ab',
+            width: 1920, height: 1080, fps: 60, bitrate: 8000000,
+            capabilities: { maxWidth: 2560, maxHeight: 1440, maxFps: 60, maxBitrate: 12000000, h264: true },
+        });
+        expect(res.ok).toBe(true);
+    });
+
+    it('rejects unknown profile fields and missing capabilities', () => {
+        expect(validateSignalingMessage({
+            type: 'stream-profile', width: 1920, height: 1080, fps: 60, bitrate: 8000000,
+        }).ok).toBe(false);
+        expect(validateSignalingMessage({
+            type: 'stream-profile', width: 1920, height: 1080, fps: 60, bitrate: 8000000,
+            capabilities: { maxWidth: 2560, maxHeight: 1440, maxFps: 60, maxBitrate: 12000000, h264: true },
+            surprise: true,
+        }).ok).toBe(false);
+    });
+
     it('rejects missing fields', () => {
         const res = validateSignalingMessage({ type: 'offer' });
         expect(res.ok).toBe(false);

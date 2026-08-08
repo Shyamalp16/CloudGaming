@@ -193,6 +193,9 @@ static std::atomic<bool> g_forceIdrRequested{false};
 static std::atomic<uint64_t> g_hwAcquireFailures{0};
 static std::atomic<uint64_t> g_videoProcessorFailures{0};
 static std::atomic<uint64_t> g_encodeSubmitFailures{0};
+static std::atomic<int> g_activeWidth{0};
+static std::atomic<int> g_activeHeight{0};
+static std::atomic<int> g_activeFps{0};
 
 static void LogEncoderFailure(const char* stage, HRESULT hr = S_OK, int slot = -1) {
     static std::mutex logMutex;
@@ -792,6 +795,11 @@ namespace Encoder {
         g_currentBitrate.store(g_startBitrateBps, std::memory_order_release);
         g_bitrateGeneration.fetch_add(1, std::memory_order_acq_rel);
     }
+    void SetBitrateLimits(int min_bps, int max_bps) {
+        if (min_bps > 0) g_minBitrateBps = min_bps;
+        if (max_bps >= g_minBitrateBps) g_maxBitrateBps = max_bps;
+        g_currentBitrate.store(std::clamp(g_currentBitrate.load(), g_minBitrateBps, g_maxBitrateBps));
+    }
 
     void ConfigureBitrateController(int min_bps,
                                     int max_bps,
@@ -1152,6 +1160,9 @@ namespace Encoder {
         if (g_bitrateGeneration.load(std::memory_order_acquire) == bitrateGeneration) {
             g_appliedBitrateGeneration.store(bitrateGeneration, std::memory_order_release);
         }
+        g_activeWidth.store(encodeW, std::memory_order_release);
+        g_activeHeight.store(encodeH, std::memory_order_release);
+        g_activeFps.store(fps, std::memory_order_release);
         return true;
     }
 
@@ -1167,6 +1178,9 @@ namespace Encoder {
                 avcodec_free_context(&codecCtx);
                 codecCtx = nullptr;
             }
+            g_activeWidth.store(0, std::memory_order_release);
+            g_activeHeight.store(0, std::memory_order_release);
+            g_activeFps.store(0, std::memory_order_release);
             if (packet) { av_packet_free(&packet); packet = nullptr; }
             // Free hw frame ring
             for (AVFrame* f : g_hwFrames) { if (f) av_frame_free(&f); }
@@ -1202,6 +1216,20 @@ namespace Encoder {
     bool HasPendingBitrateChange() {
         return g_bitrateGeneration.load(std::memory_order_acquire) !=
                g_appliedBitrateGeneration.load(std::memory_order_acquire);
+    }
+
+    Health GetHealth() {
+        Health health;
+        health.width = g_activeWidth.load(std::memory_order_acquire);
+        health.height = g_activeHeight.load(std::memory_order_acquire);
+        health.fps = g_activeFps.load(std::memory_order_acquire);
+        health.initialized = health.width > 0 && health.height > 0;
+        health.bitrate = g_currentBitrate.load(std::memory_order_acquire);
+        health.bitrateChangePending = HasPendingBitrateChange();
+        health.hwAcquireFailures = g_hwAcquireFailures.load(std::memory_order_relaxed);
+        health.videoProcessorFailures = g_videoProcessorFailures.load(std::memory_order_relaxed);
+        health.submitFailures = g_encodeSubmitFailures.load(std::memory_order_relaxed);
+        return health;
     }
 
 }

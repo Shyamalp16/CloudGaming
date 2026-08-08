@@ -49,5 +49,7 @@ bool isRunning();
  */
 std::string getStatistics();
 void resetAllInput(const std::string& reason);
+void authorizeSession(const std::string& sessionId);
+void clearAuthorizedSession(const std::string& reason);
 
 } // namespace InputIntegrationLayer

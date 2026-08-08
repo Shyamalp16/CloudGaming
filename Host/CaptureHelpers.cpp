@@ -18,8 +18,10 @@
 #include <winrt/base.h>
 #include "Encoder.h"
 #include "AdaptiveQualityControl.h"
+#include "StreamProfileManager.h"
 #include <avrt.h>
 #include <deque>
+#include <optional>
 #pragma comment(lib, "Avrt.lib")
 
 // Constants to replace magic numbers
@@ -73,28 +75,24 @@ static std::atomic<uint64_t> g_fallbackTimeFrames{ 0 }; // frames using audio re
 static std::atomic<uint64_t> g_outOfOrder{ 0 }; // frames observed out of order
 
 static std::atomic<int> g_targetFps{kDefaultTargetFps};
-static std::atomic<uint64_t> g_streamConfigGeneration{0};
+static StreamProfileManager* g_streamProfileManager = nullptr;
 void SetCaptureTargetFps(int fps) {
-    if (fps > 0 && g_targetFps.exchange(fps) != fps) {
-        g_streamConfigGeneration.fetch_add(1, std::memory_order_release);
-    }
+    if (fps > 0) g_targetFps.store(fps, std::memory_order_release);
 }
 
-bool ApplyStreamProfile(int width, int height, int fps) {
-    const bool validResolution =
-        (width == 1280 && height == 720) ||
-        (width == 1920 && height == 1080) ||
-        (width == 2560 && height == 1440);
-    const bool validFps = fps == 30 || fps == 60 || fps == 90 || fps == 120;
-    if (!validResolution || !validFps) return false;
+void SetStreamProfileManager(StreamProfileManager* manager) { g_streamProfileManager = manager; }
 
-    Encoder::SetEncodeSize(width, height);
-    g_targetFps.store(fps, std::memory_order_release);
-    SetMinUpdateInterval100ns(10000000LL / fps);
-    g_streamConfigGeneration.fetch_add(1, std::memory_order_release);
-    std::wcout << L"[StreamConfig] Queued live profile " << width << L"x" << height
-               << L" @ " << fps << L" fps" << std::endl;
-    return true;
+CaptureHealth GetCaptureHealth() {
+    CaptureHealth health;
+    health.running = isCapturing.load(std::memory_order_acquire);
+    health.targetFps = g_targetFps.load(std::memory_order_relaxed);
+    health.framesArrived = g_wgcFramesArrived.load(std::memory_order_relaxed);
+    health.overwriteDrops = g_overwriteDrops.load(std::memory_order_relaxed);
+    health.backpressureSkips = g_backpressureSkips.load(std::memory_order_relaxed);
+    health.outOfOrderFrames = g_outOfOrder.load(std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_queueMutex);
+    health.queueDepth = g_frameQueue.size();
+    return health;
 }
 
 void SetMaxQueuedFrames(int maxDepth) {
@@ -485,7 +483,7 @@ void StartCapture() {
         auto lastLog = std::chrono::steady_clock::now();
         int submitCount = 0;
         int64_t lastPacedFrameUs = 0;
-        uint64_t appliedConfigGeneration = g_streamConfigGeneration.load(std::memory_order_acquire);
+        std::optional<StreamProfileManager::Profile> profileAwaitingApply;
         uint64_t lastOverwriteDrops = 0;
         uint64_t lastBpSkips = 0;
         uint64_t lastOutOfOrder = 0;
@@ -512,6 +510,26 @@ void StartCapture() {
                 }
                 job = std::move(g_frameQueue.front());
                 g_frameQueue.pop_front();
+            }
+
+            if (g_streamProfileManager) {
+                if (auto requested = g_streamProfileManager->TakePending()) {
+                    const auto current = g_streamProfileManager->GetStatus().active;
+                    const bool resolutionChanged = !current || current->width != requested->width ||
+                        current->height != requested->height;
+                    const bool bitrateChanged = !current || current->bitrate != requested->bitrate;
+                    SetCaptureTargetFps(requested->fps);
+                    SetMinUpdateInterval100ns(10000000LL / requested->fps);
+                    Encoder::SetEncodeSize(requested->width, requested->height);
+                    if (bitrateChanged) Encoder::AdjustBitrate(requested->bitrate);
+                    profileAwaitingApply = *requested;
+
+                    if (!resolutionChanged && !Encoder::HasPendingBitrateChange()) {
+                        g_streamProfileManager->MarkApplied(*requested);
+                        Encoder::RequestIDR();
+                        profileAwaitingApply.reset();
+                    }
+                }
             }
 
             if (SteadyNowUs() - job.enqueueSteadyUs > 100000) {
@@ -560,9 +578,8 @@ void StartCapture() {
             job.texture->GetDesc(&desc);
             int encW = static_cast<int>(desc.Width & ~1U);
             int encH = static_cast<int>(desc.Height & ~1U);
-            const uint64_t requestedConfigGeneration = g_streamConfigGeneration.load(std::memory_order_acquire);
             const bool encoderNeedsInit = lastInitW != encW || lastInitH != encH ||
-                appliedConfigGeneration != requestedConfigGeneration;
+                profileAwaitingApply.has_value();
             const bool bitrateNeedsReconfigure = !encoderNeedsInit && Encoder::HasPendingBitrateChange();
             if (encoderNeedsInit || bitrateNeedsReconfigure) {
                 const auto now = std::chrono::steady_clock::now();
@@ -576,13 +593,21 @@ void StartCapture() {
                 }
                 if (lastInitW != 0 && lastInitH != 0) Encoder::FinalizeEncoder();
                 if (!Encoder::InitializeEncoder(encW, encH, g_targetFps.load())) {
+                    if (profileAwaitingApply && g_streamProfileManager) {
+                        g_streamProfileManager->MarkRejected(*profileAwaitingApply, "encoder reconfiguration failed");
+                        profileAwaitingApply.reset();
+                    }
                     RecycleFrameTexture(job);
                     continue;
                 }
                 lastInitW = encW;
                 lastInitH = encH;
-                appliedConfigGeneration = requestedConfigGeneration;
                 lastPacedFrameUs = 0;
+                if (profileAwaitingApply && g_streamProfileManager) {
+                    g_streamProfileManager->MarkApplied(*profileAwaitingApply);
+                    Encoder::RequestIDR();
+                    profileAwaitingApply.reset();
+                }
             }
 
             auto qualityDecision = AdaptiveQualityControl::checkFrameDropping();

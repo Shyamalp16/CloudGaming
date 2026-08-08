@@ -1,7 +1,8 @@
 const axios = require('axios');
 
 const BASE_URL = 'http://localhost:3000';
-const HOST_SECRET = 'HELLO-MFS';
+const HOST_SECRET = process.env.HOST_SECRET;
+if (!HOST_SECRET) throw new Error('Set HOST_SECRET before running this helper');
 
 async function testMatchmaker() {
     console.log('--- Starting Matchmaker Test ---');

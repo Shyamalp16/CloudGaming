@@ -2,7 +2,6 @@
   "host": {
     "targetProcessName": "cs2.exe",
     "matchmaker": {
-      "hostSecret": "HELLO-MFS",
       "heartbeatIntervalMs": 20000
     },
     "window": {
@@ -17,6 +16,13 @@
     },
     "video": {
         "fps": 60,
+        "allow120Fps": false,
+        "defaultProfile": {
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "bitrate": 8000000
+        },
         "bitrateStart": 8000000,
         "bitrateMin": 3000000,
         "bitrateMax": 12000000,

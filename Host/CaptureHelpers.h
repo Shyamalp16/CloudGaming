@@ -4,8 +4,19 @@
 #include "D3DHelpers.h"
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#include <cstdint>
 
+class StreamProfileManager;
 
+struct CaptureHealth {
+    bool running = false;
+    int targetFps = 0;
+    std::uint64_t framesArrived = 0;
+    std::uint64_t overwriteDrops = 0;
+    std::uint64_t backpressureSkips = 0;
+    std::uint64_t outOfOrderFrames = 0;
+    std::size_t queueDepth = 0;
+};
 
 winrt::com_ptr<ID3D11Texture2D> GetTextureFromSurface(winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface surface);
 
@@ -40,9 +51,9 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
 // Configure capture/encoder target FPS used when initializing the encoder
 void SetCaptureTargetFps(int fps);
 
-// Applies a validated live encode profile. The capture worker reinitializes the
-// hardware encoder on its own thread at the next frame boundary.
-bool ApplyStreamProfile(int width, int height, int fps);
+// Connects the runtime-owned profile authority to the single capture consumer.
+void SetStreamProfileManager(StreamProfileManager* manager);
+CaptureHealth GetCaptureHealth();
 
 // Configure maximum queued frames for capture backpressure
 void SetMaxQueuedFrames(int maxDepth);

@@ -517,6 +517,8 @@ UINT MapVKToScanCodeWithLayout(WORD vkCode, HKL hkl) {
 						std::string jsCode = j[InputSchema::kCode].get<std::string>();
 						std::string jsType = j[InputSchema::kType].get<std::string>();
 						bool isClientKeyDown = (jsType == "keydown");
+						WORD vkCode = MapJavaScriptCodeToVK(jsCode);
+						if (vkCode == 0) continue;
 
 						// Check if this key should be blocked (never injected)
 						if (shouldBlockKey(jsCode)) {
@@ -527,17 +529,33 @@ UINT MapVKToScanCodeWithLayout(WORD vkCode, HKL hkl) {
 							}
 							continue; // Skip processing this key entirely
 						}
+						if (isClientKeyDown) {
+							bool dangerousCombination = false;
+							{
+								std::lock_guard<std::mutex> lock(clientKeysMutex);
+								const bool altDown = clientReportedKeysDown.count(VK_LMENU) || clientReportedKeysDown.count(VK_RMENU);
+								const bool controlDown = clientReportedKeysDown.count(VK_LCONTROL) || clientReportedKeysDown.count(VK_RCONTROL);
+								const bool tabDown = clientReportedKeysDown.count(VK_TAB) != 0;
+								const bool escapeDown = clientReportedKeysDown.count(VK_ESCAPE) != 0;
+								const bool f4Down = clientReportedKeysDown.count(VK_F4) != 0;
+								const bool currentAlt = vkCode == VK_LMENU || vkCode == VK_RMENU;
+								const bool currentControl = vkCode == VK_LCONTROL || vkCode == VK_RCONTROL;
+								dangerousCombination =
+									(vkCode == VK_TAB && altDown) || (currentAlt && tabDown) ||
+									(vkCode == VK_ESCAPE && controlDown) || (currentControl && escapeDown) ||
+									(vkCode == VK_F4 && altDown) || (currentAlt && f4Down);
+							}
+							if (dangerousCombination) {
+								LOG_WARN("Blocked dangerous operating-system key combination involving '" + jsCode + "'");
+								continue;
+							}
+						}
 
 						LOG_DEBUG("Parsed - Code: " + jsCode + ", Type: " + jsType);
 						// Conditional logging - only log if detailed logging is enabled
 						if (InputConfig::globalInputConfig.enablePerEventLogging) {
 							std::cout << "[KeyInput] " << (isClientKeyDown ? "DOWN" : "UP  ")
 								<< " code=" << jsCode << std::endl;
-						}
-
-						WORD vkCode = MapJavaScriptCodeToVK(jsCode);
-						if (vkCode == 0) {
-							continue;
 						}
 
 						// Collect action parameters inside minimal lock
