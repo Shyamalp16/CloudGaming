@@ -181,8 +181,7 @@ AudioCapturer::AudioCapturer() :
     m_consecutiveErrorCount(0),
     m_deviceReinitCount(0),
     m_targetProcessId(0),
-    m_hnsRequestedDuration(0),
-    m_pwfxOriginal(nullptr)
+    m_hnsRequestedDuration(0)
 {
     // Initialize Opus encoder with optimized settings for low-latency gaming
     m_opusEncoder = std::make_unique<OpusEncoderWrapper>();
@@ -228,10 +227,17 @@ AudioCapturer::~AudioCapturer()
 
 bool AudioCapturer::StartCapture(DWORD processId, const std::string& processName)
 {
+    if (!s_audioConfig.enabled) {
+        SetState(State::Disabled);
+        return true;
+    }
     if (!m_stopCapture.load() || m_captureThread.joinable()) {
         std::wcerr << L"[AudioCapturer] Capture is already running" << std::endl;
         return false;
     }
+
+    SetState(State::Initializing);
+    m_lastSignalTime = std::chrono::steady_clock::now();
 
     m_stopCapture = false;
     
@@ -311,6 +317,7 @@ bool AudioCapturer::StartCapture(DWORD processId, const std::string& processName
         m_stopCapture = true;
         AudioCapturer* expected = this;
         s_activeInstance.compare_exchange_strong(expected, nullptr);
+        SetState(State::Failed, "Invalid Opus configuration or encoder initialization failure");
         return false;
     }
 
@@ -367,8 +374,10 @@ bool AudioCapturer::StartCapture(DWORD processId, const std::string& processName
         StopQueueProcessor();
         AudioCapturer* expected = this;
         s_activeInstance.compare_exchange_strong(expected, nullptr);
+        SetState(State::Failed, reported ? "WASAPI process-loopback initialization failed" : "WASAPI initialization timed out");
         return false;
     }
+    SetState(State::Running);
     return true;
 }
 
@@ -419,6 +428,62 @@ void AudioCapturer::StopCapture()
 
     // Stop WAV recording if active
     StopWAVRecording();
+    SetState(State::Disabled);
+}
+
+const char* AudioCapturer::StateName(State state) noexcept {
+    switch (state) {
+    case State::Disabled: return "Disabled";
+    case State::Initializing: return "Initializing";
+    case State::Running: return "Running";
+    case State::Silent: return "Silent";
+    case State::Failed: return "Failed";
+    case State::Restarting: return "Restarting";
+    }
+    return "Unknown";
+}
+
+void AudioCapturer::SetState(State state, std::string failureReason) {
+    const State previous = m_state.exchange(state);
+    {
+        std::lock_guard<std::mutex> lock(m_statusMutex);
+        m_failureReason = std::move(failureReason);
+    }
+    if (previous != state) {
+        std::cout << "[audio] " << StateName(previous) << " -> " << StateName(state) << std::endl;
+    }
+}
+
+void AudioCapturer::UpdateSilenceState(bool hasSignal) {
+    const auto now = std::chrono::steady_clock::now();
+    if (hasSignal) {
+        m_lastSignalTime = now;
+        if (m_state.load() == State::Silent) SetState(State::Running);
+    } else if (m_state.load() == State::Running && now - m_lastSignalTime >= std::chrono::seconds(2)) {
+        SetState(State::Silent);
+    }
+}
+
+AudioCapturer::Status AudioCapturer::GetStatus() const {
+    Status status;
+    status.state = m_state.load();
+    status.processId = m_targetProcessId;
+    status.droppedEncodedPackets = m_droppedEncodedPackets.load();
+    status.droppedCaptureFrames = m_droppedCaptureFrames.load();
+    status.bitrate = s_currentAudioBitrate.load();
+    {
+        std::lock_guard<std::mutex> lock(m_statusMutex);
+        status.failureReason = m_failureReason;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        status.encodedQueueDepth = m_audioQueue.size();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_ringBufferMutex);
+        status.captureQueueDepth = m_ringBufferCount;
+    }
+    return status;
 }
 
 // ============================================================================
@@ -793,23 +858,7 @@ void AudioCapturer::QueueProcessorThread()
         });
 
         if (m_stopQueueProcessor) {
-            // Process any remaining packets before shutdown
-            while (!m_audioQueue.empty()) {
-                AudioPacket packet = std::move(m_audioQueue.front());
-                m_audioQueue.pop();
-
-                lock.unlock();
-
-                // Send remaining packets during shutdown (don't block shutdown)
-                int result = sendAudioPacket(packet.data.data(),
-                                           static_cast<int>(packet.data.size()),
-                                           packet.timestampUs);
-                if (result != 0) {
-                    std::wcerr << L"[AudioQueue] Failed to send final audio packet during shutdown. Error: " << result << std::endl;
-                }
-
-                lock.lock();
-            }
+            while (!m_audioQueue.empty()) m_audioQueue.pop();
             break;
         }
 
@@ -1134,7 +1183,7 @@ bool AudioCapturer::CheckForParameterUpdates() {
     bool updated = false;
 
     // Apply bitrate update
-    if (update.bitrate > 0 && update.bitrate != s_currentAudioBitrate.load()) {
+    if (update.bitrate >= 6000 && update.bitrate <= 1020000) {
         if (m_opusEncoder) {
             int result = opus_encoder_ctl(reinterpret_cast<OpusEncoder*>(m_opusEncoder->GetEncoder()),
                                           OPUS_SET_BITRATE(update.bitrate));
@@ -1178,8 +1227,6 @@ bool AudioCapturer::CheckForParameterUpdates() {
             } else {
                 std::wcerr << L"[AudioEncoder] Failed to update expected loss, error: " << result << std::endl;
             }
-        } else {
-            std::wcout << L"[AudioEncoder] Updated expected loss to " << update.expectedLossPerc << L"% (encoder not ready)" << std::endl;
         }
     }
 
@@ -1216,6 +1263,7 @@ bool AudioCapturer::QueueAudioPacket(const uint8_t* buffer, size_t size, int64_t
     // retaining latency or dropping the newest audio.
     if (m_audioQueue.size() >= MAX_QUEUE_SIZE) {
         m_audioQueue.pop();
+        m_droppedEncodedPackets.fetch_add(1, std::memory_order_relaxed);
         if (s_enableBufferMonitoring) {
             std::wcerr << L"[AudioQueue] Replaced stale encoded packet" << std::endl;
         }
@@ -1712,8 +1760,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
     AUDIO_LOG_INFO(L"[AudioCapturer] Target Process ID: " << targetProcessId);
 
-    if (s_audioConfig.processLoopback.enabled && !processLoopbackSucceeded &&
-        !s_audioConfig.processLoopback.fallbackToDeviceLoopback)
+    if (!processLoopbackSucceeded && !s_audioConfig.processLoopback.fallbackToDeviceLoopback)
     {
         std::wcerr << L"[AudioCapturer] Process audio capture failed and device-loopback fallback is disabled." << std::endl;
         std::wcerr << L"[AudioCapturer] Refusing to capture unrelated system audio. Reason: "
@@ -1781,6 +1828,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         {
             std::wcerr << L"[AudioCapturer] Failed to get session enumerator for device " << i << L": " << _com_error(hr).ErrorMessage() << std::endl;
             pSessionManager->Release();
+            pSessionManager = nullptr;
             pDevice->Release();
             continue;
         }
@@ -1791,7 +1839,9 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
         {
             std::wcerr << L"[AudioCapturer] Failed to get session count for device " << i << L": " << _com_error(hr).ErrorMessage() << std::endl;
             pSessionEnumerator->Release();
+            pSessionEnumerator = nullptr;
             pSessionManager->Release();
+            pSessionManager = nullptr;
             pDevice->Release();
             continue;
         }
@@ -1812,6 +1862,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             {
                 std::wcerr << L"[AudioCapturer] Failed to query IAudioSessionControl2 for session " << j << L": " << _com_error(hr).ErrorMessage() << std::endl;
                 pSessionControl->Release();
+                pSessionControl = nullptr;
                 continue;
             }
 
@@ -1821,7 +1872,9 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             {
                 std::wcerr << L"[AudioCapturer] Failed to get process ID for session " << j << L": " << _com_error(hr).ErrorMessage() << std::endl;
                 pSessionControl2->Release();
+                pSessionControl2 = nullptr;
                 pSessionControl->Release();
+                pSessionControl = nullptr;
                 continue;
             }
 
@@ -1831,10 +1884,10 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             {
                 std::wcout << L"[AudioCapturer] Found matching session for target process ID: " << targetProcessId << std::endl;
                 // Found the session for the target process
-                m_pDevice = pDevice; // ComPtr takes ownership (AddRef)
-                if (pDevice) { pDevice->Release(); pDevice = NULL; }
-                m_pSessionControl2 = pSessionControl2; // ComPtr takes ownership (AddRef)
-                if (pSessionControl2) { pSessionControl2->Release(); pSessionControl2 = NULL; }
+                m_pDevice.Attach(pDevice);
+                pDevice = nullptr;
+                m_pSessionControl2.Attach(pSessionControl2);
+                pSessionControl2 = nullptr;
                 
                 // Fallback to device loopback
                 std::wstring capturePath = L"FALLBACK_DEVICE_LOOPBACK";
@@ -1853,6 +1906,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 std::wcout << L"[AudioCapturer] Capture path selected: " << capturePath << std::endl;
 
                 hr = m_pAudioClient->GetMixFormat(&pwfx);
+                if (SUCCEEDED(hr)) pwfxAllocated = pwfx;
                 if (FAILED(hr))
                 {
                     std::wcerr << L"[AudioCapturer] Unable to get mix format for target process: " << _com_error(hr).ErrorMessage() << std::endl;
@@ -2034,7 +2088,9 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                 break; 
             }
             pSessionControl2->Release();
+            pSessionControl2 = nullptr;
             pSessionControl->Release();
+            pSessionControl = nullptr;
         }
         if (m_pAudioClient) break; // If client found, break outer loop too
 
@@ -2062,7 +2118,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             IMMDevice* dev = nullptr;
             hr = m_pEnumerator->GetDevice(s_audioConfig.deviceId.c_str(), &dev);
             if (SUCCEEDED(hr) && dev) {
-                m_pDevice = dev;
+                m_pDevice.Attach(dev);
                 std::wcout << L"[AudioCapturer] Using configured deviceId: " << s_audioConfig.deviceId << std::endl;
             } else {
                 std::wcerr << L"[AudioCapturer] deviceId override failed: " << _com_error(hr).ErrorMessage() << std::endl;
@@ -2122,17 +2178,17 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
                 // Get device friendly name for logging
                 IPropertyStore* pProps = NULL;
-                LPWSTR deviceName = NULL;
+                std::wstring deviceName;
                 if (SUCCEEDED(pDev->OpenPropertyStore(STGM_READ, &pProps)) && pProps) {
                     PROPVARIANT varName;
                     PropVariantInit(&varName);
                     if (SUCCEEDED(pProps->GetValue(PKEY_Device_FriendlyName, &varName))) {
-                        deviceName = varName.pwszVal;
+                        if (varName.pwszVal) deviceName = varName.pwszVal;
                     }
                     PropVariantClear(&varName);
                     pProps->Release();
                 }
-                std::wcout << L"[AudioCapturer]   Device " << i << L": " << (deviceName ? deviceName : L"Unknown") << std::endl;
+                std::wcout << L"[AudioCapturer]   Device " << i << L": " << (deviceName.empty() ? L"Unknown" : deviceName) << std::endl;
 
                 IAudioSessionManager2* pMgr = NULL;
                 hr = pDev->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, NULL, (void**)&pMgr);
@@ -2194,9 +2250,9 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                                         }
 
                                                         if (isTargetProcess) {
-                                                            m_pDevice = pDev; // take ownership
+                                                            m_pDevice.Attach(pDev);
                                                             std::wcout << L"[AudioCapturer] 🎯 FOUND TARGET PROCESS SESSION! Selected endpoint hosting PID=" << pid << L" (" << processName << L")" << std::endl;
-                                                            std::wcout << L"[AudioCapturer] Device: " << (deviceName ? deviceName : L"Unknown") << std::endl;
+                                                            std::wcout << L"[AudioCapturer] Device: " << (deviceName.empty() ? L"Unknown" : deviceName) << std::endl;
                                                             pCtrl2->Release();
                                                             pCtrl->Release();
                                                             pEnum->Release();
@@ -2218,6 +2274,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             sessionCollection->Release();
         }
         pCollection->Release();
+        pCollection = nullptr;
 
         // Log if we didn't find target process on any device
         if (!m_pDevice && m_targetProcessId != 0) {
@@ -2453,9 +2510,9 @@ DeviceSelected:
 
 AfterDeviceSelection:
     // Release local COM objects that are no longer needed
-    if (pSessionEnumerator) pSessionEnumerator->Release();
-    if (pSessionManager) pSessionManager->Release();
-    if (pCollection) pCollection->Release();
+    if (pSessionEnumerator) { pSessionEnumerator->Release(); pSessionEnumerator = nullptr; }
+    if (pSessionManager) { pSessionManager->Release(); pSessionManager = nullptr; }
+    if (pCollection) { pCollection->Release(); pCollection = nullptr; }
     // pDevice is released when m_pDevice is released, or if not found, it's released in the loop.
     // pSessionControl and pSessionControl2 are released in the loop or assigned to member variable.
 
@@ -2722,6 +2779,7 @@ AfterDeviceSelection:
                 m_floatBuffer.resize(totalSamples);
             }
 
+            bool blockHasSignal = false;
             // Convert PCM to float directly in the persistent buffer
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
                 // Silent frame - fill with zeros
@@ -2736,15 +2794,15 @@ AfterDeviceSelection:
                 }
 
                 // Check if the converted data has any non-zero values
-                bool hasAudioData = false;
                 for (size_t i = 0; i < totalSamples && i < 100; ++i) { // Check first 100 samples
                     if (std::abs(m_floatBuffer[i]) > 0.0001f) { // Threshold for silence
-                        hasAudioData = true;
+                        blockHasSignal = true;
                         break;
                     }
                 }
-                AUDIO_LOG_DEBUG(L"[AudioCapturer] Audio data check: " << (hasAudioData ? L"Has signal" : L"Silent/near-silent"));
+                AUDIO_LOG_DEBUG(L"[AudioCapturer] Audio data check: " << (blockHasSignal ? L"Has signal" : L"Silent/near-silent"));
             }
+            UpdateSilenceState(blockHasSignal);
 
             // Resample to 48kHz if source rate differs (ensure buffer capacity; never skip)
             if (pwfx->nSamplesPerSec != 48000) {
@@ -2971,6 +3029,13 @@ AfterDeviceSelection:
 
 Exit:
     NotifyCaptureStartup(false);
+    if (!m_stopCapture.load()) {
+        std::string reason = "WASAPI capture stopped unexpectedly";
+        if (!processLoopbackFallbackReason.empty()) {
+            reason.assign(processLoopbackFallbackReason.begin(), processLoopbackFallbackReason.end());
+        }
+        SetState(State::Failed, std::move(reason));
+    }
     std::wcout << L"[AudioCapturer] Audio capture stopped." << std::endl;
 
     // Clean up event handles
@@ -3371,12 +3436,14 @@ bool AudioCapturer::ShouldRetryError(HRESULT hr, int retryCount)
 
 bool AudioCapturer::ReinitializeAudioClient()
 {
+    SetState(State::Restarting);
     std::wcout << L"[AudioCapturer] Attempting to reinitialize audio client (attempt " << m_deviceReinitCount + 1 << L")" << std::endl;
 
     // Limit the number of reinitialization attempts
     const int MAX_REINIT_ATTEMPTS = 3;
     if (m_deviceReinitCount >= MAX_REINIT_ATTEMPTS) {
         std::wcerr << L"[AudioCapturer] Maximum reinitialization attempts reached, giving up" << std::endl;
+        SetState(State::Failed, "Maximum WASAPI restart attempts reached");
         return false;
     }
 
@@ -3473,8 +3540,8 @@ bool AudioCapturer::ReinitializeAudioClient()
                                     if (SUCCEEDED(hr) && currentProcessId == m_targetProcessId) {
                                         // Found our target session
                                         std::wcout << L"[AudioCapturer] Rediscovered target process session on device " << i << std::endl;
-                                        m_pDevice = pDevice; // ComPtr takes ownership
-                                        m_pSessionControl2 = pSessionControl2; // ComPtr takes ownership
+                                        m_pDevice.Attach(pDevice);
+                                        m_pSessionControl2.Attach(pSessionControl2);
                                         foundSession = true;
                                     } else {
                                         pSessionControl2->Release();
@@ -3558,6 +3625,7 @@ bool AudioCapturer::ReinitializeAudioClient()
 
     // Reset error counters on successful reinitialization
     m_consecutiveErrorCount = 0;
+    SetState(State::Running);
 
     std::wcout << L"[AudioCapturer] Successfully reinitialized audio client" << std::endl;
     return true;
@@ -3764,6 +3832,7 @@ bool AudioCapturer::PushFrameToRingBuffer(const std::vector<float>& frame, int64
     if (m_ringBufferCount >= RING_BUFFER_SIZE) {
         m_ringBufferReadIndex = (m_ringBufferReadIndex + 1) % RING_BUFFER_SIZE;
         --m_ringBufferCount;
+        m_droppedCaptureFrames.fetch_add(1, std::memory_order_relaxed);
     }
 
     // Copy frame data directly into preallocated ring buffer slot
@@ -3837,6 +3906,7 @@ int64_t AudioCapturer::GetSharedReferenceTimeUs() {
 // ============================================================================
 
 void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*jitter*/) {
+    if (s_activeInstance.load() == nullptr) return;
     auto now = std::chrono::steady_clock::now();
     auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastAudioChange).count();
 
@@ -3889,7 +3959,6 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
             int effectiveMin = (std::max)(s_minAudioBitrate, opusMin);
             int newBitrate = (std::max)(effectiveMin, target);
 
-            s_currentAudioBitrate.store(newBitrate);
             s_lastAudioChange = now;
 
             // Update FEC based on loss (higher loss = more FEC) and ensure FEC is enabled
@@ -3922,7 +3991,6 @@ void AudioCapturer::OnRtcpFeedback(double packetLoss, double /*rtt*/, double /*j
         int newBitrate = std::clamp(target, effectiveMin, effectiveMax);
 
         if (newBitrate > current) {
-            s_currentAudioBitrate.store(newBitrate);
             s_lastAudioChange = now;
 
             // Reduce FEC as loss decreases
@@ -4016,10 +4084,12 @@ void AudioCapturer::UpdateOpusParameters(int bitrate, int expectedLossPerc, int 
     // Get the active AudioCapturer instance
     AudioCapturer* activeInstance = s_activeInstance.load();
 
-    if (!activeInstance) {
-        std::wcerr << L"[AudioAdapt] No active AudioCapturer instance found for parameter update" << std::endl;
-        return;
-    }
+    if (!activeInstance) return;
+
+    if (bitrate != 0 && (bitrate < 6000 || bitrate > 1020000)) return;
+    if (expectedLossPerc < -1 || expectedLossPerc > 100) return;
+    if (complexity < -1 || complexity > 10) return;
+    if (fecEnabled < -1 || fecEnabled > 1) return;
 
     // Queue parameter update to the encoder thread
     activeInstance->QueueParameterUpdate(bitrate, expectedLossPerc, complexity < 0 ? -1 : complexity, fecEnabled);
@@ -4036,6 +4106,7 @@ void AudioCapturer::UpdateOpusParameters(int bitrate, int expectedLossPerc, int 
 void AudioCapturer::SetAudioConfig(const nlohmann::json& config)
 {
     try {
+        s_audioConfig.enabled = config.value("enabled", true);
         // Read bitrate (64-96 kbps recommended for stereo gaming)
         if (config.contains("bitrate")) {
             int bitrate = config["bitrate"].get<int>();

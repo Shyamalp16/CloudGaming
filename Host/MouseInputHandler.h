@@ -16,6 +16,7 @@ namespace MouseInputHandler {
     void initializeMouseChannel();
     void cleanup();
     void enqueueMessage(const std::string& message);
+    void releaseAllButtonsEmergency();
 
 }
 

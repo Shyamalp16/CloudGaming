@@ -48,5 +48,6 @@ bool isRunning();
  * @return Formatted statistics string
  */
 std::string getStatistics();
+void resetAllInput(const std::string& reason);
 
 } // namespace InputIntegrationLayer

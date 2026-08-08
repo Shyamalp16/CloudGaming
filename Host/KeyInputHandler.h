@@ -29,6 +29,7 @@ namespace KeyInputHandler {
 
     // Key mapping functions for testing and external access
     WORD MapJavaScriptCodeToVK(const std::string& jsCode);
+    bool IsSupportedKeyCode(const std::string& jsCode);
     WORD MapJavaScriptCodeToScanCode(const std::string& jsCode);
     bool IsExtendedKey(WORD vkCode);
     bool IsExtendedKeyCanonical(WORD virtualKeyCode, const std::string& jsCode);

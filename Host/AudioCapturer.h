@@ -66,11 +66,25 @@ struct WAVHeader {
 class AudioCapturer
 {
 public:
+    enum class State { Disabled, Initializing, Running, Silent, Failed, Restarting };
+    struct Status {
+        State state = State::Disabled;
+        std::string failureReason;
+        DWORD processId = 0;
+        size_t encodedQueueDepth = 0;
+        size_t captureQueueDepth = 0;
+        uint64_t droppedEncodedPackets = 0;
+        uint64_t droppedCaptureFrames = 0;
+        int bitrate = 0;
+    };
+
+    static const char* StateName(State state) noexcept;
     AudioCapturer();
     ~AudioCapturer();
 
     bool StartCapture(DWORD processId, const std::string& processName = "");
     void StopCapture();
+    Status GetStatus() const;
 
     // Static method to configure audio settings from config.json
     static void SetAudioConfig(const nlohmann::json& config);
@@ -90,6 +104,8 @@ public:
     static int64_t GetSharedReferenceTimeUs();
 
 private:
+    void SetState(State state, std::string failureReason = {});
+    void UpdateSilenceState(bool hasSignal);
     void CaptureThread(DWORD processId);
     bool ConvertPCMToFloatInPlace(const BYTE* pcmData, UINT32 numFrames, void* format, float* outputBuffer, size_t outputBufferSize);
     void ProcessAudioFrame(const float* samples, size_t sampleCount, int64_t timestampUs);
@@ -215,6 +231,7 @@ private:
         int application = 2049;        // OPUS_APPLICATION_AUDIO
         int frameSizeMs = 20;          // Frame size in milliseconds
         int channels = 2;              // Number of audio channels
+        bool enabled = true;
         bool useThreadAffinity = false;     // Use thread affinity for encoder
         DWORD encoderThreadAffinityMask = 0; // CPU affinity mask (0 = no affinity)
 
@@ -303,10 +320,11 @@ private:
     // Minimal queue for audio packets (effectively zero/one to let WebRTC handle congestion)
     static constexpr size_t MAX_QUEUE_SIZE = 1;
     std::queue<AudioPacket> m_audioQueue;
-    std::mutex m_queueMutex;
+    mutable std::mutex m_queueMutex;
     std::condition_variable m_queueCondition;
     std::thread m_queueProcessorThread;
     std::atomic<bool> m_stopQueueProcessor;
+    std::atomic<uint64_t> m_droppedEncodedPackets{0};
 
     // Dedicated encoder thread fed by the bounded ring below.
     std::thread m_encoderThread;
@@ -391,7 +409,6 @@ private:
     int m_deviceReinitCount = 0;
     DWORD m_targetProcessId = 0;
     REFERENCE_TIME m_hnsRequestedDuration = 0;
-    WAVEFORMATEX* m_pwfxOriginal = nullptr;
     std::string m_targetProcessName; // Store target process name for diagnostics
 
     // Enhanced error handling and monitoring
@@ -429,6 +446,12 @@ private:
     size_t m_ringBufferWriteIndex = 0;
     size_t m_ringBufferReadIndex = 0;
     size_t m_ringBufferCount = 0;
+    std::atomic<uint64_t> m_droppedCaptureFrames{0};
+
+    std::atomic<State> m_state{State::Disabled};
+    mutable std::mutex m_statusMutex;
+    std::string m_failureReason;
+    std::chrono::steady_clock::time_point m_lastSignalTime{};
 
     // Direct frame processing (eliminates accumulation buffer)
     std::vector<float> m_currentFrameBuffer; // Working buffer for current frame

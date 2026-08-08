@@ -61,6 +61,20 @@ namespace MouseInputHandler {
 	void simulateMouseMove(int x, int y);
 	void simulateMouseButton(const std::string& type, int button);
 
+	void releaseAllButtonsEmergency() {
+		std::vector<int> buttons;
+		int x = 0;
+		int y = 0;
+		{
+			std::lock_guard<std::mutex> lock(mouseStateMutex);
+			buttons.assign(clientReportedMouseButtonsDown.begin(), clientReportedMouseButtonsDown.end());
+			clientReportedMouseButtonsDown.clear();
+			x = lastKnownCursorX;
+			y = lastKnownCursorY;
+		}
+		for (int button : buttons) simulateWindowsMouseEvent("mouseup", x, y, button);
+	}
+
 	// Helper function to clamp coordinates to virtual desktop bounds
 	void clampToVirtualDesktop(int& x, int& y, bool& wasClamped, bool logSignificantChanges = true) {
 		int virtualScreenX = GetSystemMetrics(SM_XVIRTUALSCREEN);

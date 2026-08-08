@@ -1374,19 +1374,17 @@ func enqueueMessage(msg string) {
 			Type string `json:"type"`
 		}
 		_ = json.Unmarshal([]byte(msg), &event)
-		if event.Type != "keyup" && event.Type != "mouseup" && event.Type != "input_reset" {
-			return
-		}
-
-		// A saturated reliable/ordered key channel means releases may already be
-		// trapped behind stale presses. Reset the pending stream and force the host
-		// to release every tracked key before applying the newest release.
+		// Any overflow invalidates transition state. Always enqueue a reset; only a
+		// release is safe to preserve after it.
 		for i := messageQueueHead; i < len(messageQueue); i++ {
 			messageQueue[i] = ""
 		}
 		messageQueue = nil
 		messageQueueHead = 0
 		messageQueue = append(messageQueue, `{"type":"input_reset","reason":"keyboard_queue_overflow"}`)
+		if event.Type != "keyup" && event.Type != "mouseup" && event.Type != "input_reset" {
+			return
+		}
 	}
 	messageQueue = append(messageQueue, msg)
 	msgEnqueueCount++
@@ -1406,23 +1404,32 @@ func enqueueMouseEvent(msg string) {
 		mouseQueueHead = 0
 	}
 	const maxMouseMessages = 256
-	if len(mouseQueue)-mouseQueueHead >= maxMouseMessages {
-		var event struct {
+	var event struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal([]byte(msg), &event)
+	if event.Type == "mousemove" && len(mouseQueue)-mouseQueueHead > 0 {
+		last := len(mouseQueue) - 1
+		var previous struct {
 			Type string `json:"type"`
 		}
-		_ = json.Unmarshal([]byte(msg), &event)
-		if event.Type != "mouseup" && event.Type != "input_reset" {
+		_ = json.Unmarshal([]byte(mouseQueue[last]), &previous)
+		if previous.Type == "mousemove" {
+			mouseQueue[last] = msg
 			return
 		}
-
-		// Button releases must never sit behind a saturated stream of stale
-		// movement events.  Reset tracked state, then apply the release.
+	}
+	if len(mouseQueue)-mouseQueueHead >= maxMouseMessages {
+		// Reset on every overflow. Preserve only transitions that release state.
 		for i := mouseQueueHead; i < len(mouseQueue); i++ {
 			mouseQueue[i] = ""
 		}
 		mouseQueue = nil
 		mouseQueueHead = 0
 		mouseQueue = append(mouseQueue, `{"type":"input_reset","reason":"mouse_queue_overflow"}`)
+		if event.Type != "mouseup" && event.Type != "input_reset" {
+			return
+		}
 	}
 	mouseQueue = append(mouseQueue, msg)
 	mouseEnqueueCount++
@@ -1762,6 +1769,7 @@ func createPeerConnectionGo() C.int {
 					mouseChannel = nil
 				}
 				pcMutex.Unlock()
+				enqueueMouseEvent(`{"type":"input_reset","reason":"mouse_channel_closed"}`)
 			})
 
 			dc.OnError(func(err error) {
@@ -1771,6 +1779,7 @@ func createPeerConnectionGo() C.int {
 					idStr,
 					err,
 				)
+				enqueueMouseEvent(`{"type":"input_reset","reason":"mouse_channel_error"}`)
 			})
 			log.Printf(
 				"[Go/Pion] OnDataChannel: All handlers attached for mouse DC '%s'.\n",
@@ -1924,6 +1933,10 @@ func createPeerConnectionGo() C.int {
 		if state == webrtc.PeerConnectionStateConnected {
 			log.Printf("[Go/Pion] PeerConnection connected - flushing buffered audio packets")
 			flushAudioConnectionBuffer()
+		} else if state == webrtc.PeerConnectionStateFailed ||
+			state == webrtc.PeerConnectionStateDisconnected ||
+			state == webrtc.PeerConnectionStateClosed {
+			enqueueMessage(`{"type":"input_reset","reason":"peer_connection_unavailable"}`)
 		}
 	})
 

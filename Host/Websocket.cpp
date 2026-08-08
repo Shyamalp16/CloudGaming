@@ -17,9 +17,9 @@ using ws_message_ptr = plain_client::message_ptr;
 using json = nlohmann::json;
 
 // Plain (ws://) client — used for local dev
-plain_client wsClient;
+static std::unique_ptr<plain_client> wsClient;
 // TLS (wss://) client — used for Railway / production
-tls_client   g_tlsClient;
+static std::unique_ptr<tls_client> g_tlsClient;
 // Set to true when the signaling URL starts with wss://
 static bool  g_useTls = false;
 static std::atomic<bool> g_websocketStopRequested{false};
@@ -35,7 +35,7 @@ on_tls_init(websocketpp::connection_hdl hdl) {
         boost::asio::ssl::context::tls_client);
     ctx->set_default_verify_paths();
     ctx->set_verify_mode(boost::asio::ssl::verify_peer);
-    auto connection = g_tlsClient.get_con_from_hdl(hdl);
+    auto connection = g_tlsClient->get_con_from_hdl(hdl);
     ctx->set_verify_callback(boost::asio::ssl::host_name_verification(
         connection->get_uri()->get_host()));
     return ctx;
@@ -86,36 +86,6 @@ void on_close(websocketpp::connection_hdl hdl);
 void on_message(websocketpp::connection_hdl hdl, ws_message_ptr msg);
 void send_message(const json& message);
 
-static void startInputPollers() {
-    bool expected = false;
-    if (!g_input_poll_running.compare_exchange_strong(expected, true)) return;
-
-    if (InputIntegrationLayer::isRunning()) {
-        std::cout << "[WebSocket] Input integration layer already running" << std::endl;
-        return;
-    }
-    if (!InputIntegrationLayer::initialize() || !InputIntegrationLayer::start()) {
-        std::cerr << "[WebSocket] Failed to start input integration layer" << std::endl;
-        g_input_poll_running.store(false);
-        return;
-    }
-    std::cout << "[WebSocket] Input integration layer started successfully" << std::endl;
-}
-
-static void stopInputPollers() {
-    g_input_poll_running.store(false);
-
-    // Stop the new input integration layer if it was started
-    if (InputIntegrationLayer::isRunning()) {
-        InputIntegrationLayer::stop();
-        std::cout << "[WebSocket] Input integration layer stopped" << std::endl;
-    }
-
-    stopKeyInputHandler();
-    stopMouseInputHandler();
-
-}
-
 bool createPeerConnection() {
     if (createPeerConnectionGo() == 0) {
         std::cerr << "[C++ Host] Error creating peer connection" << std::endl;
@@ -143,9 +113,6 @@ void handleOffer(const std::string& offer) {
     if (!createPeerConnection()) return;
     handleOffer(offer.c_str());
     sendAnswer(); // Trigger sending the answer
-    initKeyInputHandler();
-    initMouseInputHandler();
-    startInputPollers();
 }
 
 void handleRemoteIceCandidate(const json& candidateJson) {
@@ -166,17 +133,19 @@ void on_fail(websocketpp::connection_hdl hdl) {
     std::string errMsg;
     try {
         if (g_useTls)
-            errMsg = g_tlsClient.get_con_from_hdl(hdl)->get_ec().message();
+            errMsg = g_tlsClient->get_con_from_hdl(hdl)->get_ec().message();
         else
-            errMsg = wsClient.get_con_from_hdl(hdl)->get_ec().message();
+            errMsg = wsClient->get_con_from_hdl(hdl)->get_ec().message();
     } catch (...) { errMsg = "unknown"; }
     g_signalingConnected.store(false, std::memory_order_release);
+    InputIntegrationLayer::resetAllInput("signaling_connection_failed");
     try { closePeerConnection(); } catch (...) {}
     std::cerr << "[WebSocket] Connection failed: " << errMsg << std::endl;
 }
 
 void on_close(websocketpp::connection_hdl hdl) {
     g_signalingConnected.store(false, std::memory_order_release);
+    InputIntegrationLayer::resetAllInput("signaling_connection_closed");
     try { closePeerConnection(); } catch (...) {}
     std::cout << "[WebSocket] Connection closed" << std::endl;
     // Do not propagate Shutdown here; allow manual Stop/Close order only
@@ -219,6 +188,7 @@ void on_message(websocketpp::connection_hdl hdl, ws_message_ptr msg) {
         if (type == "peer-disconnected") {
             std::cout << "[WebSocket] Peer has disconnected. Keeping host alive and closing PeerConnection only." << std::endl;
             try { closePeerConnection(); } catch (...) {}
+            InputIntegrationLayer::resetAllInput("peer_disconnected");
         }
         else if (type == "offer") {
             if (isVerboseWebsocketLoggingEnabled()) {
@@ -277,9 +247,9 @@ void send_message(const json& message) {
         if (!handle.lock()) return;
         std::string payload = message.dump();
         if (g_useTls)
-            g_tlsClient.send(handle, payload, websocketpp::frame::opcode::text);
+            g_tlsClient->send(handle, payload, websocketpp::frame::opcode::text);
         else
-            wsClient.send(handle, payload, websocketpp::frame::opcode::text);
+            wsClient->send(handle, payload, websocketpp::frame::opcode::text);
         if (isVerboseWebsocketLoggingEnabled()) {
             std::cout << "[WebSocket] Sent message of type: " << message.value("type", "unknown") << std::endl;
         }
@@ -305,21 +275,22 @@ void initWebsocket(const std::string& roomId, const std::string& signalingUrl) {
     g_websocketStopRequested.store(false, std::memory_order_release);
 
     if (g_useTls) {
-        g_tlsClient.init_asio();
-        g_tlsClient.set_open_handler(&on_open);
-        g_tlsClient.set_message_handler(&on_message);
-        g_tlsClient.set_fail_handler(&on_fail);
-        g_tlsClient.set_close_handler(&on_close);
-        g_tlsClient.set_tls_init_handler(&on_tls_init);
+        g_tlsClient = std::make_unique<tls_client>();
+        g_tlsClient->init_asio();
+        g_tlsClient->set_open_handler(&on_open);
+        g_tlsClient->set_message_handler(&on_message);
+        g_tlsClient->set_fail_handler(&on_fail);
+        g_tlsClient->set_close_handler(&on_close);
+        g_tlsClient->set_tls_init_handler(&on_tls_init);
 
         g_websocket_thread = std::thread([full_uri]() {
             while (!g_websocketStopRequested.load(std::memory_order_acquire) &&
                    !ShutdownManager::IsShutdown()) {
                 websocketpp::lib::error_code connectError;
-                auto connection = g_tlsClient.get_connection(full_uri, connectError);
+                auto connection = g_tlsClient->get_connection(full_uri, connectError);
                 if (!connectError) {
-                    g_tlsClient.connect(connection);
-                    try { g_tlsClient.run(); }
+                    g_tlsClient->connect(connection);
+                    try { g_tlsClient->run(); }
                     catch (const std::exception& ex) {
                         std::cerr << "[WebSocket] TLS run() threw: " << ex.what() << std::endl;
                     }
@@ -327,26 +298,27 @@ void initWebsocket(const std::string& roomId, const std::string& signalingUrl) {
                     std::cerr << "[WebSocket] TLS connection setup failed: " << connectError.message() << std::endl;
                 }
                 if (g_websocketStopRequested.load() || ShutdownManager::IsShutdown()) break;
-                g_tlsClient.reset();
+                g_tlsClient->reset();
                 for (int i = 0; i < 20 && !g_websocketStopRequested.load() && !ShutdownManager::IsShutdown(); ++i)
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         });
     } else {
-        wsClient.init_asio();
-        wsClient.set_open_handler(&on_open);
-        wsClient.set_message_handler(&on_message);
-        wsClient.set_fail_handler(&on_fail);
-        wsClient.set_close_handler(&on_close);
+        wsClient = std::make_unique<plain_client>();
+        wsClient->init_asio();
+        wsClient->set_open_handler(&on_open);
+        wsClient->set_message_handler(&on_message);
+        wsClient->set_fail_handler(&on_fail);
+        wsClient->set_close_handler(&on_close);
 
         g_websocket_thread = std::thread([full_uri]() {
             while (!g_websocketStopRequested.load(std::memory_order_acquire) &&
                    !ShutdownManager::IsShutdown()) {
                 websocketpp::lib::error_code connectError;
-                auto connection = wsClient.get_connection(full_uri, connectError);
+                auto connection = wsClient->get_connection(full_uri, connectError);
                 if (!connectError) {
-                    wsClient.connect(connection);
-                    try { wsClient.run(); }
+                    wsClient->connect(connection);
+                    try { wsClient->run(); }
                     catch (const std::exception& ex) {
                         std::cerr << "[WebSocket] run() threw: " << ex.what() << std::endl;
                     }
@@ -354,7 +326,7 @@ void initWebsocket(const std::string& roomId, const std::string& signalingUrl) {
                     std::cerr << "[WebSocket] Connection setup failed: " << connectError.message() << std::endl;
                 }
                 if (g_websocketStopRequested.load() || ShutdownManager::IsShutdown()) break;
-                wsClient.reset();
+                wsClient->reset();
                 for (int i = 0; i < 20 && !g_websocketStopRequested.load() && !ShutdownManager::IsShutdown(); ++i)
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
@@ -363,14 +335,6 @@ void initWebsocket(const std::string& roomId, const std::string& signalingUrl) {
 }
 
 void stopWebsocket() {
-    stopInputPollers();
-    static std::atomic<bool> stopped{ false };
-    bool expected = false;
-    if (!stopped.compare_exchange_strong(expected, true)) {
-        std::wcout << L"[Shutdown] stopWebsocket already executed. Skipping.\n";
-        return;
-    }
-
     std::wcout << L"[Shutdown] Initiating websocket shutdown...\n";
     g_websocketStopRequested.store(true, std::memory_order_release);
     g_signalingConnected.store(false, std::memory_order_release);
@@ -385,8 +349,8 @@ void stopWebsocket() {
 
     std::wcout << L"[Shutdown] Stopping websocket client...\n";
     try {
-        if (g_useTls) g_tlsClient.stop();
-        else          wsClient.stop();
+        if (g_useTls && g_tlsClient) g_tlsClient->stop();
+        else if (wsClient)           wsClient->stop();
     } catch (...) {
         std::wcout << L"[Shutdown] Exception during wsClient.stop() (ignored).\n";
     }
@@ -395,6 +359,8 @@ void stopWebsocket() {
     if (g_websocket_thread.joinable()) {
         g_websocket_thread.join();
     }
+    g_tlsClient.reset();
+    wsClient.reset();
     std::wcout << L"[Shutdown] Websocket thread joined.\n";
 
     // Legacy frame/sender threads removed

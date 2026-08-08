@@ -6,9 +6,33 @@
 OpusEncoderWrapper::OpusEncoderWrapper() = default;
 OpusEncoderWrapper::~OpusEncoderWrapper() { shutdown(); }
 
+bool OpusEncoderWrapper::ValidateSettings(const Settings& s, std::string* error)
+{
+    auto fail = [error](const char* message) { if (error) *error = message; return false; };
+    if (s.sampleRate != 8000 && s.sampleRate != 12000 && s.sampleRate != 16000 &&
+        s.sampleRate != 24000 && s.sampleRate != 48000) return fail("unsupported Opus sample rate");
+    if (s.channels != 1 && s.channels != 2) return fail("Opus channels must be 1 or 2");
+    const int validFrames[] = {s.sampleRate / 400, s.sampleRate / 200, s.sampleRate / 100,
+                               s.sampleRate / 50, s.sampleRate / 25, 3 * s.sampleRate / 50};
+    if (std::find(std::begin(validFrames), std::end(validFrames), s.frameSize) == std::end(validFrames))
+        return fail("invalid Opus frame size");
+    if (s.bitrate < 6000 || s.bitrate > 510000 * s.channels) return fail("Opus bitrate is out of range");
+    if (s.complexity < 0 || s.complexity > 10) return fail("Opus complexity is out of range");
+    if (s.expectedLossPerc < 0 || s.expectedLossPerc > 100) return fail("Opus loss percentage is out of range");
+    if (s.application != OPUS_APPLICATION_VOIP && s.application != OPUS_APPLICATION_AUDIO &&
+        s.application != OPUS_APPLICATION_RESTRICTED_LOWDELAY) return fail("invalid Opus application");
+    return true;
+}
+
 bool OpusEncoderWrapper::initialize(const Settings& s)
 {
     shutdown();
+
+    std::string validationError;
+    if (!ValidateSettings(s, &validationError)) {
+        std::cerr << "[OpusEncoder] Invalid settings: " << validationError << std::endl;
+        return false;
+    }
 
     int err = OPUS_OK;
     m_sampleRate = s.sampleRate;
@@ -22,13 +46,19 @@ bool OpusEncoderWrapper::initialize(const Settings& s)
     }
     m_encoder = enc;
 
-    opus_encoder_ctl(enc, OPUS_SET_BITRATE(s.bitrate));
-    opus_encoder_ctl(enc, OPUS_SET_VBR(s.useVbr ? 1 : 0));
-    opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(s.constrainedVbr ? 1 : 0));
-    opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(s.complexity));
-    opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(s.enableFec ? 1 : 0));
-    opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(std::clamp(s.expectedLossPerc, 0, 100)));
-    opus_encoder_ctl(enc, OPUS_SET_DTX(s.enableDtx ? 1 : 0));
+    const int controls[] = {
+        opus_encoder_ctl(enc, OPUS_SET_BITRATE(s.bitrate)),
+        opus_encoder_ctl(enc, OPUS_SET_VBR(s.useVbr ? 1 : 0)),
+        opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(s.constrainedVbr ? 1 : 0)),
+        opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(s.complexity)),
+        opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(s.enableFec ? 1 : 0)),
+        opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(s.expectedLossPerc)),
+        opus_encoder_ctl(enc, OPUS_SET_DTX(s.enableDtx ? 1 : 0))
+    };
+    if (std::any_of(std::begin(controls), std::end(controls), [](int rc) { return rc != OPUS_OK; })) {
+        shutdown();
+        return false;
+    }
 
     return true;
 }

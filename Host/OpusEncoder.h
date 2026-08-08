@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <vector>
 #include <memory>
+#include <string>
 
 // Minimal Opus encoder wrapper for 48 kHz, 20 ms frames.
 // Encodes interleaved float PCM ([-1.0, 1.0]) into Opus RTP payloads.
@@ -26,6 +27,7 @@ public:
     ~OpusEncoderWrapper();
 
     bool initialize(const Settings& settings);
+    static bool ValidateSettings(const Settings& settings, std::string* error = nullptr);
     void shutdown();
 
     // Encode a single 20 ms frame of interleaved float samples.

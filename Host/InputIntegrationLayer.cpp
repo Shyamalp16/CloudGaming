@@ -93,7 +93,8 @@ bool initialize() {
             }
         };
 
-        if (!InputTransportLayer::initializeGlobalTransport(handler)) {
+        auto resetHandler = [](const std::string& reason) { resetAllInput(reason); };
+        if (!InputTransportLayer::initializeGlobalTransport(handler, resetHandler)) {
             LOG_SYSTEM_ERROR("Failed to initialize global transport layer");
             return false;
         }
@@ -191,6 +192,14 @@ std::string getStatistics() {
     }
 
     return ss.str();
+}
+
+void resetAllInput(const std::string& reason) {
+    if (auto* state = InputStateManager::getGlobalStateManager()) {
+        state->emergencyReleaseAllKeys(reason);
+    }
+    KeyInputHandler::releaseAllKeysEmergency();
+    MouseInputHandler::releaseAllButtonsEmergency();
 }
 
 } // namespace InputIntegrationLayer

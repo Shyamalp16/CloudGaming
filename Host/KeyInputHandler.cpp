@@ -303,7 +303,7 @@ UINT MapVKToScanCodeWithLayout(WORD vkCode, HKL hkl) {
     return scanCode;
 }
 
-WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
+	WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 		auto it = vkMap.find(jsCode);
 		if (it != vkMap.end()) {
 			return it->second;
@@ -311,6 +311,10 @@ WORD MapJavaScriptCodeToVK(const std::string& jsCode) {
 		//mapping not found
 		std::cerr << "[MapJavaScriptCodeToVK] Warning: No VK mapping for code: " << jsCode << std::endl;
 		return 0;
+	}
+
+	bool IsSupportedKeyCode(const std::string& jsCode) {
+		return vkMap.find(jsCode) != vkMap.end() && !shouldBlockKey(jsCode);
 	}
 
 	WORD MapJavaScriptCodeToScanCode(const std::string& jsCode) {

@@ -5,6 +5,8 @@
 #include <vector>
 #include <nlohmann/json.hpp>
 #include "CaptureHelpers.h"
+#include "InputSchema.h"
+#include "KeyInputHandler.h"
 
 namespace InputStateManager {
 
@@ -108,8 +110,14 @@ void Manager::stop() {
 
 void Manager::processInputMessage(const InputTransportLayer::InputMessage& message) {
     try {
-        // Parse JSON data
-        nlohmann::json eventData = nlohmann::json::parse(message.data);
+        auto validation = InputSchema::Validate(message.data);
+        if (!validation.valid) {
+            LOG_WARNING(ErrorUtils::ErrorCategory::INPUT,
+                        "Rejected input message: " + validation.error);
+            updateMetrics("invalidTransitions");
+            return;
+        }
+        nlohmann::json eventData = std::move(validation.value);
 
         const std::string eventType = eventData.value("type", std::string());
         if (eventType == "input_reset") {
@@ -311,6 +319,10 @@ bool Manager::processKeyboardEvent(const std::string& eventType, const nlohmann:
     }
 
     std::string jsCode = eventData["code"];
+    if (!KeyInputHandler::IsSupportedKeyCode(jsCode)) {
+        LOG_WARNING(ErrorUtils::ErrorCategory::INPUT, "Unsupported or blocked key code");
+        return false;
+    }
     KeyState newState = (eventType == "keydown") ? KeyState::Pressed : KeyState::Released;
 
     uint64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(

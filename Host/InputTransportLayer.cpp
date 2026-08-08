@@ -24,13 +24,14 @@ std::string TransportStats::toString() const {
 }
 
 // InputTransportLayer implementation
-bool Layer::initialize(MessageHandler handler) {
+bool Layer::initialize(MessageHandler handler, ResetHandler reset) {
     if (running.load()) {
         LOG_WARNING(ErrorUtils::ErrorCategory::INPUT, "Transport layer already running");
         return false;
     }
 
     messageHandler = std::move(handler);
+    resetHandler = std::move(reset);
     if (!messageHandler) {
         LOG_SYSTEM_ERROR("Invalid message handler provided");
         return false;
@@ -95,11 +96,12 @@ void Layer::stop() {
         processingThread.join();
     }
 
+    if (resetHandler) resetHandler("transport_stop");
+
     // Clear message queue
     {
         std::lock_guard<std::mutex> lock(queueMutex);
-        std::queue<InputMessage> emptyQueue;
-        std::swap(messageQueue, emptyQueue);
+        messageQueue.clear();
     }
 
     logTransportEvent("stopped", "Transport layer stopped and cleaned up");
@@ -176,7 +178,7 @@ void Layer::processingLoop() {
             size_t processed = 0;
             while (!messageQueue.empty() && !shouldStop.load()) {
                 InputMessage message = std::move(messageQueue.front());
-                messageQueue.pop();
+                messageQueue.pop_front();
 
                 lock.unlock(); // Unlock while processing to allow new messages
 
@@ -214,40 +216,45 @@ void Layer::processingLoop() {
 }
 
 void Layer::enqueueMessage(InputMessage&& message) {
-    std::lock_guard<std::mutex> lock(queueMutex);
+    auto validation = InputSchema::Validate(message.data);
+    if (!validation.valid) {
+        std::lock_guard<std::mutex> statsLock(statsMutex);
+        stats.messagesDropped++;
+        LOG_WARNING(ErrorUtils::ErrorCategory::INPUT, "Rejected input payload: " + validation.error);
+        return;
+    }
+    message.eventType = validation.eventType;
 
-    // Check queue size limit. Never silently lose a key-up: reset pending input
-    // state first, then deliver the latest release.
-    if (messageQueue.size() >= config.maxPendingMessages) {
-        const bool isRelease = message.data.find("\"type\":\"keyup\"") != std::string::npos ||
-                               message.data.find("\"type\":\"mouseup\"") != std::string::npos ||
-                               message.data.find("\"type\":\"input_reset\"") != std::string::npos;
-        if (!isRelease) {
-            std::lock_guard<std::mutex> statsLock(statsMutex);
-            stats.messagesDropped++;
-            return;
+    bool overflowed = false;
+    uint64_t dropped = 0;
+    {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        if (InputSchema::IsMouseMove(message.eventType) && !messageQueue.empty() &&
+            InputSchema::IsMouseMove(messageQueue.back().eventType)) {
+            messageQueue.back() = std::move(message);
+        } else if (messageQueue.size() >= static_cast<size_t>((std::max)(1, config.maxPendingMessages))) {
+            overflowed = true;
+            dropped = messageQueue.size();
+            messageQueue.clear();
+            InputMessage reset("pion_data",
+                "{\"type\":\"input_reset\",\"reason\":\"transport_queue_overflow\"}", message.timestamp);
+            reset.eventType = "input_reset";
+            messageQueue.push_back(std::move(reset));
+            if (InputSchema::IsReleaseEvent(message.eventType)) messageQueue.push_back(std::move(message));
+            else ++dropped;
+        } else {
+            messageQueue.push_back(std::move(message));
         }
-
-        std::queue<InputMessage> empty;
-        messageQueue.swap(empty);
-        const uint64_t timestamp = message.timestamp;
-        messageQueue.emplace("pion_data",
-            "{\"type\":\"input_reset\",\"reason\":\"transport_queue_overflow\"}", timestamp);
-        {
-            std::lock_guard<std::mutex> statsLock(statsMutex);
-            stats.messagesDropped += empty.size();
-        }
+        queueCondition.notify_one();
     }
 
-    messageQueue.push(std::move(message));
+    if (overflowed && resetHandler) resetHandler("transport_queue_overflow");
     updateStatsQueueSize();
-
-    // Notify processing thread
-    queueCondition.notify_one();
 
     {
         std::lock_guard<std::mutex> statsLock(statsMutex);
         stats.messagesReceived++;
+        stats.messagesDropped += dropped;
     }
 }
 
@@ -269,14 +276,14 @@ void Layer::logTransportEvent(const std::string& event, const std::string& detai
 }
 
 // Global functions
-bool initializeGlobalTransport(Layer::MessageHandler handler) {
+bool initializeGlobalTransport(Layer::MessageHandler handler, Layer::ResetHandler resetHandler) {
     if (globalTransportLayer) {
         LOG_WARNING(ErrorUtils::ErrorCategory::INPUT, "Global transport layer already initialized");
         return true;
     }
 
     globalTransportLayer = std::make_unique<Layer>();
-    if (!globalTransportLayer->initialize(std::move(handler))) {
+    if (!globalTransportLayer->initialize(std::move(handler), std::move(resetHandler))) {
         LOG_SYSTEM_ERROR("Failed to initialize global transport layer");
         globalTransportLayer.reset();
         return false;

@@ -111,6 +111,9 @@
     <ClInclude Include="Host\KeyInputHandler.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Host\InputSchema.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="Host\MouseInputHandler.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -127,6 +130,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClCompile Include="Host\InputStateMachine.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\InputSchema.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Host\MouseCoordinateTransform.cpp">

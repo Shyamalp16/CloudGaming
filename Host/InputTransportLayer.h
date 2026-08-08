@@ -1,6 +1,6 @@
 #pragma once
 #include <string>
-#include <queue>
+#include <deque>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
@@ -11,6 +11,7 @@
 #include "InputConfig.h"
 #include "WebRTCWrapper.h"
 #include "ErrorUtils.h"
+#include "InputSchema.h"
 
 namespace InputTransportLayer {
 
@@ -21,6 +22,7 @@ struct InputMessage {
     std::string type;           // Message type (e.g., "keydown", "mousemove")
     std::string data;           // Raw JSON data from client
     uint64_t timestamp = 0;     // Timestamp when message was received
+    std::string eventType;      // Strictly validated payload event type
 
     InputMessage() = default;
     InputMessage(std::string msgType, std::string msgData, uint64_t ts = 0)
@@ -55,13 +57,14 @@ public:
      * @brief Message handler callback type
      */
     using MessageHandler = std::function<void(const InputMessage&)>;
+    using ResetHandler = std::function<void(const std::string&)>;
 
     /**
      * @brief Initialize the transport layer
      * @param handler Callback function to process received messages
      * @return true if initialization successful, false otherwise
      */
-    bool initialize(MessageHandler handler);
+    bool initialize(MessageHandler handler, ResetHandler resetHandler);
 
     /**
      * @brief Start the transport layer (begin processing messages)
@@ -92,7 +95,8 @@ private:
 
     // Message handling
     MessageHandler messageHandler;
-    std::queue<InputMessage> messageQueue;
+    ResetHandler resetHandler;
+    std::deque<InputMessage> messageQueue;
     mutable std::mutex queueMutex;
     std::condition_variable queueCondition;
 
@@ -127,7 +131,7 @@ extern std::unique_ptr<Layer> globalTransportLayer;
  * @param handler Message processing callback
  * @return true if initialization successful, false otherwise
  */
-bool initializeGlobalTransport(Layer::MessageHandler handler);
+bool initializeGlobalTransport(Layer::MessageHandler handler, Layer::ResetHandler resetHandler);
 
 /**
  * @brief Start the global transport layer
