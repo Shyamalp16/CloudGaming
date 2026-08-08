@@ -17,6 +17,7 @@
 #include <audioclientactivationparams.h>
 #include <propvarutil.h>
 #include <activation.h>
+#include <wrl/implements.h>
 #pragma comment(lib, "Propsys.lib")
 #include <versionhelpers.h>  // For Windows version checking
 #include <tlhelp32.h>         // For process enumeration
@@ -26,26 +27,13 @@
 const PROPERTYKEY PKEY_Device_FriendlyName = { { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } }, 14 };
 #endif
 // Completion handler for ActivateAudioInterfaceAsync
-class ActivateAudioCompletionHandler : public IActivateAudioInterfaceCompletionHandler {
+class ActivateAudioCompletionHandler final
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          Microsoft::WRL::FtmBase,
+          IActivateAudioInterfaceCompletionHandler> {
 public:
-    explicit ActivateAudioCompletionHandler(HANDLE hEvent) : m_ref(1), m_hEvent(hEvent), m_hr(E_FAIL) {}
-
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
-        if (!ppv) return E_POINTER;
-        if (riid == __uuidof(IUnknown) || riid == __uuidof(IActivateAudioInterfaceCompletionHandler)) {
-            *ppv = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
-            AddRef();
-            return S_OK;
-        }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
-    }
-    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_ref); }
-    STDMETHODIMP_(ULONG) Release() override {
-        ULONG ulRef = InterlockedDecrement(&m_ref);
-        if (ulRef == 0) delete this;
-        return ulRef;
-    }
+    explicit ActivateAudioCompletionHandler(HANDLE hEvent) : m_hEvent(hEvent), m_hr(E_FAIL) {}
 
     STDMETHODIMP ActivateCompleted(IActivateAudioInterfaceAsyncOperation* operation) override {
         if (!operation) { m_hr = E_POINTER; SetEvent(m_hEvent); return S_OK; }
@@ -64,8 +52,11 @@ public:
     Microsoft::WRL::ComPtr<IAudioClient> GetClient() const { return m_audioClient; }
 
 private:
+    friend Microsoft::WRL::RuntimeClass<
+        Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+        Microsoft::WRL::FtmBase,
+        IActivateAudioInterfaceCompletionHandler>;
     ~ActivateAudioCompletionHandler() = default;
-    LONG m_ref;
     HANDLE m_hEvent;
     HRESULT m_hr;
     Microsoft::WRL::ComPtr<IAudioClient> m_audioClient;
@@ -1262,6 +1253,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     BYTE* pData;
     DWORD flags;
     WAVEFORMATEX* pwfx = NULL;
+    WAVEFORMATEX* pwfxAllocated = nullptr;
     DWORD sleepMs = 10; // polling interval (fallback when event mode is unavailable)
     bool eventMode = false; // declared early to avoid goto skipping initialization
 
@@ -1434,11 +1426,15 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                             ? PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
                             : PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE);
 
-                    PROPVARIANT pv; PropVariantInit(&pv);
-                    hr = InitPropVariantFromBuffer(&activationParams, sizeof(activationParams), &pv);
-                    if (SUCCEEDED(hr))
-                    {
-                        processLoopbackAttempted = true;
+                    // Process-loopback activation requires the activation structure
+                    // to be passed as a VT_BLOB. InitPropVariantFromBuffer creates a
+                    // byte-vector variant, which ActivateAudioInterfaceAsync rejects
+                    // with E_ILLEGAL_METHOD_CALL (0x8000000e).
+                    PROPVARIANT pv{};
+                    pv.vt = VT_BLOB;
+                    pv.blob.cbSize = sizeof(activationParams);
+                    pv.blob.pBlobData = reinterpret_cast<BYTE*>(&activationParams);
+                    processLoopbackAttempted = true;
                         HANDLE hActivate = CreateEvent(nullptr, FALSE, FALSE, nullptr);
                         if (!hActivate)
                         {
@@ -1447,7 +1443,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                         }
                         else
                         {
-                            IActivateAudioInterfaceCompletionHandler* handler = new (std::nothrow) ActivateAudioCompletionHandler(hActivate);
+                            auto handlerObject = Microsoft::WRL::Make<ActivateAudioCompletionHandler>(hActivate);
+                            IActivateAudioInterfaceCompletionHandler* handler = handlerObject.Get();
                             if (!handler)
                             {
                                 std::wcerr << L"[AudioCapturer] Failed to allocate activation handler" << std::endl;
@@ -1499,6 +1496,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
 
                                             // Initialize client for capture
                                             hr = m_pAudioClient->GetMixFormat(&pwfx);
+                                            if (SUCCEEDED(hr)) pwfxAllocated = pwfx;
                                             if (FAILED(hr))
                                             {
                                                 std::wcerr << L"[AudioCapturer] Unable to get mix format for process loopback: "
@@ -1675,20 +1673,14 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                     }
                                 }
 
-                                handler->Release();
                             }
 
                             CloseHandle(hActivate);
                         }
 
-                        PropVariantClear(&pv);
-                    }
-                    else
-                    {
-                        std::wcerr << L"[AudioCapturer] InitPropVariantFromBuffer failed: " << _com_error(hr).ErrorMessage() << std::endl;
-                        processLoopbackAttempted = true;
-                        processLoopbackFallbackReason = L"InitPropVariantFromBuffer failed";
-                    }
+                    // The blob points at stack storage owned by this call. It must
+                    // not be freed by PropVariantClear.
+                    pv.vt = VT_EMPTY;
                 }
             }
         }
@@ -2301,7 +2293,13 @@ DeviceSelected:
             goto Exit;
         }
 
+        if (pwfxAllocated) {
+            CoTaskMemFree(pwfxAllocated);
+            pwfxAllocated = nullptr;
+            pwfx = nullptr;
+        }
         hr = m_pAudioClient->GetMixFormat(&pwfx);
+        if (SUCCEEDED(hr)) pwfxAllocated = pwfx;
         if (FAILED(hr))
         {
             std::wcerr << L"[AudioCapturer] Unable to get mix format for default device: " << _com_error(hr).ErrorMessage() << std::endl;
@@ -2997,7 +2995,8 @@ Exit:
         m_mmcssTaskIndex = 0;
     }
 
-    if (pwfx) { CoTaskMemFree(pwfx); pwfx = nullptr; }
+    if (pwfxAllocated) { CoTaskMemFree(pwfxAllocated); pwfxAllocated = nullptr; }
+    pwfx = nullptr;
     if (pSessionControl2) pSessionControl2->Release();
     if (pSessionControl) pSessionControl->Release();
     if (pSessionEnumerator) pSessionEnumerator->Release();

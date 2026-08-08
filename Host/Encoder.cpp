@@ -11,7 +11,6 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/avutil.h>  // AV_NOPTS_VALUE
-#include <libavutil/opt.h>
 }
 #include <d3d11.h>
 #include <wrl.h>
@@ -166,7 +165,9 @@ static int g_increaseStep = 1000000;          // +1 Mbps (was +5 Mbps; gentler f
 static int g_decreaseCooldownMs = 1000;      // ms — 500–1000ms for WAN; 5s was too slow on real loss
 static int g_cleanSamplesRequired = 3;
 static int g_increaseIntervalMs = 1000;      // ms
-static int g_currentBitrate = 8000000;      // start 8 Mbps (WAN-friendly)
+static std::atomic<int> g_currentBitrate{8000000}; // active target bitrate (WAN-friendly)
+static std::atomic<uint64_t> g_bitrateGeneration{0};
+static std::atomic<uint64_t> g_appliedBitrateGeneration{0};
 static int g_cleanSamples = 0;
 static int g_congestionCeiling = 0;          // remembers bitrate that caused loss, 0 = no ceiling
 static std::chrono::steady_clock::time_point g_lastChange = std::chrono::steady_clock::now();
@@ -788,7 +789,8 @@ namespace Encoder {
         if (start_bps > 0) g_startBitrateBps = start_bps;
         if (min_bps > 0) g_minBitrateBps = min_bps;
         if (max_bps > 0) g_maxBitrateBps = max_bps;
-        g_currentBitrate = g_startBitrateBps;
+        g_currentBitrate.store(g_startBitrateBps, std::memory_order_release);
+        g_bitrateGeneration.fetch_add(1, std::memory_order_acq_rel);
     }
 
     void ConfigureBitrateController(int min_bps,
@@ -817,13 +819,13 @@ namespace Encoder {
         if (packetLoss >= effectiveLossThreshold) {
             if (since >= g_decreaseCooldownMs) {
                 // Remember the bitrate that caused congestion (set ceiling at 90% of current)
-                g_congestionCeiling = static_cast<int>(g_currentBitrate * 0.9);
+                const int currentBitrate = g_currentBitrate.load(std::memory_order_acquire);
+                g_congestionCeiling = static_cast<int>(currentBitrate * 0.9);
                 g_ceilingSetTime = now;
 
                 double factor = isLocalhost ? 0.9 : ((packetLoss >= 0.10) ? 0.6 : 0.8);
-                int target = static_cast<int>(g_currentBitrate * factor);
-                g_currentBitrate = std::max(g_minBitrateController, target);
-                AdjustBitrate(g_currentBitrate);
+                int target = static_cast<int>(currentBitrate * factor);
+                AdjustBitrate(std::max(g_minBitrateController, target));
                 g_lastChange = now;
             }
             g_cleanSamples = 0;
@@ -842,7 +844,7 @@ namespace Encoder {
 
         if (since >= increaseInterval && g_cleanSamples >= requiredSamples) {
             int step = isLocalhost ? (g_increaseStep * 2) : g_increaseStep;
-            int target = g_currentBitrate + step;
+            int target = g_currentBitrate.load(std::memory_order_acquire) + step;
             int effectiveMax = g_maxBitrateController;
 
             // Don't exceed the congestion ceiling if one is set
@@ -851,8 +853,7 @@ namespace Encoder {
             }
 
             if (target <= effectiveMax) {
-                g_currentBitrate = target;
-                AdjustBitrate(g_currentBitrate);
+                AdjustBitrate(target);
                 g_lastChange = now;
             }
             g_cleanSamples = 0;
@@ -869,6 +870,8 @@ namespace Encoder {
 
     bool InitializeEncoder(int width, int height, int fps) {
         std::lock_guard<std::mutex> lock(g_encoderMutex);
+        const uint64_t bitrateGeneration = g_bitrateGeneration.load(std::memory_order_acquire);
+        const int targetBitrate = g_currentBitrate.load(std::memory_order_acquire);
 
         g_lastCaptureTsUs.store(0, std::memory_order_relaxed);
         g_smoothedDurUs.store(0, std::memory_order_relaxed);
@@ -945,7 +948,7 @@ namespace Encoder {
         codecCtx->framerate = { fps, 1 };
         codecCtx->gop_size = fps * 2; // IDR every ~2 seconds: balances compression efficiency with low latency
         codecCtx->max_b_frames = 0; // low-latency
-        codecCtx->bit_rate = g_startBitrateBps; // configurable start bitrate
+        codecCtx->bit_rate = targetBitrate;
         // Initialize VBV for low-latency: use 1x bitrate for stricter latency control
         codecCtx->rc_max_rate = codecCtx->bit_rate;
         codecCtx->rc_buffer_size = static_cast<int>(std::min<int64_t>(codecCtx->bit_rate, INT_MAX));
@@ -1146,6 +1149,9 @@ namespace Encoder {
 
             std::wcout << L"[Encoder] Encoded samples are handed directly to the non-blocking Go queue" << std::endl;
         }
+        if (g_bitrateGeneration.load(std::memory_order_acquire) == bitrateGeneration) {
+            g_appliedBitrateGeneration.store(bitrateGeneration, std::memory_order_release);
+        }
         return true;
     }
 
@@ -1180,30 +1186,22 @@ namespace Encoder {
     }
 
     void AdjustBitrate(int new_bitrate) {
-        // Update codec context + attempt NVENC runtime reconfigure, but NEVER reopen the
-        // encoder. A full reopen (FinalizeEncoder + InitializeEncoder) on the hot encode
-        // path blocks the pipeline for 50-200 ms, which is the primary cause of lag spikes.
-        // If the runtime API doesn't support mid-stream rate changes (older NVENC drivers),
-        // we log a warning and accept the mismatch — the codec context bit_rate update still
-        // influences future VBV accounting and the encoder will converge towards the new rate.
-        bool runtimeUpdateOk = true;
-        {
-            std::lock_guard<std::mutex> lock(g_encoderMutex);
-            if (codecCtx) {
-                codecCtx->bit_rate      = new_bitrate;
-                codecCtx->rc_max_rate   = new_bitrate;
-                codecCtx->rc_buffer_size = new_bitrate; // 1× bitrate VBV (tight, low-latency)
-                if (codecCtx->priv_data) {
-                    int r1 = av_opt_set_int(codecCtx->priv_data, "bitrate", new_bitrate, 0);
-                    int r2 = av_opt_set_int(codecCtx->priv_data, "maxrate", new_bitrate, 0);
-                    int r3 = av_opt_set_int(codecCtx->priv_data, "bufsize", new_bitrate, 0);
-                    runtimeUpdateOk = (r1 >= 0 && r2 >= 0 && r3 >= 0);
-                }
-            }
-        }
+        const int clamped = std::clamp(new_bitrate, g_minBitrateBps, g_maxBitrateBps);
+        const int previous = g_currentBitrate.exchange(clamped, std::memory_order_acq_rel);
+        if (previous == clamped) return;
 
-        std::wcout << L"[Encoder] Bitrate adjusted to " << new_bitrate
-                   << L" bps" << (runtimeUpdateOk ? L"" : L" (context-only; runtime API unavailable)") << L"\n";
+        // The FFmpeg NVENC wrapper does not support changing these private
+        // options after avcodec_open2. Queue the change for the single encode
+        // consumer, which will reopen the session between frames and apply the
+        // new bitrate atomically at the encoder boundary.
+        g_bitrateGeneration.fetch_add(1, std::memory_order_acq_rel);
+        std::wcout << L"[Encoder] Bitrate change queued: " << previous << L" -> "
+                   << clamped << L" bps" << std::endl;
+    }
+
+    bool HasPendingBitrateChange() {
+        return g_bitrateGeneration.load(std::memory_order_acquire) !=
+               g_appliedBitrateGeneration.load(std::memory_order_acquire);
     }
 
 }

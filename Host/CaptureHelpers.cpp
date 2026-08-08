@@ -561,14 +561,19 @@ void StartCapture() {
             int encW = static_cast<int>(desc.Width & ~1U);
             int encH = static_cast<int>(desc.Height & ~1U);
             const uint64_t requestedConfigGeneration = g_streamConfigGeneration.load(std::memory_order_acquire);
-            if (lastInitW != encW || lastInitH != encH ||
-                appliedConfigGeneration != requestedConfigGeneration) {
+            const bool encoderNeedsInit = lastInitW != encW || lastInitH != encH ||
+                appliedConfigGeneration != requestedConfigGeneration;
+            const bool bitrateNeedsReconfigure = !encoderNeedsInit && Encoder::HasPendingBitrateChange();
+            if (encoderNeedsInit || bitrateNeedsReconfigure) {
                 const auto now = std::chrono::steady_clock::now();
-                if (now - lastEncoderInitAttempt < std::chrono::seconds(1)) {
+                if (encoderNeedsInit && now - lastEncoderInitAttempt < std::chrono::seconds(1)) {
                     RecycleFrameTexture(job);
                     continue;
                 }
                 lastEncoderInitAttempt = now;
+                if (bitrateNeedsReconfigure) {
+                    std::wcout << L"[Encoder] Applying queued bitrate change at frame boundary" << std::endl;
+                }
                 if (lastInitW != 0 && lastInitH != 0) Encoder::FinalizeEncoder();
                 if (!Encoder::InitializeEncoder(encW, encH, g_targetFps.load())) {
                     RecycleFrameTexture(job);

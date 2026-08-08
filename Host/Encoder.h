@@ -10,6 +10,8 @@ namespace Encoder {
     void FinalizeEncoder();
 
     void AdjustBitrate(int new_bitrate);
+    // True when RTCP requested a bitrate that the active encoder has not yet applied.
+    bool HasPendingBitrateChange();
     void RequestIDR();
 
     // Configure encoder bitrate defaults (used on InitializeEncoder)
