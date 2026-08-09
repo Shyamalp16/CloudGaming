@@ -1302,6 +1302,10 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     DWORD flags;
     WAVEFORMATEX* pwfx = NULL;
     WAVEFORMATEX* pwfxAllocated = nullptr;
+    // Process-loopback clients are virtual audio clients. Some supported Windows
+    // versions return E_NOTIMPL from GetMixFormat, so keep a caller-owned format
+    // alive for the full capture-thread lifetime.
+    WAVEFORMATEX processLoopbackFormat = {};
     DWORD sleepMs = 10; // polling interval (fallback when event mode is unavailable)
     bool eventMode = false; // declared early to avoid goto skipping initialization
 
@@ -1324,6 +1328,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
     uint64_t dataPacketsProcessed = 0;
     uint64_t timeoutCount = 0;
     uint64_t lastLogTime = GetTickCount64();
+    bool firstAudioPacketLogged = false;
+    bool firstAudioSignalLogged = false;
 
     hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (FAILED(hr))
@@ -1507,7 +1513,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                 std::wcout << L"[AudioCapturer] About to call ActivateAudioInterfaceAsync..." << std::endl;
 
                                 hr = ActivateAudioInterfaceAsync(
-                                    L"VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK",
+                                    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
                                     __uuidof(IAudioClient),
                                     &pv,
                                     handler,
@@ -1542,9 +1548,27 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                             std::wcout << L"[AudioCapturer] Process loopback activation succeeded for PID=" << targetProcessId << std::endl;
                                             processLoopbackFallbackReason = L"Process loopback activated; initializing capture";
 
-                                            // Initialize client for capture
+                                            // Initialize client for capture. The virtual process-loopback
+                                            // client can legitimately return E_NOTIMPL from GetMixFormat;
+                                            // Microsoft's ApplicationLoopback sample supplies PCM explicitly.
                                             hr = m_pAudioClient->GetMixFormat(&pwfx);
                                             if (SUCCEEDED(hr)) pwfxAllocated = pwfx;
+                                            if (hr == E_NOTIMPL)
+                                            {
+                                                processLoopbackFormat.wFormatTag = WAVE_FORMAT_PCM;
+                                                processLoopbackFormat.nChannels = 2;
+                                                processLoopbackFormat.nSamplesPerSec = 48000;
+                                                processLoopbackFormat.wBitsPerSample = 16;
+                                                processLoopbackFormat.nBlockAlign =
+                                                    (processLoopbackFormat.nChannels * processLoopbackFormat.wBitsPerSample) / 8;
+                                                processLoopbackFormat.nAvgBytesPerSec =
+                                                    processLoopbackFormat.nSamplesPerSec * processLoopbackFormat.nBlockAlign;
+                                                processLoopbackFormat.cbSize = 0;
+                                                pwfx = &processLoopbackFormat;
+                                                hr = S_OK;
+                                                std::wcout << L"[AudioCapturer] Process loopback GetMixFormat is not implemented; "
+                                                    L"using explicit 48kHz stereo PCM capture format" << std::endl;
+                                            }
                                             if (FAILED(hr))
                                             {
                                                 std::wcerr << L"[AudioCapturer] Unable to get mix format for process loopback: "
@@ -1571,7 +1595,9 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                                 }
 
                                                 // For process loopback, use shared mode for broad compatibility
-                                                streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+                                                streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK |
+                                                    AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
+                                                    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
                                                 targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
 
                                                 if (s_audioConfig.wasapi.force48kHzStereo) {
@@ -1580,15 +1606,14 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                                         pwfx->wBitsPerSample == 16 &&
                                                         pwfx->wFormatTag == WAVE_FORMAT_PCM);
                                                     if (!isAlreadyOptimal) {
-                                                        static WAVEFORMATEX forcedFormat = {};
-                                                        forcedFormat.wFormatTag = WAVE_FORMAT_PCM;
-                                                        forcedFormat.nChannels = 2;
-                                                        forcedFormat.nSamplesPerSec = 48000;
-                                                        forcedFormat.nAvgBytesPerSec = 48000 * 2 * 2;
-                                                        forcedFormat.nBlockAlign = 2 * 2;
-                                                        forcedFormat.wBitsPerSample = 16;
-                                                        forcedFormat.cbSize = 0;
-                                                        targetFormat = &forcedFormat;
+                                                        processLoopbackFormat.wFormatTag = WAVE_FORMAT_PCM;
+                                                        processLoopbackFormat.nChannels = 2;
+                                                        processLoopbackFormat.nSamplesPerSec = 48000;
+                                                        processLoopbackFormat.nAvgBytesPerSec = 48000 * 2 * 2;
+                                                        processLoopbackFormat.nBlockAlign = 2 * 2;
+                                                        processLoopbackFormat.wBitsPerSample = 16;
+                                                        processLoopbackFormat.cbSize = 0;
+                                                        targetFormat = &processLoopbackFormat;
                                                         std::wcout << L"[AudioCapturer] Forcing 48kHz stereo PCM format for process loopback" << std::endl;
                                                     }
                                                 }
@@ -1596,7 +1621,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                                 hr = m_pAudioClient->Initialize(
                                                     AUDCLNT_SHAREMODE_SHARED,
                                                     streamFlags,
-                                                    hnsRequestedDuration,
+                                                    0, // Let the virtual process-loopback engine choose its shared-mode buffer.
                                                     0,
                                                     targetFormat,
                                                     NULL);
@@ -1614,8 +1639,8 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
                                                         targetFormat = const_cast<WAVEFORMATEX*>(pwfx);
                                                         hr = m_pAudioClient->Initialize(
                                                             AUDCLNT_SHAREMODE_SHARED,
-                                                            AUDCLNT_STREAMFLAGS_LOOPBACK,
-                                                            hnsRequestedDuration,
+                                                            AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                                                            0,
                                                             0,
                                                             const_cast<const WAVEFORMATEX*>(pwfx),
                                                             NULL);
@@ -2626,7 +2651,9 @@ AfterDeviceSelection:
             // Use WaitForMultipleObjects for clean stop signaling
             // Wait on both capture event (data available) and stop event (shutdown requested)
             HANDLE handles[2] = { m_hCaptureEvent, m_hStopEvent };
-            DWORD wait = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+            // Bound the event wait so virtual process-loopback clients that miss
+            // a notification are still polled for ready packets.
+            DWORD wait = WaitForMultipleObjects(2, handles, FALSE, 5);
 
             if (wait == WAIT_OBJECT_0) {
                 // Capture event signaled - data available, proceed with capture
@@ -2635,8 +2662,11 @@ AfterDeviceSelection:
                 std::wcout << L"[AudioCapturer] Stop event signaled, initiating clean shutdown..." << std::endl;
                 break; // Exit the capture loop
             } else if (wait == WAIT_TIMEOUT) {
-                // This shouldn't happen with INFINITE timeout, but handle it
-                std::wcerr << L"[AudioCapturer] WaitForMultipleObjects timeout (unexpected)" << std::endl;
+                timeoutCount++;
+                // Continue below and poll GetNextPacketSize. This is an intentional
+                // low-latency safety net for virtual loopback event delivery.
+            } else {
+                AUDIO_LOG_ERROR(L"[AudioCapturer] Audio event wait failed: " << GetLastError());
                 continue;
             }
 
@@ -2757,6 +2787,11 @@ AfterDeviceSelection:
 
             // Reset consecutive error count on successful operation
             m_consecutiveErrorCount = 0;
+            if (!firstAudioPacketLogged) {
+                firstAudioPacketLogged = true;
+                AUDIO_LOG_INFO(L"[AudioCapturer] First audio packet captured: "
+                    << numFramesAvailable << L" frames, flags=0x" << std::hex << flags << std::dec);
+            }
 
             // ============================================================================
             // ZERO-ALLOCATION AUDIO PROCESSING PIPELINE - Optimized for minimal latency
@@ -2801,6 +2836,10 @@ AfterDeviceSelection:
                     }
                 }
                 AUDIO_LOG_DEBUG(L"[AudioCapturer] Audio data check: " << (blockHasSignal ? L"Has signal" : L"Silent/near-silent"));
+            }
+            if (blockHasSignal && !firstAudioSignalLogged) {
+                firstAudioSignalLogged = true;
+                AUDIO_LOG_INFO(L"[AudioCapturer] First non-silent process audio signal captured");
             }
             UpdateSilenceState(blockHasSignal);
 

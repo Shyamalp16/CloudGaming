@@ -7,12 +7,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "HostController.h"
 #include "ConfigStore.h"
+#include "Diagnostics.h"
 #include "ProcessDiscovery.h"
 #include "UpdateManager.h"
 
@@ -27,7 +29,7 @@ constexpr UINT kUpdateInstallMessage = WM_APP + 5;
 constexpr UINT_PTR kMetricsTimer = 1;
 
 enum ControlId : int {
-    IdStartStop = 100, IdProcess, IdRefresh, IdApply, IdPairing, IdCopy, IdSettings, IdCheckUpdates,
+    IdStartStop = 100, IdProcess, IdRefresh, IdApply, IdPairing, IdCopy, IdSettings, IdOpenLogs, IdCheckUpdates,
     IdTrayOpen = 200, IdTrayStartStop, IdTrayExit
 };
 
@@ -148,8 +150,8 @@ private:
         failure_ = AddStatic(L"", 22, 296, 610, 38);
         startStop_ = AddButton(L"Start host", IdStartStop, 22, 330, 145);
         AddButton(L"Settings", IdSettings, 180, 330, 105);
-        updateButton_ = AddButton(L"Check updates", IdCheckUpdates, 295, 330, 125);
-        AddStatic(L"Closing keeps the host in the notification area.", 435, 336, 195, 40);
+        AddButton(L"Open logs", IdOpenLogs, 295, 330, 105);
+        updateButton_ = AddButton(L"Check updates", IdCheckUpdates, 410, 330, 125);
 
         const auto font = reinterpret_cast<LPARAM>(GetStockObject(DEFAULT_GUI_FONT));
         EnumChildWindows(window_, [](HWND child, LPARAM value) -> BOOL {
@@ -163,6 +165,18 @@ private:
     void OpenConfiguration() {
         const auto path = ConfigStore::Path().wstring();
         ShellExecuteW(window_, L"open", L"notepad.exe", (L"\"" + path + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
+    }
+
+    void OpenLogs() {
+        const auto status = Diagnostics::GetStatus();
+        if (!status.activeLog.empty() && std::filesystem::exists(status.activeLog)) {
+            const auto argument = L"\"" + status.activeLog.wstring() + L"\"";
+            if (reinterpret_cast<INT_PTR>(ShellExecuteW(window_, L"open", L"notepad.exe",
+                    argument.c_str(), status.logDirectory.c_str(), SW_SHOWNORMAL)) > 32) return;
+        }
+        if (!status.logDirectory.empty()) {
+            ShellExecuteW(window_, L"explore", status.logDirectory.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
     }
 
     void RunFirstRunFlow() {
@@ -347,7 +361,14 @@ private:
             ? L"Target: " + process + L" (PID " + std::to_wstring(status.targetPid) + L")"
             : L"Target: " + process;
         SetWindowTextW(target_, target.c_str());
-        const auto failure = Utf8ToWide(status.failureReason);
+        std::string failureMessage = status.failureReason;
+        try {
+            const auto& audio = health.at("audio");
+            if (failureMessage.empty() && audio.value("state", std::string{}) == "Failed") {
+                failureMessage = "Audio: " + audio.value("failureReason", std::string{"capture failed"});
+            }
+        } catch (...) {}
+        const auto failure = Utf8ToWide(failureMessage);
         SetWindowTextW(failure_, failure.c_str());
         std::wstring sessionText = L"No active client";
         try {
@@ -392,6 +413,7 @@ private:
             case IdApply: ApplyTarget(); return 0;
             case IdCopy: CopyPairingCode(); return 0;
             case IdSettings: OpenConfiguration(); return 0;
+            case IdOpenLogs: OpenLogs(); return 0;
             case IdCheckUpdates: CheckForUpdates(); return 0;
             case IdTrayOpen: ShowMainWindow(); return 0;
             case IdTrayExit: exiting_ = true; DestroyWindow(window_); return 0;

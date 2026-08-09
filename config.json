@@ -14,7 +14,7 @@
     "production": { "matchmakerUrl": "", "signalingUrl": "" }
   },
   "host": {
-    "targetProcessName": "cs2.exe",
+    "targetProcessName": "vlc.exe",
     "matchmaker": {
       "heartbeatIntervalMs": 20000
     },
