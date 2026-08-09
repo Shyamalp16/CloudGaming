@@ -1605,11 +1605,11 @@ func createPeerConnectionGo() C.int {
 		return 0
 	}
 
-	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
-		log.Printf("[Go/Pion] Error registering default codecs: %v\n", err)
-		// pcMutex.Unlock()
-		return 0
-	}
+	// Do not call RegisterDefaultCodecs after assigning our fixed H.264 and Opus
+	// payload types. Current Pion registers VP8 on payload type 96 by default,
+	// which collides with the H.264 payload type above and aborts initialization.
+	// The host only emits H.264 video and Opus audio, so these two explicit
+	// registrations are the complete supported media surface.
 	log.Println("[Go/Pion] createPeerConnectionGo: MediaEngine configured.")
 
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithInterceptorRegistry(i))

@@ -53,7 +53,7 @@ Write-Host 'Service stopped. Review the output above, then close this window.' -
 	) -WindowStyle Normal -PassThru
 }
 
-foreach ($port in 3000, 3002, 8080, 8081) {
+foreach ($port in 3000, 3002, 8080) {
 	if (Test-LocalPort $port) {
 		throw "Port $port is already in use. Stop the existing local stack before launching another copy."
 	}
@@ -82,7 +82,8 @@ $nodeLiteral = Quote-PowerShellLiteral $node
 Start-ServiceConsole 'Cloud Gaming - Signaling' $serverDirectory `
 	"`$env:PRETTY_LOGS='true'; & $nodeLiteral 'ScalableSignalingServer.js'" | Out-Null
 Wait-LocalPort 3002
-Wait-LocalPort 8081
+$health = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:3002/healthz' -TimeoutSec 5
+if ($health.StatusCode -ne 200) { throw 'The signaling health check failed.' }
 
 Start-ServiceConsole 'Cloud Gaming - Matchmaker' $serverDirectory `
 	"`$env:PRETTY_LOGS='true'; & $nodeLiteral 'mm_server\Matchmaker.js'" | Out-Null

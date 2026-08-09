@@ -61,12 +61,16 @@ void InitializeProcess()
     std::wcout << L"[AppInit] Apartment initialized." << std::endl;
 }
 
-void InitializeRtcBindings()
+bool InitializeRtcBindings()
 {
-    initGo();
+    if (initGo() == 0) {
+        std::cerr << "[AppInit] WebRTC initialization failed." << std::endl;
+        return false;
+    }
     SetRTCPCallback(onRTCP);
     WebRTCWrapper::setWebRTCStatsCallback(onEnhancedStats);
     SetPLICallback(OnPLI);
+    return true;
 }
 
 }

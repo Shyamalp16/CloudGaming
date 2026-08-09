@@ -168,8 +168,8 @@ Windows users can alternatively double-click `Start-CloudGaming.bat`, which is
 a thin wrapper around the same validated PowerShell launcher.
 
 The launcher uses the Redis installation in the default WSL distribution,
-starts signaling on 3002, matchmaker on 3000, health/readiness on 8081, and the
-browser server on 8080, then opens the tray host and browser. Close the service
+starts signaling (including health/readiness) on 3002, matchmaker on 3000, and
+the browser server on 8080, then opens the tray host and browser. Close the service
 console windows to stop the stack. Use `-NoHost` or `-NoBrowser` when those
 components are already running.
 

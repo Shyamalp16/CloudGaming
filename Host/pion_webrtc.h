@@ -53,7 +53,7 @@ extern "C" {
     /**
      * @brief Initializes the Go runtime.
      */
-    void initGo();
+    int initGo();
 
     /**
      * @brief Closes the Go runtime.

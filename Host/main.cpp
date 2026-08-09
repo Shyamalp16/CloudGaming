@@ -4,6 +4,7 @@
 #include <iostream>
 
 #include "AppInit.h"
+#include "AgentServer.h"
 #include "ConfigUtils.h"
 #include "ConfigStore.h"
 #include "Diagnostics.h"
@@ -48,6 +49,21 @@ int main(int argc, char** argv) {
 	}
     Diagnostics::Initialize();
     Diagnostics::InstallCrashHandler();
+    if ((argc == 2 && std::string(argv[1]) == "--agent") ||
+        (argc == 4 && std::string(argv[1]) == "--agent" && std::string(argv[2]) == "--pipe-name")) {
+        const std::string pipeName = argc == 4 ? argv[3] : "ReflexGaming.HostAgent.v1";
+        try {
+            AppInit::InitializeProcess();
+            AgentServer server(pipeName);
+            const int result = server.Run();
+            Diagnostics::Shutdown();
+            return result;
+        } catch (const std::exception& ex) {
+            LOG_FATAL(ErrorUtils::ErrorCategory::SYSTEM, "Native agent failed", ex.what());
+            Diagnostics::Shutdown();
+            return EXIT_FAILURE;
+        }
+    }
     if (argc == 3 && std::string(argv[1]) == "--set-secret") {
         const std::string name = argv[2];
         if (name != "hostSecret" && name != "turnUrls" && name != "turnUsername" && name != "turnCredential") {

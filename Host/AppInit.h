@@ -8,7 +8,7 @@ namespace AppInit {
     void InitializeProcess();
 
     // Initialize Go/WebRTC bindings and register callbacks
-    void InitializeRtcBindings();
+    bool InitializeRtcBindings();
 }
 
 

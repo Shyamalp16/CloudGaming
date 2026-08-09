@@ -297,7 +297,10 @@ bool HostRuntime::LoadAndValidateConfiguration() {
 }
 
 bool HostRuntime::StartCoreServices() {
-    AppInit::InitializeRtcBindings();
+    if (!AppInit::InitializeRtcBindings()) {
+        SetState(HostState::Failed, "WebRTC media initialization failed");
+        return false;
+    }
     rtcStarted_ = true;
 
     initKeyInputHandler();
@@ -309,22 +312,33 @@ bool HostRuntime::StartCoreServices() {
     }
     inputIntegrationStarted_ = true;
 
-    initWebsocket(roomId_, hostId_, endpoints_.signalingUrl, hostSecret_, endpoints_.mode,
-                  &session_, &streamProfiles_);
-    websocketStarted_ = true;
-
     if (matchmakerEnabled_) {
         if (!MatchmakerClient::initialize(endpoints_.matchmakerUrl, hostSecret_)) {
             SetState(HostState::Failed, "Failed to initialize the matchmaker client");
             return false;
         }
-		(void)MatchmakerClient::sendHeartbeat(hostId_, roomId_, pairingCode_);
+		matchmakerStarted_ = true;
+		auto heartbeat = MatchmakerClient::sendHeartbeat(hostId_, roomId_, pairingCode_);
+		if (heartbeat == MatchmakerClient::HeartbeatResult::RotatePairingCode) {
+			pairingCode_ = generateRoomId();
+			heartbeat = MatchmakerClient::sendHeartbeat(hostId_, roomId_, pairingCode_);
+		}
+		if (heartbeat == MatchmakerClient::HeartbeatResult::Failed) {
+			SetState(HostState::Failed, "Initial matchmaker registration failed");
+			return false;
+		}
+	}
+
+    initWebsocket(roomId_, hostId_, endpoints_.signalingUrl, hostSecret_, endpoints_.mode,
+                  &session_, &streamProfiles_);
+    websocketStarted_ = true;
+
+    if (matchmakerEnabled_) {
 		MatchmakerClient::startHeartbeatThread(hostId_, roomId_, pairingCode_, heartbeatIntervalMs_,
 			[this](const std::string& nextCode) {
 				std::lock_guard<std::mutex> lock(mutex_);
 				pairingCode_ = nextCode;
 			});
-        matchmakerStarted_ = true;
     }
     return true;
 }

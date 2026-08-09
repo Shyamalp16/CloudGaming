@@ -3,6 +3,7 @@
   <ItemGroup>
     <ClInclude Include="Host\Version.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="Host\HostController.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="Host\AgentServer.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="Host\TrayApplication.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="Host\UpdateManager.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="Host\ProcessDiscovery.h">
@@ -95,6 +96,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Host\HostController.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="Host\AgentServer.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="Host\TrayApplication.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="Host\UpdateManager.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="Host\ProcessDiscovery.cpp">
