@@ -34,6 +34,24 @@ Windows host (C++ / Go)
 | Matchmaker | `Server/mm_server/Matchmaker.js` | Node.js, Express, Redis |
 | Browser client | `Client/html-server/index.html` | HTML, JavaScript, WebRTC |
 
+## Windows host application and packaging
+
+Launching `DisplayCaptureProject.exe` without arguments opens the notification-
+area host application. It provides asynchronous start/stop controls, visible
+game/process selection, a copyable pairing code, client/session state, and live
+FPS, video/send bitrate, RTT, and audio state. The first launch generates a
+versioned per-user config under `%LOCALAPPDATA%\CloudGamingHost`; credentials are
+stored separately with Windows DPAPI and a user-only ACL.
+
+Create the complete portable payload and validated WiX MSI with:
+
+```powershell
+.\packaging\Build-Package.ps1 -Version 0.1.0 -BuildInstaller
+```
+
+See `Installer/README.md` for signing, upgrade, firewall, uninstall, and signed
+update-feed behavior.
+
 ## Pipeline behavior
 
 ### Capture, encode, and render

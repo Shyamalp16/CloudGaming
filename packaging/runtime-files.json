@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "required": [
+    "DisplayCaptureProject.exe",
+    "avcodec-61.dll",
+    "avdevice-61.dll",
+    "avfilter-10.dll",
+    "avformat-61.dll",
+    "avutil-59.dll",
+    "postproc-58.dll",
+    "swresample-5.dll",
+    "swscale-8.dll",
+    "webrtc.dll",
+    "opus.dll",
+    "libssl-3-x64.dll",
+    "libcrypto-3-x64.dll"
+  ],
+  "visualCppRuntime": [
+    "msvcp140.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll"
+  ]
+}

@@ -18,6 +18,9 @@
 #include "MatchmakerClient.h"
 #include "MouseInputHandler.h"
 #include "ShutdownManager.h"
+#include "SecretStore.h"
+#include "ConfigStore.h"
+#include "RuntimeMetrics.h"
 #include "Websocket.h"
 #include "WindowUtils.h"
 #include "pion_webrtc.h"
@@ -36,6 +39,15 @@ std::string ReadEnvironment(const char* name) {
     return value;
 }
 
+std::string ReadCredential(const char* environmentName, const char* secretName) {
+    auto value = ReadEnvironment(environmentName);
+    if (!value.empty()) return value;
+    std::string error;
+    const auto stored = SecretStore::Get(secretName, error);
+    if (!error.empty()) Diagnostics::Log("WARNING", "SECURITY", "Could not read protected credential", error);
+    return stored.value_or(std::string{});
+}
+
 bool HasValidIceUrlList(const std::string& urls) {
     if (urls.empty()) return false;
     size_t start = 0;
@@ -48,6 +60,17 @@ bool HasValidIceUrlList(const std::string& urls) {
         start = end + 1;
     }
     return true;
+}
+
+std::string WideToUtf8(const std::wstring& value) {
+    if (value.empty()) return {};
+    const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
+                                         nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+    std::string result(static_cast<size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
+                        result.data(), size, nullptr, nullptr);
+    return result;
 }
 }
 
@@ -72,14 +95,75 @@ HostRuntime::~HostRuntime() {
 }
 
 void HostRuntime::SetState(HostState state, std::string failureReason) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (state_ != state) {
-        std::cout << "[runtime] " << ToString(state_) << " -> " << ToString(state) << std::endl;
+    HostState previous;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        previous = state_;
+        state_ = state;
+        failureReason_ = std::move(failureReason);
     }
-    state_ = state;
-    failureReason_ = std::move(failureReason);
+    if (previous != state) {
+        std::cout << "[runtime] " << ToString(previous) << " -> " << ToString(state) << std::endl;
+    }
     Diagnostics::Log(state == HostState::Failed ? "ERROR" : "INFO", "LIFECYCLE",
-                     std::string("host state ") + ToString(state_), failureReason_);
+                     std::string("host state ") + ToString(state), GetStatus().failureReason);
+    NotifyStatus();
+}
+
+void HostRuntime::SetStatusCallback(StatusCallback callback) {
+    {
+        std::lock_guard<std::mutex> lock(callbackMutex_);
+        statusCallback_ = std::move(callback);
+    }
+    NotifyStatus();
+}
+
+void HostRuntime::NotifyStatus() {
+    StatusCallback callback;
+    {
+        std::lock_guard<std::mutex> lock(callbackMutex_);
+        callback = statusCallback_;
+    }
+    if (!callback) return;
+    try { callback(GetStatus()); }
+    catch (...) { Diagnostics::Log("WARNING", "UI", "Host status callback threw"); }
+}
+
+bool HostRuntime::QueueTargetSelection(std::string processName, std::wstring preferredTitle, std::string& error) {
+    if (processName.empty() || processName.size() > 260 || preferredTitle.size() > 512 ||
+        std::filesystem::path(processName).filename().string() != processName) {
+        error = "Invalid target process selection";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(commandMutex_);
+    pendingTarget_ = PendingTarget{std::move(processName), std::move(preferredTitle)};
+    return true;
+}
+
+void HostRuntime::ApplyPendingTargetSelection() {
+    std::optional<PendingTarget> pending;
+    {
+        std::lock_guard<std::mutex> lock(commandMutex_);
+        pending.swap(pendingTarget_);
+    }
+    if (!pending) return;
+    DetachTarget();
+    nlohmann::json persistentConfig;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        targetProcessName_ = pending->processName;
+        wideTargetProcessName_.assign(targetProcessName_.begin(), targetProcessName_.end());
+        preferredWindowTitle_ = pending->preferredTitle;
+        config_["host"]["targetProcessName"] = targetProcessName_;
+        config_["host"]["window"]["preferredTitleContains"] = WideToUtf8(preferredWindowTitle_);
+        persistentConfig = config_;
+    }
+    std::string saveError;
+    if (!ConfigStore::Save(persistentConfig, saveError)) {
+        Diagnostics::Log("WARNING", "CONFIG", "Target changed but configuration persistence failed", saveError);
+    }
+    nextTargetPoll_ = std::chrono::steady_clock::now();
+    SetState(HostState::WaitingForTarget);
 }
 
 bool HostRuntime::AcquireInstanceLock() {
@@ -131,7 +215,7 @@ bool HostRuntime::LoadAndValidateConfiguration() {
         preferredWindowTitle_.assign(title.begin(), title.end());
     }
 
-    if (!ConfigUtils::LoadNetworkEndpoints(endpoints_)) return false;
+    if (!ConfigUtils::LoadNetworkEndpoints(config_, endpoints_)) return false;
     const bool production = endpoints_.mode == "production";
     if (production) {
         if (endpoints_.signalingUrl.rfind("wss://", 0) != 0 ||
@@ -144,22 +228,29 @@ bool HostRuntime::LoadAndValidateConfiguration() {
         return false;
     }
 
-    hostSecret_ = ReadEnvironment("CLOUDGAMING_HOST_SECRET");
+    hostSecret_ = ReadCredential("CLOUDGAMING_HOST_SECRET", "hostSecret");
     if (production && hostSecret_.size() < 32) {
         SetState(HostState::Failed, "CLOUDGAMING_HOST_SECRET is required in production");
         return false;
     }
     SetEnvironmentVariableA("PION_NETWORK_MODE", endpoints_.mode.c_str());
-    std::string turnUrls = ReadEnvironment("PION_TURN_URLS");
+    std::string turnUrls = ReadCredential("PION_TURN_URLS", "turnUrls");
     if (turnUrls.empty()) turnUrls = ReadEnvironment("PION_TURN_URL");
+    const std::string turnUsername = ReadCredential("PION_TURN_USERNAME", "turnUsername");
+    const std::string turnCredential = ReadCredential("PION_TURN_CREDENTIAL", "turnCredential");
     if (!turnUrls.empty() && (!HasValidIceUrlList(turnUrls) ||
-        ReadEnvironment("PION_TURN_USERNAME").empty() || ReadEnvironment("PION_TURN_CREDENTIAL").empty())) {
+        turnUsername.empty() || turnCredential.empty())) {
         SetState(HostState::Failed, "TURN URLs and credentials are incomplete or invalid");
         return false;
     }
     if (production && turnUrls.empty()) {
         SetState(HostState::Failed, "Production requires configured TURN credentials");
         return false;
+    }
+    if (!turnUrls.empty()) {
+        SetEnvironmentVariableA("PION_TURN_URLS", turnUrls.c_str());
+        SetEnvironmentVariableA("PION_TURN_USERNAME", turnUsername.c_str());
+        SetEnvironmentVariableA("PION_TURN_CREDENTIAL", turnCredential.c_str());
     }
     matchmakerEnabled_ = !endpoints_.matchmakerUrl.empty();
     if (config_.contains("host") && config_["host"].contains("matchmaker")) {
@@ -233,9 +324,14 @@ bool HostRuntime::Start() {
             return false;
         }
 
-        roomId_ = generateRoomId();
-        hostId_ = generateHostId();
-        PrintBanner(roomId_);
+        const auto generatedRoomId = generateRoomId();
+        const auto generatedHostId = generateHostId();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            roomId_ = generatedRoomId;
+            hostId_ = generatedHostId;
+        }
+        PrintBanner(generatedRoomId);
         if (!StartCoreServices()) {
             Stop();
             return false;
@@ -254,10 +350,19 @@ bool HostRuntime::Start() {
 }
 
 bool HostRuntime::TryAttachTarget() {
+    std::wstring processName;
+    std::wstring preferredTitle;
+    std::string narrowProcessName;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        processName = wideTargetProcessName_;
+        preferredTitle = preferredWindowTitle_;
+        narrowProcessName = targetProcessName_;
+    }
     HWND window = nullptr;
     DWORD pid = 0;
     if (!WindowUtils::PickWindowByProcessName(
-            wideTargetProcessName_, window, pid, preferredWindowTitle_, false) || !window) {
+            processName, window, pid, preferredTitle, false) || !window) {
         return false;
     }
 
@@ -277,14 +382,14 @@ bool HostRuntime::TryAttachTarget() {
     }
 
     capture_ = std::move(replacement);
-    targetWindow_ = window;
-    targetPid_ = pid;
-    WindowUtils::SetTargetWindow(targetWindow_);
+    targetWindow_.store(window, std::memory_order_release);
+    targetPid_.store(pid, std::memory_order_release);
+    WindowUtils::SetTargetWindow(window);
     StartCapture();
     GraphicsAndCapture::Start(capture_);
     captureStarted_ = true;
 
-    audioStarted_ = audio_.StartCapture(targetPid_, targetProcessName_);
+    audioStarted_ = audio_.StartCapture(pid, narrowProcessName);
     if (!audioStarted_) {
         std::cerr << "[runtime] Process audio is unavailable; video remains ready" << std::endl;
     }
@@ -304,11 +409,12 @@ void HostRuntime::DetachTarget() noexcept {
         capture_ = {};
     }
     WindowUtils::SetTargetWindow(nullptr);
-    targetWindow_ = nullptr;
-    targetPid_ = 0;
+    targetWindow_.store(nullptr, std::memory_order_release);
+    targetPid_.store(0, std::memory_order_release);
 }
 
 void HostRuntime::Tick() {
+    ApplyPendingTargetSelection();
     const auto now = std::chrono::steady_clock::now();
     if (!captureStarted_) {
         if (now >= nextTargetPoll_) {
@@ -318,7 +424,8 @@ void HostRuntime::Tick() {
         return;
     }
 
-    if (!targetWindow_ || !IsWindow(targetWindow_)) {
+    const HWND activeWindow = targetWindow_.load(std::memory_order_acquire);
+    if (!activeWindow || !IsWindow(activeWindow)) {
         if (invalidWindowSince_ == std::chrono::steady_clock::time_point{}) {
             invalidWindowSince_ = now;
         }
@@ -333,8 +440,8 @@ void HostRuntime::Tick() {
     invalidWindowSince_ = {};
 
     const int peerState = getPeerConnectionState();
-    if (peerState != lastPeerState_) {
-        lastPeerState_ = peerState;
+    if (peerState != lastPeerState_.load(std::memory_order_relaxed)) {
+        lastPeerState_.store(peerState, std::memory_order_relaxed);
         if (peerState == 2 || peerState == 3) {
             SetState(HostState::Streaming);
         } else if (peerState == 1) {
@@ -404,6 +511,12 @@ void HostRuntime::Stop() noexcept {
         rtcStarted_ = false;
     }
     ReleaseInstanceLock();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        roomId_.clear();
+        hostId_.clear();
+    }
+    lastPeerState_.store(-1, std::memory_order_release);
     SetState(HostState::Stopped);
 }
 
@@ -420,9 +533,9 @@ HostStatus HostRuntime::GetStatus() const {
     status.hostId = hostId_;
     status.roomId = roomId_;
     status.targetProcessName = targetProcessName_;
-    status.targetPid = targetPid_;
-    status.targetWindow = targetWindow_;
-    status.peerConnectionState = lastPeerState_;
+    status.targetPid = targetPid_.load(std::memory_order_acquire);
+    status.targetWindow = targetWindow_.load(std::memory_order_acquire);
+    status.peerConnectionState = lastPeerState_.load(std::memory_order_relaxed);
     return status;
 }
 
@@ -434,6 +547,7 @@ nlohmann::json HostRuntime::GetHealthSnapshot() const {
     const auto capture = GetCaptureHealth();
     const auto encoder = Encoder::GetHealth();
     const auto logging = Diagnostics::GetStatus();
+    const auto network = RuntimeMetrics::GetNetwork();
     nlohmann::json input{{"running", InputIntegrationLayer::isRunning()}};
     if (auto* transport = InputTransportLayer::getGlobalTransport()) {
         const auto stats = transport->getStats();
@@ -471,13 +585,22 @@ nlohmann::json HostRuntime::GetHealthSnapshot() const {
                      {"hwAcquireFailures", encoder.hwAcquireFailures},
                      {"videoProcessorFailures", encoder.videoProcessorFailures},
                      {"submitFailures", encoder.submitFailures}}},
+        {"network", {{"rttMs", network.rttMs}, {"jitterMs", network.jitterMs},
+                     {"packetLoss", network.packetLoss}, {"sendBitrateKbps", network.sendBitrateKbps},
+                     {"pacerQueueLength", network.pacerQueueLength}, {"nackCount", network.nackCount},
+                     {"pliCount", network.pliCount}}},
         {"logging", {{"initialized", logging.initialized}, {"activeLog", logging.activeLog.string()},
                      {"recordsWritten", logging.recordsWritten}, {"writeFailures", logging.writeFailures}}}
     };
 }
 
 bool HostRuntime::CreateSupportBundle(std::filesystem::path& outputDirectory, std::string& error) const {
-    return Diagnostics::CreateSupportBundle(GetHealthSnapshot(), config_, outputDirectory, error);
+    nlohmann::json config;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        config = config_;
+    }
+    return Diagnostics::CreateSupportBundle(GetHealthSnapshot(), config, outputDirectory, error);
 }
 
 void PrintBanner(const std::string& roomId) {

@@ -1,0 +1,51 @@
+name: Release Windows host
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer matching Host/Version.h
+        required: true
+        type: string
+      channel:
+        description: Update channel
+        required: true
+        default: stable
+        type: choice
+        options: [stable, beta]
+      download_url:
+        description: Final HTTPS MSI URL
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: [self-hosted, Windows, X64, cloud-gaming-build]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build host payload and MSI
+        shell: pwsh
+        env:
+          SIGNING_CERT_THUMBPRINT: ${{ secrets.WINDOWS_SIGNING_CERT_THUMBPRINT }}
+          TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: .\packaging\Build-Package.ps1 -Version '${{ inputs.version }}' -BuildInstaller -CertificateThumbprint $env:SIGNING_CERT_THUMBPRINT -TimestampUrl $env:TIMESTAMP_URL
+      - name: Create and sign update manifest
+        shell: pwsh
+        env:
+          SIGNING_CERT_THUMBPRINT: ${{ secrets.WINDOWS_SIGNING_CERT_THUMBPRINT }}
+        run: |
+          $msi = ".\Installer\bin\x64\Release\CloudGamingHost-${{ inputs.version }}-x64.msi"
+          .\packaging\New-UpdateManifest.ps1 -Version '${{ inputs.version }}' -InstallerPath $msi -DownloadUrl '${{ inputs.download_url }}' -Channel '${{ inputs.channel }}'
+          .\packaging\Sign-UpdateManifest.ps1 -ManifestPath .\artifacts\update-manifest.json -CertificateThumbprint $env:SIGNING_CERT_THUMBPRINT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CloudGamingHost-${{ inputs.version }}-x64
+          if-no-files-found: error
+          path: |
+            Installer/bin/x64/Release/*.msi
+            artifacts/CloudGamingHost-${{ inputs.version }}-x64.zip
+            artifacts/update-manifest.json
+            artifacts/update-manifest.json.p7s

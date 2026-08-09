@@ -5,6 +5,7 @@
 #include "AudioCapturer.h"
 #include "ThreadPriorityManager.h"
 #include "AdaptiveQualityControl.h"
+#include "ConfigStore.h"
 
 #include <fstream>
 #include <filesystem>
@@ -45,53 +46,13 @@ bool openNetworkConfig(std::ifstream& stream, std::filesystem::path& selectedPat
 
 bool LoadConfig(nlohmann::json& outConfig)
 {
-    try {
-        // Get current working directory for debugging
-        char cwd[1024];
-        if (GetCurrentDirectoryA(sizeof(cwd), cwd)) {
-            std::wcout << L"[config] Current working directory: " << cwd << std::endl;
-        }
-
-        std::vector<std::filesystem::path> candidates = {
-            std::filesystem::path("config.json")
-        };
-        std::ifstream configFile;
-
-        // Also resolve config relative to the executable. This makes launching
-        // x64\Debug\DisplayCaptureProject.exe or x64\Release\DisplayCaptureProject.exe
-        // from Explorer/Visual Studio behave exactly like launching from the repo root.
-        char exePath[MAX_PATH];
-        if (GetModuleFileNameA(NULL, exePath, MAX_PATH)) {
-            const auto exeDir = std::filesystem::path(exePath).parent_path();
-            candidates.push_back(exeDir / "config.json");
-            candidates.push_back(exeDir / ".." / "config.json");
-            candidates.push_back(exeDir / ".." / ".." / "config.json");
-        }
-
-        std::filesystem::path selectedPath;
-        for (const auto& candidate : candidates) {
-            configFile.open(candidate);
-            if (configFile.is_open()) {
-                selectedPath = std::filesystem::absolute(candidate).lexically_normal();
-                break;
-            }
-            configFile.clear();
-        }
-
-        if (!configFile.is_open()) {
-            std::wcerr << L"[config] Error opening config.json from any location" << std::endl;
-            std::wcerr << L"[config] Make sure config.json exists in the working directory or executable directory" << std::endl;
-            return false;
-        }
-
-        std::wcout << L"[config] Loaded: " << selectedPath.wstring() << std::endl;
-
-        configFile >> outConfig;
-        return true;
-    } catch (const std::exception& e) {
-        std::wcerr << L"[config] Error reading config.json: " << e.what() << std::endl;
+    std::string error;
+    if (!ConfigStore::EnsureUserConfig(outConfig, error)) {
+        std::cerr << "[config] " << error << std::endl;
         return false;
     }
+    std::cout << "[config] Loaded user configuration: " << ConfigStore::Path().string() << std::endl;
+    return true;
 }
 
 bool GetTargetProcessName(const nlohmann::json& config, std::string& outName)
@@ -264,6 +225,32 @@ bool LoadNetworkEndpoints(NetworkEndpoints& outEndpoints)
         std::cerr << "[network] Failed to load network configuration: " << e.what() << std::endl;
         return false;
     }
+}
+
+bool LoadNetworkEndpoints(const nlohmann::json& config, NetworkEndpoints& outEndpoints)
+{
+    if (!config.contains("network") || !config["network"].is_object()) {
+        return LoadNetworkEndpoints(outEndpoints);
+    }
+    try {
+        const auto& networkConfig = config["network"];
+        outEndpoints.mode = networkConfig.value("mode", std::string{});
+        if (outEndpoints.mode == "local" || outEndpoints.mode == "lan") {
+            const auto ports = networkConfig.value("ports", nlohmann::json::object());
+            const int signalingPort = ports.value("signaling", 3002);
+            const int matchmakerPort = ports.value("matchmaker", 3000);
+            if (signalingPort < 1 || signalingPort > 65535 || matchmakerPort < 1 || matchmakerPort > 65535) return false;
+            outEndpoints.signalingUrl = "ws://127.0.0.1:" + std::to_string(signalingPort);
+            outEndpoints.matchmakerUrl = "http://127.0.0.1:" + std::to_string(matchmakerPort);
+        } else if (outEndpoints.mode == "production") {
+            const auto production = networkConfig.value("production", nlohmann::json::object());
+            outEndpoints.signalingUrl = production.value("signalingUrl", std::string{});
+            outEndpoints.matchmakerUrl = production.value("matchmakerUrl", std::string{});
+            if (outEndpoints.signalingUrl.rfind("wss://", 0) != 0 ||
+                outEndpoints.matchmakerUrl.rfind("https://", 0) != 0) return false;
+        } else return false;
+        return true;
+    } catch (...) { return false; }
 }
 
 void ApplyAudioSettings(const nlohmann::json& config)

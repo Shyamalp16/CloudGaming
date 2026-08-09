@@ -6,6 +6,8 @@
 #include <mutex>
 #include <string>
 #include <filesystem>
+#include <functional>
+#include <optional>
 
 #include <nlohmann/json.hpp>
 
@@ -45,6 +47,7 @@ struct HostStatus {
 // call Start/Stop/Restart and GetStatus rather than directly owning subsystems.
 class HostRuntime final {
 public:
+    using StatusCallback = std::function<void(const HostStatus&)>;
     HostRuntime();
     ~HostRuntime();
 
@@ -60,6 +63,8 @@ public:
     HostStatus GetStatus() const;
     nlohmann::json GetHealthSnapshot() const;
     bool CreateSupportBundle(std::filesystem::path& outputDirectory, std::string& error) const;
+    bool QueueTargetSelection(std::string processName, std::wstring preferredTitle, std::string& error);
+    void SetStatusCallback(StatusCallback callback);
     bool IsStopRequested() const noexcept;
 
 private:
@@ -69,10 +74,14 @@ private:
     bool TryAttachTarget();
     void DetachTarget() noexcept;
     void Tick();
+    void ApplyPendingTargetSelection();
+    void NotifyStatus();
     void SetState(HostState state, std::string failureReason = {});
     void ReleaseInstanceLock() noexcept;
 
     mutable std::mutex mutex_;
+    mutable std::mutex callbackMutex_;
+    mutable std::mutex commandMutex_;
     std::atomic<bool> stopRequested_{false};
     HostState state_ = HostState::Stopped;
     std::string failureReason_;
@@ -101,9 +110,12 @@ private:
     bool windowReattachEnabled_ = true;
     bool matchmakerEnabled_ = false;
 
-    HWND targetWindow_ = nullptr;
-    DWORD targetPid_ = 0;
-    int lastPeerState_ = -1;
+    std::atomic<HWND> targetWindow_{nullptr};
+    std::atomic<DWORD> targetPid_{0};
+    std::atomic<int> lastPeerState_{-1};
+    struct PendingTarget { std::string processName; std::wstring preferredTitle; };
+    std::optional<PendingTarget> pendingTarget_;
+    StatusCallback statusCallback_;
     std::chrono::steady_clock::time_point nextTargetPoll_{};
     std::chrono::steady_clock::time_point invalidWindowSince_{};
 

@@ -92,11 +92,11 @@
       <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
 ;avformat.lib
 ;avutil.lib
-;swscale.lib;boost_regex-vc143-mt-gd-x64-1_86.lib;boost_date_time-vc143-mt-gd-x64-1_86.lib;boost_system-vc143-mt-gd-x64-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib;ws2_32.lib;libssl.lib;libcrypto.lib;</AdditionalDependencies>
+;swscale.lib;boost_regex-vc143-mt-gd-x64-1_86.lib;boost_date_time-vc143-mt-gd-x64-1_86.lib;boost_system-vc143-mt-gd-x64-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib;ws2_32.lib;Shell32.lib;Gdi32.lib;libssl.lib;libcrypto.lib;</AdditionalDependencies>
       <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
 ;avformat.lib
 ;avutil.lib
-;swscale.lib;boost_regex-vc143-mt-gd-x86-1_86.lib;boost_date_time-vc143-mt-gd-x86-1_86.lib;boost_system-vc143-mt-gd-x86-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib;ws2_32.lib</AdditionalDependencies>
+;swscale.lib;boost_regex-vc143-mt-gd-x86-1_86.lib;boost_date_time-vc143-mt-gd-x86-1_86.lib;boost_system-vc143-mt-gd-x86-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib;ws2_32.lib;Shell32.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
@@ -126,11 +126,11 @@
       <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
 ;avformat.lib
 ;avutil.lib
-;swscale.lib;boost_regex-vc143-mt-x64-1_86.lib;boost_date_time-vc143-mt-x64-1_86.lib;boost_system-vc143-mt-x64-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib;ws2_32.lib;libssl.lib;libcrypto.lib</AdditionalDependencies>
+;swscale.lib;boost_regex-vc143-mt-x64-1_86.lib;boost_date_time-vc143-mt-x64-1_86.lib;boost_system-vc143-mt-x64-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib;ws2_32.lib;Shell32.lib;Gdi32.lib;libssl.lib;libcrypto.lib</AdditionalDependencies>
       <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(CoreLibraryDependencies);%(AdditionalDependencies);avcodec.lib
 ;avformat.lib
 ;avutil.lib
-;swscale.lib;boost_regex-vc143-mt-x86-1_86.lib;boost_date_time-vc143-mt-x86-1_86.lib;boost_system-vc143-mt-x86-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib;ws2_32.lib</AdditionalDependencies>
+;swscale.lib;boost_regex-vc143-mt-x86-1_86.lib;boost_date_time-vc143-mt-x86-1_86.lib;boost_system-vc143-mt-x86-1_86.lib;webrtc.lib;opus.lib;dmoguids.lib;mfuuid.lib;mfplat.lib;wmcodecdspuuid.lib;strmiids.lib;ole32.lib;oleaut32.lib;Advapi32.lib;ws2_32.lib;Shell32.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <!-- Keep the native host runnable directly from its output directory. The
@@ -150,20 +150,30 @@
   </Target>
   <ItemGroup>
     <ClInclude Include="Host\AdaptiveQualityControl.h" />
+    <ClInclude Include="Host\AppPaths.h" />
     <ClInclude Include="Host\AppInit.h" />
     <ClInclude Include="Host\httplib.h" />
     <ClInclude Include="Host\MatchmakerClient.h" />
+    <ClInclude Include="Host\ProcessDiscovery.h" />
     <ClInclude Include="Host\InputStateMachine.h" />
     <ClInclude Include="Host\MouseCoordinateTransform.h" />
     <ClInclude Include="Host\InputSequenceManager.h" />
     <ClInclude Include="Host\ConfigUtils.h" />
+    <ClInclude Include="Host\ConfigStore.h" />
     <ClInclude Include="Host\GraphicsAndCapture.h" />
+    <ClInclude Include="Host\HostController.h" />
     <ClInclude Include="Host\Runtime.h" />
+    <ClInclude Include="Host\RuntimeMetrics.h" />
     <ClInclude Include="Host\SessionManager.h" />
+    <ClInclude Include="Host\SecretStore.h" />
     <ClInclude Include="Host\SelfTests.h" />
     <ClInclude Include="Host\StreamProfileManager.h" />
     <ClInclude Include="Host\ThreadPriorityManager.h" />
+    <ClInclude Include="Host\TrayApplication.h" />
+    <ClInclude Include="Host\UpdateManager.h" />
     <ClInclude Include="Host\WindowUtils.h" />
+    <ClInclude Include="Host\WindowsSecurity.h" />
+    <ClInclude Include="Host\Version.h" />
     <ClInclude Include="Host\AudioCapturer.h" />
     <ClInclude Include="Host\CaptureHelpers.h" />
     <ClInclude Include="Host\D3DHelpers.h" />
@@ -188,19 +198,30 @@
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
+    <ResourceCompile Include="Host\CloudGamingHost.rc" />
+  </ItemGroup>
+  <ItemGroup>
     <ClCompile Include="Host\AdaptiveQualityControl.cpp" />
+    <ClCompile Include="Host\AppPaths.cpp" />
     <ClCompile Include="Host\AppInit.cpp" />
     <ClCompile Include="Host\InputStateMachine.cpp" />
     <ClCompile Include="Host\MouseCoordinateTransform.cpp" />
     <ClCompile Include="Host\InputSequenceManager.cpp" />
     <ClCompile Include="Host\ConfigUtils.cpp" />
+    <ClCompile Include="Host\ConfigStore.cpp" />
     <ClCompile Include="Host\GraphicsAndCapture.cpp" />
+    <ClCompile Include="Host\HostController.cpp" />
     <ClCompile Include="Host\Runtime.cpp" />
+    <ClCompile Include="Host\RuntimeMetrics.cpp" />
     <ClCompile Include="Host\SessionManager.cpp" />
+    <ClCompile Include="Host\SecretStore.cpp" />
     <ClCompile Include="Host\SelfTests.cpp" />
     <ClCompile Include="Host\StreamProfileManager.cpp" />
     <ClCompile Include="Host\ThreadPriorityManager.cpp" />
+    <ClCompile Include="Host\TrayApplication.cpp" />
+    <ClCompile Include="Host\UpdateManager.cpp" />
     <ClCompile Include="Host\WindowUtils.cpp" />
+    <ClCompile Include="Host\WindowsSecurity.cpp" />
     <ClCompile Include="Host\AudioCapturer.cpp" />
     <ClCompile Include="Host\CaptureHelpers.cpp" />
     <ClCompile Include="Host\D3DHelpers.cpp" />
@@ -216,6 +237,7 @@
     <ClCompile Include="Host\KeyInputHandler.cpp" />
     <ClCompile Include="Host\main.cpp" />
     <ClCompile Include="Host\MatchmakerClient.cpp" />
+    <ClCompile Include="Host\ProcessDiscovery.cpp" />
     <ClCompile Include="Host\MouseInputHandler.cpp" />
     <ClCompile Include="Host\ShutdownManager.cpp" />
     <ClCompile Include="Host\WebRTCWrapper.cpp" />

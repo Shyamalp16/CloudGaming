@@ -1,6 +1,20 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <ClInclude Include="Host\Version.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="Host\HostController.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="Host\TrayApplication.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="Host\UpdateManager.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="Host\ProcessDiscovery.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Host\RuntimeMetrics.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Host\AppPaths.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="Host\ConfigStore.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="Host\SecretStore.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="Host\WindowsSecurity.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="Host\AppInit.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -75,6 +89,24 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <ResourceCompile Include="Host\CloudGamingHost.rc">
+      <Filter>Resource Files</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Host\HostController.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="Host\TrayApplication.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="Host\UpdateManager.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="Host\ProcessDiscovery.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\RuntimeMetrics.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Host\AppPaths.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="Host\ConfigStore.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="Host\SecretStore.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="Host\WindowsSecurity.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="Host\AppInit.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

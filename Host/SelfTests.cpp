@@ -5,6 +5,8 @@
 
 #include "InputSchema.h"
 #include "Diagnostics.h"
+#include "ConfigStore.h"
+#include "SecretStore.h"
 #include "SessionManager.h"
 #include "StreamProfileManager.h"
 #include "Websocket.h"
@@ -28,6 +30,25 @@ bool RunHostSelfTests() {
     passed &= Check(redacted.find("topsecret") == std::string::npos &&
                     redacted.find("abc123") == std::string::npos && redacted.find("def456") == std::string::npos,
                     "diagnostic secret redaction");
+
+    nlohmann::json legacy{{"host", {{"targetProcessName", "game.exe"}, {"video", nlohmann::json::object()}}}};
+    bool migrated = false;
+    std::string configError;
+    passed &= Check(ConfigStore::ValidateAndMigrate(legacy, migrated, configError) && migrated &&
+                    legacy.value("schemaVersion", 0) == ConfigStore::kCurrentSchemaVersion &&
+                    legacy.contains("network"), "configuration migration");
+    nlohmann::json future = legacy;
+    future["schemaVersion"] = ConfigStore::kCurrentSchemaVersion + 1;
+    passed &= Check(!ConfigStore::ValidateAndMigrate(future, migrated, configError),
+                    "future configuration rejection");
+
+    std::string secretError;
+    const std::string testSecret = "dpapi-self-test-value";
+    const bool secretStored = SecretStore::Set("selfTestCredential", testSecret, secretError);
+    const auto recoveredSecret = secretStored ? SecretStore::Get("selfTestCredential", secretError) : std::nullopt;
+    const bool secretRemoved = secretStored && SecretStore::Remove("selfTestCredential", secretError);
+    passed &= Check(secretStored && recoveredSecret == testSecret && secretRemoved,
+                    "DPAPI credential round trip");
 
     SessionManager sessions;
     const std::string sessionId = "01234567-89ab-4cde-8fab-0123456789ab";

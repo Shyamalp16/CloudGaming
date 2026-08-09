@@ -5,10 +5,15 @@
 
 #include "AppInit.h"
 #include "ConfigUtils.h"
+#include "ConfigStore.h"
 #include "Diagnostics.h"
 #include "ErrorUtils.h"
 #include "Runtime.h"
 #include "SelfTests.h"
+#include "SecretStore.h"
+#include "TrayApplication.h"
+#include "UpdateManager.h"
+#include "Version.h"
 
 namespace {
 std::atomic<Runtime::HostRuntime*> g_runtime{nullptr};
@@ -32,8 +37,55 @@ BOOL WINAPI ConsoleControlHandler(DWORD controlType) {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--version") {
+        std::cout << CLOUD_GAMING_VERSION << std::endl;
+        return EXIT_SUCCESS;
+    }
     Diagnostics::Initialize();
     Diagnostics::InstallCrashHandler();
+    if (argc == 3 && std::string(argv[1]) == "--set-secret") {
+        const std::string name = argv[2];
+        if (name != "hostSecret" && name != "turnUrls" && name != "turnUsername" && name != "turnCredential") {
+            std::cerr << "Unsupported secret name" << std::endl;
+            Diagnostics::Shutdown();
+            return EXIT_FAILURE;
+        }
+        std::string value, error;
+        std::getline(std::cin, value);
+        const bool saved = !value.empty() && SecretStore::Set(name, value, error);
+        if (!saved) std::cerr << (error.empty() ? "Secret cannot be empty" : error) << std::endl;
+        Diagnostics::Shutdown();
+        return saved ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    if (argc == 4 && std::string(argv[1]) == "--configure-production") {
+        nlohmann::json config;
+        std::string error;
+        const auto loaded = ConfigStore::Load(config);
+        bool saved = loaded.success;
+        if (saved) {
+            config["network"]["mode"] = "production";
+            config["network"]["production"]["signalingUrl"] = argv[2];
+            config["network"]["production"]["matchmakerUrl"] = argv[3];
+            config["setup"]["completed"] = true;
+            saved = ConfigStore::Save(config, error);
+        } else error = loaded.error;
+        if (!saved) std::cerr << error << std::endl;
+        Diagnostics::Shutdown();
+        return saved ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--check-updates") {
+        nlohmann::json config;
+        const auto loaded = ConfigStore::Load(config);
+        if (!loaded.success) {
+            std::cerr << loaded.error << std::endl;
+            Diagnostics::Shutdown();
+            return EXIT_FAILURE;
+        }
+        const auto update = UpdateManager::Check(config);
+        std::cout << update.message << std::endl;
+        Diagnostics::Shutdown();
+        return update.status == UpdateManager::Status::Error ? EXIT_FAILURE : EXIT_SUCCESS;
+    }
     if (argc == 2 && std::string(argv[1]) == "--self-test") {
         const bool passed = RunHostSelfTests();
         Diagnostics::Shutdown();
@@ -52,6 +104,19 @@ int main(int argc, char** argv) {
         else std::cerr << "Support bundle failed: " << error << std::endl;
         Diagnostics::Shutdown();
         return created ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    if (argc == 1) {
+        try {
+            AppInit::InitializeProcess();
+            if (HWND console = GetConsoleWindow()) ShowWindow(console, SW_HIDE);
+            const int result = RunTrayApplication();
+            Diagnostics::Shutdown();
+            return result;
+        } catch (const std::exception& ex) {
+            LOG_FATAL(ErrorUtils::ErrorCategory::SYSTEM, "Host UI failed", ex.what());
+            Diagnostics::Shutdown();
+            return EXIT_FAILURE;
+        }
     }
     Runtime::HostRuntime runtime;
     g_runtime.store(&runtime, std::memory_order_release);

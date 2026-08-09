@@ -3,6 +3,8 @@
 #include "Encoder.h"
 #include "AudioCapturer.h"
 #include "pion_webrtc.h"
+#include "WebRTCWrapper.h"
+#include "RuntimeMetrics.h"
 #include <iostream>
 
 // PLI callback implemented in Encoder.cpp
@@ -10,11 +12,18 @@ extern "C" void OnPLI();
 
 namespace {
     void onRTCP(double packetLoss, double rtt, double jitter) {
+        RuntimeMetrics::UpdateBasic(packetLoss, rtt, jitter);
         // Video bitrate adaptation (existing)
         Encoder::OnRtcpFeedback(packetLoss, rtt, jitter);
 
         // Audio bitrate adaptation (new)
         AudioCapturer::OnRtcpFeedback(packetLoss, rtt, jitter);
+    }
+    void onEnhancedStats(double packetLoss, double rtt, double jitter,
+                         uint32_t nackCount, uint32_t pliCount, uint32_t /*twccCount*/,
+                         uint32_t pacerQueueLength, uint32_t sendBitrateKbps) {
+        RuntimeMetrics::UpdateEnhanced(packetLoss, rtt, jitter, nackCount, pliCount,
+                                      pacerQueueLength, sendBitrateKbps);
     }
 }
 
@@ -39,6 +48,7 @@ void InitializeRtcBindings()
 {
     initGo();
     SetRTCPCallback(onRTCP);
+    WebRTCWrapper::setWebRTCStatsCallback(onEnhancedStats);
     SetPLICallback(OnPLI);
 }
 

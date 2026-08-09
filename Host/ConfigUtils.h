@@ -17,6 +17,7 @@ namespace ConfigUtils {
     // reaches local/LAN test services over loopback; the browser derives the
     // server machine address from the page URL.
     bool LoadNetworkEndpoints(NetworkEndpoints& outEndpoints);
+    bool LoadNetworkEndpoints(const nlohmann::json& config, NetworkEndpoints& outEndpoints);
 
     // Extract target process name from config (host.targetProcessName)
     bool GetTargetProcessName(const nlohmann::json& config, std::string& outName);

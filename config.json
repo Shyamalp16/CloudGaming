@@ -1,4 +1,18 @@
 {
+  "schemaVersion": 1,
+  "setup": {
+    "completed": false
+  },
+  "update": {
+    "channel": "stable",
+    "feedUrl": "",
+    "publisherCertificateSha256": ""
+  },
+  "network": {
+    "mode": "local",
+    "ports": { "matchmaker": 3000, "signaling": 3002 },
+    "production": { "matchmakerUrl": "", "signalingUrl": "" }
+  },
   "host": {
     "targetProcessName": "cs2.exe",
     "matchmaker": {
