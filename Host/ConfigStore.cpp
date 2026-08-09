@@ -3,6 +3,7 @@
 #include <Windows.h>
 
 #include <fstream>
+#include <regex>
 #include <vector>
 
 #include "AppPaths.h"
@@ -22,6 +23,10 @@ bool ReadJson(const std::filesystem::path& path, nlohmann::json& value, std::str
     try {
         std::ifstream stream(path, std::ios::binary);
         if (!stream) { error = "Cannot open " + path.string(); return false; }
+		stream.seekg(0, std::ios::end);
+		const auto size = stream.tellg();
+		if (size < 0 || size > 1024 * 1024) { error = "Configuration exceeds the 1 MiB limit"; return false; }
+		stream.seekg(0, std::ios::beg);
         stream >> value;
         if (!value.is_object()) { error = "Configuration root must be an object"; return false; }
         return true;
@@ -69,6 +74,11 @@ bool ValidateAndMigrate(nlohmann::json& config, bool& migrated, std::string& err
         error = "host.targetProcessName must be a string";
         return false;
     }
+	const auto targetName = host["targetProcessName"].get<std::string>();
+	if (!std::regex_match(targetName, std::regex(R"(^[A-Za-z0-9 _.-]{1,260}\.exe$)", std::regex::icase))) {
+		error = "host.targetProcessName must be a plain executable filename";
+		return false;
+	}
     if (!host.contains("video") || !host["video"].is_object()) {
         error = "host.video must be an object";
         return false;
@@ -94,6 +104,10 @@ bool ValidateAndMigrate(nlohmann::json& config, bool& migrated, std::string& err
         error = "update must be an object";
         return false;
     }
+	if (config.contains("update")) {
+		const auto channel = config["update"].value("channel", std::string{"stable"});
+		if (channel != "stable" && channel != "beta") { error = "update.channel must be stable or beta"; return false; }
+	}
     return true;
 }
 
@@ -138,6 +152,11 @@ bool Save(const nlohmann::json& config, std::string& error) {
     try {
         const auto target = Path();
         std::filesystem::create_directories(target.parent_path());
+        std::string aclError;
+        if (!WindowsSecurity::ProtectForCurrentUserAndSystem(target.parent_path(), aclError)) {
+            error = aclError;
+            return false;
+        }
         const auto temporary = target.wstring() + L".tmp";
         {
             std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
@@ -146,13 +165,16 @@ bool Save(const nlohmann::json& config, std::string& error) {
             stream.flush();
             if (!stream) { error = "Cannot flush temporary configuration"; return false; }
         }
+        if (!WindowsSecurity::ProtectForCurrentUserAndSystem(temporary, aclError)) {
+            DeleteFileW(temporary.c_str());
+            error = aclError;
+            return false;
+        }
         if (!MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
             error = "Atomic configuration replacement failed: " + std::to_string(GetLastError());
             DeleteFileW(temporary.c_str());
             return false;
         }
-        std::string aclError;
-        WindowsSecurity::ProtectForCurrentUserAndSystem(target.parent_path(), aclError);
         if (!WindowsSecurity::ProtectForCurrentUserAndSystem(target, aclError)) { error = aclError; return false; }
         return true;
     } catch (const std::exception& ex) {

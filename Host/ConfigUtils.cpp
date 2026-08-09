@@ -11,10 +11,35 @@
 #include <filesystem>
 #include <vector>
 #include <Windows.h>
+#include <Winhttp.h>
+
+#pragma comment(lib, "Winhttp.lib")
 
 namespace ConfigUtils {
 
 namespace {
+bool validServiceEndpoint(const std::string& value, bool websocket, bool secure) {
+    const std::string required = websocket ? (secure ? "wss://" : "ws://")
+                                           : (secure ? "https://" : "http://");
+    if (value.rfind(required, 0) != 0 || value.size() > 2048) return false;
+    std::string normalized = value;
+    normalized.replace(0, required.size(), secure ? "https://" : "http://");
+    const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, normalized.data(),
+        static_cast<int>(normalized.size()), nullptr, 0);
+    if (size <= 0) return false;
+    std::wstring wide(static_cast<size_t>(size), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, normalized.data(),
+        static_cast<int>(normalized.size()), wide.data(), size) != size) return false;
+    URL_COMPONENTSW parts{sizeof(parts)};
+    parts.dwSchemeLength = parts.dwHostNameLength = parts.dwUrlPathLength =
+        parts.dwExtraInfoLength = parts.dwUserNameLength = parts.dwPasswordLength =
+            static_cast<DWORD>(-1);
+    if (!WinHttpCrackUrl(wide.c_str(), 0, 0, &parts) || parts.dwHostNameLength == 0 ||
+        parts.dwUserNameLength || parts.dwPasswordLength || parts.dwExtraInfoLength ||
+        parts.dwUrlPathLength > 1) return false;
+    return parts.nScheme == (secure ? INTERNET_SCHEME_HTTPS : INTERNET_SCHEME_HTTP);
+}
+
 bool openNetworkConfig(std::ifstream& stream, std::filesystem::path& selectedPath)
 {
     const std::filesystem::path relativePath =
@@ -188,7 +213,7 @@ bool LoadNetworkEndpoints(NetworkEndpoints& outEndpoints)
         }
 
         outEndpoints.mode = networkConfig["mode"].get<std::string>();
-        if (outEndpoints.mode == "local" || outEndpoints.mode == "lan") {
+        if (outEndpoints.mode == "local") {
             const auto ports = networkConfig.value("ports", nlohmann::json::object());
             const int signalingPort = ports.value("signaling", 3002);
             const int matchmakerPort = ports.value("matchmaker", 3000);
@@ -207,14 +232,14 @@ bool LoadNetworkEndpoints(NetworkEndpoints& outEndpoints)
             const auto& production = networkConfig["production"];
             outEndpoints.signalingUrl = production.value("signalingUrl", std::string{});
             outEndpoints.matchmakerUrl = production.value("matchmakerUrl", std::string{});
-            if (outEndpoints.signalingUrl.rfind("wss://", 0) != 0 ||
-                outEndpoints.matchmakerUrl.rfind("https://", 0) != 0) {
+            if (!validServiceEndpoint(outEndpoints.signalingUrl, true, true) ||
+                !validServiceEndpoint(outEndpoints.matchmakerUrl, false, true)) {
                 std::cerr << "[network] Production endpoints must use wss:// and https://" << std::endl;
                 return false;
             }
         } else {
-            std::cerr << "[network] Invalid mode '" << outEndpoints.mode
-                      << "' (expected local, lan, or production)" << std::endl;
+            std::cerr << "[network] Invalid or insecure mode '" << outEndpoints.mode
+                      << "' (expected local or production; cleartext LAN mode is disabled)" << std::endl;
             return false;
         }
 
@@ -235,7 +260,7 @@ bool LoadNetworkEndpoints(const nlohmann::json& config, NetworkEndpoints& outEnd
     try {
         const auto& networkConfig = config["network"];
         outEndpoints.mode = networkConfig.value("mode", std::string{});
-        if (outEndpoints.mode == "local" || outEndpoints.mode == "lan") {
+        if (outEndpoints.mode == "local") {
             const auto ports = networkConfig.value("ports", nlohmann::json::object());
             const int signalingPort = ports.value("signaling", 3002);
             const int matchmakerPort = ports.value("matchmaker", 3000);
@@ -246,8 +271,8 @@ bool LoadNetworkEndpoints(const nlohmann::json& config, NetworkEndpoints& outEnd
             const auto production = networkConfig.value("production", nlohmann::json::object());
             outEndpoints.signalingUrl = production.value("signalingUrl", std::string{});
             outEndpoints.matchmakerUrl = production.value("matchmakerUrl", std::string{});
-            if (outEndpoints.signalingUrl.rfind("wss://", 0) != 0 ||
-                outEndpoints.matchmakerUrl.rfind("https://", 0) != 0) return false;
+            if (!validServiceEndpoint(outEndpoints.signalingUrl, true, true) ||
+                !validServiceEndpoint(outEndpoints.matchmakerUrl, false, true)) return false;
         } else return false;
         return true;
     } catch (...) { return false; }

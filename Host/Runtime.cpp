@@ -2,6 +2,7 @@
 #include "Runtime.h"
 
 #include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <thread>
 #include <utility>
@@ -48,18 +49,30 @@ std::string ReadCredential(const char* environmentName, const char* secretName) 
     return stored.value_or(std::string{});
 }
 
-bool HasValidIceUrlList(const std::string& urls) {
-    if (urls.empty()) return false;
+bool HasValidIceCredential(const std::string& value) {
+    return !value.empty() && value.size() <= 1024 &&
+        std::none_of(value.begin(), value.end(), [](unsigned char c) { return std::iscntrl(c) != 0; });
+}
+
+bool HasValidIceUrlList(const std::string& urls, bool requireTurn) {
+    if (urls.empty() || urls.size() > 4096) return false;
     size_t start = 0;
+    size_t count = 0;
+    bool hasTurn = false;
     while (start < urls.size()) {
         const size_t end = urls.find(',', start);
         const auto entry = urls.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        if (entry.rfind("turn:", 0) != 0 && entry.rfind("turns:", 0) != 0 &&
-            entry.rfind("stun:", 0) != 0 && entry.rfind("stuns:", 0) != 0) return false;
+        if (entry.empty() || entry.size() > 512 || ++count > 8 ||
+            std::any_of(entry.begin(), entry.end(), [](unsigned char c) {
+                return std::iscntrl(c) != 0 || std::isspace(c) != 0;
+            }) || entry.find('@') != std::string::npos || entry.find('#') != std::string::npos) return false;
+        const bool isTurn = entry.rfind("turn:", 0) == 0 || entry.rfind("turns:", 0) == 0;
+        if (!isTurn && entry.rfind("stun:", 0) != 0 && entry.rfind("stuns:", 0) != 0) return false;
+        hasTurn = hasTurn || isTurn;
         if (end == std::string::npos) break;
         start = end + 1;
     }
-    return true;
+    return !requireTurn || hasTurn;
 }
 
 std::string WideToUtf8(const std::wstring& value) {
@@ -223,14 +236,19 @@ bool HostRuntime::LoadAndValidateConfiguration() {
             SetState(HostState::Failed, "Production requires WSS signaling and HTTPS matchmaker endpoints");
             return false;
         }
-    } else if (endpoints_.mode != "local" && endpoints_.mode != "lan") {
+    } else if (endpoints_.mode != "local") {
         SetState(HostState::Failed, "Unknown network mode");
         return false;
     }
 
-    hostSecret_ = ReadCredential("CLOUDGAMING_HOST_SECRET", "hostSecret");
-    if (production && hostSecret_.size() < 32) {
-        SetState(HostState::Failed, "CLOUDGAMING_HOST_SECRET is required in production");
+	hostSecret_ = ReadCredential("CLOUDGAMING_HOST_SECRET", "hostSecret");
+	const bool validHostSecret = hostSecret_.size() >= 32 && hostSecret_.size() <= 4096 &&
+		std::all_of(hostSecret_.begin(), hostSecret_.end(), [](unsigned char value) {
+			return std::isalnum(value) || value == '.' || value == '_' || value == '~' || value == '+' ||
+				value == '/' || value == '=' || value == '-';
+		});
+	if (!validHostSecret) {
+		SetState(HostState::Failed, "A unique per-host credential of at least 32 characters is required");
         return false;
     }
     SetEnvironmentVariableA("PION_NETWORK_MODE", endpoints_.mode.c_str());
@@ -238,8 +256,8 @@ bool HostRuntime::LoadAndValidateConfiguration() {
     if (turnUrls.empty()) turnUrls = ReadEnvironment("PION_TURN_URL");
     const std::string turnUsername = ReadCredential("PION_TURN_USERNAME", "turnUsername");
     const std::string turnCredential = ReadCredential("PION_TURN_CREDENTIAL", "turnCredential");
-    if (!turnUrls.empty() && (!HasValidIceUrlList(turnUrls) ||
-        turnUsername.empty() || turnCredential.empty())) {
+    if (!turnUrls.empty() && (!HasValidIceUrlList(turnUrls, production) ||
+        !HasValidIceCredential(turnUsername) || !HasValidIceCredential(turnCredential))) {
         SetState(HostState::Failed, "TURN URLs and credentials are incomplete or invalid");
         return false;
     }
@@ -291,7 +309,8 @@ bool HostRuntime::StartCoreServices() {
     }
     inputIntegrationStarted_ = true;
 
-    initWebsocket(roomId_, endpoints_.signalingUrl, hostSecret_, endpoints_.mode, &session_, &streamProfiles_);
+    initWebsocket(roomId_, hostId_, endpoints_.signalingUrl, hostSecret_, endpoints_.mode,
+                  &session_, &streamProfiles_);
     websocketStarted_ = true;
 
     if (matchmakerEnabled_) {
@@ -299,8 +318,12 @@ bool HostRuntime::StartCoreServices() {
             SetState(HostState::Failed, "Failed to initialize the matchmaker client");
             return false;
         }
-        MatchmakerClient::sendHeartbeat(hostId_, roomId_);
-        MatchmakerClient::startHeartbeatThread(hostId_, roomId_, heartbeatIntervalMs_);
+		(void)MatchmakerClient::sendHeartbeat(hostId_, roomId_, pairingCode_);
+		MatchmakerClient::startHeartbeatThread(hostId_, roomId_, pairingCode_, heartbeatIntervalMs_,
+			[this](const std::string& nextCode) {
+				std::lock_guard<std::mutex> lock(mutex_);
+				pairingCode_ = nextCode;
+			});
         matchmakerStarted_ = true;
     }
     return true;
@@ -325,13 +348,15 @@ bool HostRuntime::Start() {
         }
 
         const auto generatedRoomId = generateRoomId();
-        const auto generatedHostId = generateHostId();
+		const auto generatedPairingCode = generateRoomId();
+		const auto generatedHostId = loadOrCreateHostId();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             roomId_ = generatedRoomId;
+			pairingCode_ = generatedPairingCode;
             hostId_ = generatedHostId;
         }
-        PrintBanner(generatedRoomId);
+		PrintBanner();
         if (!StartCoreServices()) {
             Stop();
             return false;
@@ -514,7 +539,10 @@ void HostRuntime::Stop() noexcept {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         roomId_.clear();
+		pairingCode_.clear();
         hostId_.clear();
+		if (!hostSecret_.empty()) SecureZeroMemory(hostSecret_.data(), hostSecret_.size());
+		hostSecret_.clear();
     }
     lastPeerState_.store(-1, std::memory_order_release);
     SetState(HostState::Stopped);
@@ -532,6 +560,7 @@ HostStatus HostRuntime::GetStatus() const {
     status.failureReason = failureReason_;
     status.hostId = hostId_;
     status.roomId = roomId_;
+	status.pairingCode = pairingCode_;
     status.targetProcessName = targetProcessName_;
     status.targetPid = targetPid_.load(std::memory_order_acquire);
     status.targetWindow = targetWindow_.load(std::memory_order_acquire);
@@ -562,7 +591,8 @@ nlohmann::json HostRuntime::GetHealthSnapshot() const {
     };
     return {
         {"runtime", {{"state", ToString(runtime.state)}, {"failureReason", runtime.failureReason},
-                     {"hostId", runtime.hostId}, {"roomId", runtime.roomId},
+					 {"hostId", runtime.hostId}, {"roomId", runtime.roomId},
+					 {"pairingCode", runtime.pairingCode},
                      {"targetProcess", runtime.targetProcessName}, {"targetPid", runtime.targetPid},
                      {"peerConnectionState", runtime.peerConnectionState}, {"networkMode", endpoints_.mode}}},
         {"session", {{"state", SessionManager::StateName(session.state)},
@@ -603,10 +633,10 @@ bool HostRuntime::CreateSupportBundle(std::filesystem::path& outputDirectory, st
     return Diagnostics::CreateSupportBundle(GetHealthSnapshot(), config, outputDirectory, error);
 }
 
-void PrintBanner(const std::string& roomId) {
+void PrintBanner() {
     std::cout << "\n----------------------------------------\n"
               << "  Cloud Gaming Host Initialized\n"
-              << "  Pairing room: " << roomId << "\n"
+			  << "  Pairing code is available in the tray application\n"
               << "----------------------------------------\n\n";
 }
 

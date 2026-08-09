@@ -17,6 +17,10 @@ on:
         description: Final HTTPS MSI URL
         required: true
         type: string
+      update_feed_url:
+        description: Final HTTPS update-manifest.json URL compiled into the host
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -24,26 +28,38 @@ permissions:
 jobs:
   package:
     runs-on: [self-hosted, Windows, X64, cloud-gaming-build]
+    timeout-minutes: 45
+    concurrency:
+      group: release-host
+      cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Build host payload and MSI
         shell: pwsh
         env:
           SIGNING_CERT_THUMBPRINT: ${{ secrets.WINDOWS_SIGNING_CERT_THUMBPRINT }}
           TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
-        run: .\packaging\Build-Package.ps1 -Version '${{ inputs.version }}' -BuildInstaller -CertificateThumbprint $env:SIGNING_CERT_THUMBPRINT -TimestampUrl $env:TIMESTAMP_URL
+          RELEASE_VERSION: ${{ inputs.version }}
+          UPDATE_FEED_URL: ${{ inputs.update_feed_url }}
+        run: .\packaging\Build-Package.ps1 -Version $env:RELEASE_VERSION -UpdateFeedUrl $env:UPDATE_FEED_URL -BuildInstaller -CertificateThumbprint $env:SIGNING_CERT_THUMBPRINT -TimestampUrl $env:TIMESTAMP_URL
       - name: Create and sign update manifest
         shell: pwsh
         env:
           SIGNING_CERT_THUMBPRINT: ${{ secrets.WINDOWS_SIGNING_CERT_THUMBPRINT }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          DOWNLOAD_URL: ${{ inputs.download_url }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
         run: |
-          $msi = ".\Installer\bin\x64\Release\CloudGamingHost-${{ inputs.version }}-x64.msi"
-          .\packaging\New-UpdateManifest.ps1 -Version '${{ inputs.version }}' -InstallerPath $msi -DownloadUrl '${{ inputs.download_url }}' -Channel '${{ inputs.channel }}'
+          $msi = ".\Installer\bin\x64\Release\CloudGamingHost-$env:RELEASE_VERSION-x64.msi"
+          .\packaging\New-UpdateManifest.ps1 -Version $env:RELEASE_VERSION -InstallerPath $msi -DownloadUrl $env:DOWNLOAD_URL -Channel $env:RELEASE_CHANNEL
           .\packaging\Sign-UpdateManifest.ps1 -ManifestPath .\artifacts\update-manifest.json -CertificateThumbprint $env:SIGNING_CERT_THUMBPRINT
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: CloudGamingHost-${{ inputs.version }}-x64
           if-no-files-found: error
+          retention-days: 14
           path: |
             Installer/bin/x64/Release/*.msi
             artifacts/CloudGamingHost-${{ inputs.version }}-x64.zip

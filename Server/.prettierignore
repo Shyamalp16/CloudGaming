@@ -1,4 +1,7 @@
 node_modules/
 coverage/
 obselete/
+.env
+.env.*
+!.env.example
 

@@ -1,115 +1,80 @@
-# Matchmaking API Specification
+# Matchmaking API
 
-## 1. Overview
-This document defines the API for the automatic matchmaking service. The service connects Clients (Gamers) to available Hosts (Gaming PCs) by tracking host availability in Redis.
+The matchmaking API connects a user to one explicitly selected host. It does not expose a host directory, public addresses, machine details, or Redis identifiers.
 
-## 2. Data Model (Redis)
+Production requests must use HTTPS. The reverse proxy must terminate TLS, remove untrusted forwarding headers, and be one of the exact addresses in `TRUSTED_PROXY_IPS`. Request and response bodies are JSON. Unknown fields are rejected.
 
-### Active Hosts
-Hosts are stored as individual keys with a TTL (Time To Live). This ensures that if a Host crashes or loses internet, it automatically disappears from the available pool.
+## Host heartbeat
 
-*   **Key:** `host:{hostId}`
-*   **TTL:** 30 seconds (Refreshed by heartbeat)
-*   **Structure (JSON):**
+`POST /api/host/heartbeat`
+
+The host authenticates with its own credential. Never reuse one credential across multiple hosts.
+
+```http
+Authorization: Bearer <credential for this hostId>
+Content-Type: application/json
+```
 
 ```json
 {
-  "hostId": "uuid-string-unique-per-session",
-  "roomId": "room-id-for-signaling",
-  "status": "idle",       // "idle" = ready for match, "busy" = in session
-  "region": "us-east-1",  // or "local", "eu-central", etc.
-  "lastHeartbeat": 1715620000000,
-  "publicIp": "1.2.3.4",
-  "gameInfo": {
-    "name": "Desktop Session",
-    "specs": "Generic Host"
-  }
+  "hostId": "319ca4b3-a64a-49f2-bfd9-c26e19908b5a",
+  "roomId": "cf7f0241482d4742bb88952815b116b8",
+  "pairingCode": "7b515173c8f3e4059cf6b7c694bf61a4",
+  "region": "ca-central",
+  "status": "idle",
+  "capacity": 1,
+  "availableSlots": 1
 }
 ```
 
-## 3. API Endpoints
+- `hostId` is a stable UUID and must have a matching entry in `HOST_CREDENTIALS_JSON`.
+- `roomId` and `pairingCode` are independently generated 128-bit random hexadecimal values.
+- The pairing code is single-use. After a successful exchange, Redis atomically marks it consumed and the next authenticated host heartbeat instructs the host to generate and publish a fresh code. Share the current code out of band only with the intended user.
+- `capacity` is limited to 1–4. Omitted optional fields use safe defaults.
+- A heartbeat expires automatically. No separate status endpoint exists.
 
-### A. Host Endpoints (Used by C++ Host App)
+Successful response:
 
-#### 1. Register / Heartbeat
-Host sends this every 20-25 seconds to register itself or keep its session alive.
+```json
+{ "success": true, "ttl": 30 }
+```
 
-*   **URL:** `POST /api/host/heartbeat`
-*   **Headers:** `Content-Type: application/json`
-*   **Body:**
-    ```json
+## Find a paired host
+
+`POST /api/match/find`
+
+This endpoint is rate limited. It accepts only a pairing code; region-only discovery and host enumeration are intentionally unsupported.
+
+```json
+{ "pairingCode": "7b515173c8f3e4059cf6b7c694bf61a4" }
+```
+
+Successful response:
+
+```json
+{
+  "found": true,
+  "roomId": "cf7f0241482d4742bb88952815b116b8",
+  "sessionId": "06488ba1-b82c-42eb-a7f2-8d9b9e477742",
+  "pairingToken": "<short-lived signed token>",
+  "expiresAt": 1786240000000,
+  "iceServers": [
     {
-      "hostId": "uuid-generated-by-host",
-      "roomId": "room-generated-by-host",
-      "region": "us-east-1",  // Optional, defaults to config
-      "status": "idle"        // Optional, defaults to idle if new
+      "urls": ["turns:turn.example.com:443?transport=tcp"],
+      "username": "<ephemeral username>",
+      "credential": "<ephemeral credential>"
     }
-    ```
-*   **Response (200 OK):**
-    ```json
-    {
-      "success": true,
-      "ttl": 30
-    }
-    ```
+  ]
+}
+```
 
-#### 2. Update Status
-Host calls this when a peer connects via Signaling to mark itself as "busy".
+The client supplies the short-lived `pairingToken` through the WebSocket subprotocol during signaling. Do not place credentials or tokens in URLs, query strings, logs, analytics, or crash reports. The token is bound to `hostId`, `roomId`, and `sessionId`, and is rejected after expiry or replay.
 
-*   **URL:** `POST /api/host/status`
-*   **Body:**
-    ```json
-    {
-      "hostId": "uuid-...",
-      "status": "busy"
-    }
-    ```
+An invalid, expired, unavailable, or already-consumed code returns the same non-enumerating not-found response.
 
-### B. Client Endpoints (Used by Web/Electron Client)
+## Production requirements
 
-#### 1. Find Match
-Client calls this when the user clicks "Play".
-
-*   **URL:** `POST /api/match/find`
-*   **Body:**
-    ```json
-    {
-      "region": "us-east-1" // Optional filter
-    }
-    ```
-*   **Response (200 OK):**
-    ```json
-    {
-      "found": true,
-      "roomId": "room-id-from-host",
-      "iceServers": [
-        {
-          "urls": "turn:turn.yourdomain.com:3478",
-          "username": "timestamp:user",
-          "credential": "generated-password"
-        }
-      ]
-    }
-    ```
-*   **Response (404 Not Found):**
-    ```json
-    {
-      "found": false,
-      "message": "No available hosts in this region."
-    }
-    ```
-
-## 4. Internal Logic
-
-### Matchmaking Algorithm (Simple)
-1.  Receive `POST /api/match/find`.
-2.  Scan Redis for keys matching `host:*`.
-3.  Filter hosts where `status === 'idle'`.
-4.  (Optional) Filter by `region`.
-5.  Select a random host (or first available).
-6.  Mark that host as `allocated` (temporarily) in memory or Redis to prevent double-booking (race condition handling).
-7.  Generate TURN credentials (using shared secret with Coturn).
-8.  Return connection details to Client.
-
-### Cleanup
-*   Redis TTL automatically handles cleanup of dead hosts.
+- Use `rediss://` with authentication and a dedicated Redis account/network boundary.
+- Configure per-host credentials, a distinct pairing-token signing secret, protected metrics, exact HTTPS origins, exact trusted proxy IPs, and authenticated TURN.
+- Store secrets in the deployment secret manager; never commit `.env` files.
+- Do not log pairing codes, tokens, room/session/host identifiers, IP addresses, ICE candidates, authorization headers, or Redis connection details.

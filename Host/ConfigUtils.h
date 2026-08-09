@@ -13,9 +13,8 @@ namespace ConfigUtils {
     // Loads JSON from config.json into provided object; returns false on error
     bool LoadConfig(nlohmann::json& outConfig);
 
-    // Loads the shared Client/html-server/network-config.json. The host always
-    // reaches local/LAN test services over loopback; the browser derives the
-    // server machine address from the page URL.
+    // Loads the shared Client/html-server/network-config.json. Cleartext is
+    // accepted only for loopback development; remote mode requires TLS.
     bool LoadNetworkEndpoints(NetworkEndpoints& outEndpoints);
     bool LoadNetworkEndpoints(const nlohmann::json& config, NetworkEndpoints& outEndpoints);
 

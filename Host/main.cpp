@@ -14,6 +14,7 @@
 #include "TrayApplication.h"
 #include "UpdateManager.h"
 #include "Version.h"
+#include "IdGenerator.h"
 
 namespace {
 std::atomic<Runtime::HostRuntime*> g_runtime{nullptr};
@@ -41,6 +42,10 @@ int main(int argc, char** argv) {
         std::cout << CLOUD_GAMING_VERSION << std::endl;
         return EXIT_SUCCESS;
     }
+	if (argc == 2 && std::string(argv[1]) == "--device-id") {
+		try { std::cout << loadOrCreateHostId() << std::endl; return EXIT_SUCCESS; }
+		catch (const std::exception& ex) { std::cerr << ex.what() << std::endl; return EXIT_FAILURE; }
+	}
     Diagnostics::Initialize();
     Diagnostics::InstallCrashHandler();
     if (argc == 3 && std::string(argv[1]) == "--set-secret") {

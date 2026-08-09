@@ -1,7 +1,7 @@
 #include "InputConfig.h"
+#include "Environment.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <iostream>
 #include <sstream>
 
@@ -12,10 +12,10 @@ InputConfiguration globalInputConfig;
 namespace {
 int parseWheelScale() {
     constexpr int defaultScale = 120;
-    const char* value = std::getenv("INPUT_WHEEL_SCALE");
+    const auto value = Environment::read("INPUT_WHEEL_SCALE");
     if (!value) return defaultScale;
     try {
-        return std::max(1, std::stoi(value));
+        return std::max(1, std::stoi(*value));
     } catch (...) {
         return defaultScale;
     }

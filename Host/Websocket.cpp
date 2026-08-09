@@ -46,6 +46,13 @@ on_tls_init(websocketpp::connection_hdl hdl) {
         boost::asio::ssl::context::tls_client);
     ctx->set_default_verify_paths();
     ctx->set_verify_mode(boost::asio::ssl::verify_peer);
+	ctx->set_options(boost::asio::ssl::context::no_sslv2 |
+		boost::asio::ssl::context::no_sslv3 |
+		boost::asio::ssl::context::no_tlsv1 |
+		boost::asio::ssl::context::no_tlsv1_1 |
+		boost::asio::ssl::context::no_compression);
+	if (SSL_CTX_set_min_proto_version(ctx->native_handle(), TLS1_2_VERSION) != 1)
+		throw std::runtime_error("Could not enforce TLS 1.2 or newer");
     auto connection = g_tlsClient->get_con_from_hdl(hdl);
     ctx->set_verify_callback(boost::asio::ssl::host_name_verification(
         connection->get_uri()->get_host()));
@@ -194,6 +201,19 @@ void sendAnswer() {
 void handleOffer(const std::string& offer, const std::string& sessionId) {
     if (!g_sessionManager || sessionId.empty()) return;
     const auto previous = g_sessionManager->GetStatus();
+    if (previous.sessionId != sessionId) {
+        const int decision = MessageBoxW(nullptr,
+            L"A remote player is requesting access to this computer.\n\n"
+            L"If approved, they can see and hear the selected game and control its keyboard and mouse.\n\n"
+            L"Approve this session?",
+            L"Cloud Gaming Host - Remote access request",
+            MB_YESNO | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND | MB_DEFBUTTON2);
+        if (decision != IDYES) {
+            send_message({{"type", "control"}, {"sessionId", sessionId}, {"action", "terminate"},
+                          {"payload", {{"reason", "host_denied"}}}});
+            return;
+        }
+    }
     if (!previous.sessionId.empty() && previous.sessionId != sessionId) {
         if (g_streamProfileManager) g_streamProfileManager->ClearSession(previous.sessionId);
         InputIntegrationLayer::clearAuthorizedSession("session_replaced");
@@ -399,7 +419,7 @@ static bool waitForReconnect(unsigned attempt) {
     });
 }
 
-void initWebsocket(const std::string& roomId, const std::string& signalingUrl,
+void initWebsocket(const std::string& roomId, const std::string& hostId, const std::string& signalingUrl,
                    const std::string& hostSecret, const std::string& networkMode,
                    SessionManager* sessionManager, StreamProfileManager* streamProfileManager) {
     (void)networkMode;
@@ -414,7 +434,7 @@ void initWebsocket(const std::string& roomId, const std::string& signalingUrl,
     // Detect scheme: wss:// → TLS client, ws:// → plain client
     g_useTls = (base_uri.rfind("wss://", 0) == 0);
 
-    std::string full_uri = base_uri + "?roomId=" + roomId + "&role=host";
+    const std::string full_uri = base_uri;
     std::cout << "[WebSocket] Connecting to signaling service"
               << (g_useTls ? " (TLS)" : " (plain)") << std::endl;
 
@@ -422,6 +442,9 @@ void initWebsocket(const std::string& roomId, const std::string& signalingUrl,
 
     if (g_useTls) {
         g_tlsClient = std::make_unique<tls_client>();
+		g_tlsClient->clear_access_channels(websocketpp::log::alevel::all);
+		g_tlsClient->set_access_channels(websocketpp::log::alevel::connect |
+			websocketpp::log::alevel::disconnect | websocketpp::log::alevel::fail);
         g_tlsClient->init_asio();
         g_tlsClient->set_open_handler(&on_open);
         g_tlsClient->set_message_handler(&on_message);
@@ -429,7 +452,7 @@ void initWebsocket(const std::string& roomId, const std::string& signalingUrl,
         g_tlsClient->set_close_handler(&on_close);
         g_tlsClient->set_tls_init_handler(&on_tls_init);
 
-        g_websocket_thread = std::thread([full_uri]() {
+        g_websocket_thread = std::thread([full_uri, roomId, hostId]() {
             unsigned reconnectAttempt = 0;
             while (!g_websocketStopRequested.load(std::memory_order_acquire) &&
                    !ShutdownManager::IsShutdown()) {
@@ -437,6 +460,10 @@ void initWebsocket(const std::string& roomId, const std::string& signalingUrl,
                 auto connection = g_tlsClient->get_connection(full_uri, connectError);
                 if (!connectError) {
                     if (!g_hostSecret.empty()) connection->append_header("Authorization", "Bearer " + g_hostSecret);
+                    connection->add_subprotocol("cloud-gaming-v1");
+                    connection->add_subprotocol("cg-room." + roomId);
+                    connection->add_subprotocol("cg-role.host");
+                    connection->add_subprotocol("cg-host." + hostId);
                     g_tlsClient->connect(connection);
                     try { g_tlsClient->run(); }
                     catch (const std::exception& ex) {
@@ -453,13 +480,16 @@ void initWebsocket(const std::string& roomId, const std::string& signalingUrl,
         });
     } else {
         wsClient = std::make_unique<plain_client>();
+		wsClient->clear_access_channels(websocketpp::log::alevel::all);
+		wsClient->set_access_channels(websocketpp::log::alevel::connect |
+			websocketpp::log::alevel::disconnect | websocketpp::log::alevel::fail);
         wsClient->init_asio();
         wsClient->set_open_handler(&on_open);
         wsClient->set_message_handler(&on_message);
         wsClient->set_fail_handler(&on_fail);
         wsClient->set_close_handler(&on_close);
 
-        g_websocket_thread = std::thread([full_uri]() {
+        g_websocket_thread = std::thread([full_uri, roomId, hostId]() {
             unsigned reconnectAttempt = 0;
             while (!g_websocketStopRequested.load(std::memory_order_acquire) &&
                    !ShutdownManager::IsShutdown()) {
@@ -467,6 +497,10 @@ void initWebsocket(const std::string& roomId, const std::string& signalingUrl,
                 auto connection = wsClient->get_connection(full_uri, connectError);
                 if (!connectError) {
                     if (!g_hostSecret.empty()) connection->append_header("Authorization", "Bearer " + g_hostSecret);
+                    connection->add_subprotocol("cloud-gaming-v1");
+                    connection->add_subprotocol("cg-room." + roomId);
+                    connection->add_subprotocol("cg-role.host");
+                    connection->add_subprotocol("cg-host." + hostId);
                     wsClient->connect(connection);
                     try { wsClient->run(); }
                     catch (const std::exception& ex) {
@@ -512,6 +546,8 @@ void stopWebsocket() {
     }
     g_tlsClient.reset();
     wsClient.reset();
+	if (!g_hostSecret.empty()) SecureZeroMemory(g_hostSecret.data(), g_hostSecret.size());
+	g_hostSecret.clear();
     std::wcout << L"[Shutdown] Websocket thread joined.\n";
 
     // Legacy frame/sender threads removed

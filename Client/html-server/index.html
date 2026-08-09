@@ -505,11 +505,11 @@
 <body>
   <div id="roomSetup">
     <h2>Cloud Gaming</h2>
-    <button id="findMatchButton">Find Match</button>
+    <button id="findMatchButton">Connect securely</button>
     <div id="matchStatus" class="match-status"></div>
-    <div class="match-divider"><span>or join manually</span></div>
-    <input type="text" id="roomIdInput" placeholder="Paste Room ID from Host...">
-    <button id="joinButton">Join Session</button>
+    <div class="match-divider"><span>host approval code required</span></div>
+    <input type="text" id="roomIdInput" maxlength="32" autocomplete="off" spellcheck="false"
+           placeholder="Paste the 32-character code shown by the host">
   </div>
 
   <div class="game-header hidden" id="gameHeader">
@@ -548,10 +548,10 @@
       </div>
 
       <div class="game-controls">
-        <button class="control-btn" id="debugBtn" onclick="toggleDebug()" title="Toggle Debug">🐛</button>
-        <button class="control-btn" id="audioBtn" onclick="checkAudioStatus()" title="Check Audio Status">🔊</button>
-        <button class="control-btn" id="perfBtn" onclick="togglePerf()" title="Toggle Performance">📊</button>
-        <button class="control-btn" id="fullscreenBtn" onclick="toggleFullscreen()" title="Fullscreen">⛶</button>
+        <button class="control-btn" id="debugBtn" title="Toggle Debug">🐛</button>
+        <button class="control-btn" id="audioBtn" title="Check Audio Status">🔊</button>
+        <button class="control-btn" id="perfBtn" title="Toggle Performance">📊</button>
+        <button class="control-btn" id="fullscreenBtn" title="Fullscreen">⛶</button>
       </div>
 
       <div class="loading-overlay" id="loadingOverlay">
@@ -569,45 +569,9 @@
   <div class="debug-log" id="debugLog"></div>
 
   <script>
-    document.getElementById('joinButton').addEventListener('click', async () => {
-      try {
-        await networkConfigReady;
-      } catch (error) {
-        alert(`Network configuration failed: ${error.message}`);
-        return;
-      }
-      const roomId = document.getElementById('roomIdInput').value;
-        if (!roomId) {
-            alert('Please enter a Room ID.');
-            return;
-        }
-        if (networkMode === 'production') {
-          alert('Production sessions must be created through Find Match.');
-          return;
-        }
-
-        // Create and arm audio element under user gesture (non-blocking)
-        const audioEl = createHiddenAudioElement();
-        try {
-          const p = audioEl.play();
-          if (p && typeof p.then === 'function') {
-            p.then(() => log('Primed dedicated audio element on user gesture'))
-             .catch(e => log(`Audio priming failed (will retry when track arrives): ${e}`, 'warn'));
-          }
-        } catch (e) {
-          log(`Audio priming threw (will retry when track arrives): ${e}`, 'warn');
-        }
-
-        document.getElementById('roomSetup').classList.add('hidden');
-        // Immersive mode: hide header, remove 50px offset so video fills top
-        document.body.classList.add('immersive');
-        document.getElementById('gameContainer').classList.remove('hidden');
-
-        currentIceServers = defaultIceServers;
-        connectToSignalingServer(roomId, serverUrlBase, crypto.randomUUID(), null);
-    });
-
-    // Find Match button handler - queries matchmaker for an available host
+    // Exchange the host's unguessable display code for a short-lived, one-use
+    // signaling credential. Direct anonymous WebSocket joins are intentionally
+    // not supported, even in local mode.
     document.getElementById('findMatchButton').addEventListener('click', async () => {
         const findMatchBtn = document.getElementById('findMatchButton');
         const matchStatus = document.getElementById('matchStatus');
@@ -615,7 +579,15 @@
         // Disable button while searching
         findMatchBtn.disabled = true;
         findMatchBtn.textContent = 'Searching...';
-        matchStatus.textContent = 'Looking for available hosts...';
+        const pairingCode = document.getElementById('roomIdInput').value.trim().toLowerCase();
+        if (!/^[a-f0-9]{32}$/.test(pairingCode)) {
+            matchStatus.textContent = 'Enter the complete 32-character code shown by the host.';
+            matchStatus.className = 'match-status error';
+            findMatchBtn.disabled = false;
+            findMatchBtn.textContent = 'Connect securely';
+            return;
+        }
+        matchStatus.textContent = 'Requesting an authorized session...';
         matchStatus.className = 'match-status';
         
         try {
@@ -623,7 +595,9 @@
             const response = await fetch(`${matchmakerUrl}/api/match/find`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({}),
+				credentials: 'omit',
+				cache: 'no-store',
+                body: JSON.stringify({ pairingCode }),
                 mode: 'cors'
             });
             if (!response.ok) {
@@ -632,7 +606,12 @@
             const data = await response.json();
             
             if (data.found) {
-                matchStatus.textContent = `Found host! Connecting to room ${data.roomId}...`;
+				if (!/^[a-f0-9]{32}$/i.test(data.roomId) ||
+					!/^[0-9a-f-]{36}$/i.test(data.sessionId) ||
+					typeof data.pairingToken !== 'string' || data.pairingToken.length > 2048) {
+					throw new Error('Matchmaker returned an invalid security response');
+				}
+                matchStatus.textContent = 'Host found. Establishing the protected session...';
                 matchStatus.className = 'match-status success';
                 
                 // Create and arm audio element under user gesture
@@ -648,6 +627,7 @@
                 }
                 
                 document.getElementById('roomSetup').classList.add('hidden');
+				document.getElementById('roomIdInput').value = '';
                 document.body.classList.add('immersive');
                 document.getElementById('gameContainer').classList.remove('hidden');
                 
@@ -659,33 +639,26 @@
                     log('Matchmaker returned no ICE servers; falling back to default STUN', 'warn');
                 }
 
-                // The shared network profile is authoritative. In LAN mode the
-                // matchmaker runs on the host machine but cannot infer which LAN
-                // address the browser used to reach it.
-                if (typeof data.sessionId !== 'string') throw new Error('Matchmaker did not return a session ID');
-                if (networkMode === 'production' && typeof data.pairingToken !== 'string') {
-                  throw new Error('Matchmaker did not return a pairing token');
-                }
-                connectToSignalingServer(data.roomId, serverUrlBase, data.sessionId, data.pairingToken || null);
+				// The shared network profile is authoritative.
+				connectToSignalingServer(data.roomId, serverUrlBase, data.sessionId, data.pairingToken);
             } else {
                 matchStatus.textContent = data.message || 'No hosts available. Try again later.';
                 matchStatus.className = 'match-status error';
                 findMatchBtn.disabled = false;
-                findMatchBtn.textContent = 'Find Match';
+				findMatchBtn.textContent = 'Connect securely';
             }
         } catch (error) {
             console.error('Matchmaker error:', error);
             matchStatus.textContent = `Connection failed: ${error.message}`;
             matchStatus.className = 'match-status error';
             findMatchBtn.disabled = false;
-            findMatchBtn.textContent = 'Find Match';
+			findMatchBtn.textContent = 'Connect securely';
         }
     });
 
     // ─── Shared network profile ─────────────────────────────────────────────────
     // Change only `mode` in network-config.json:
     //   local      browser and host are this machine
-    //   lan        browser uses the hostname/IP from this page's URL
     //   production use the public HTTPS/WSS endpoints in that file
     let networkMode = '';
     let matchmakerUrl = '';
@@ -704,17 +677,14 @@
       })
       .then(config => {
         networkMode = config.mode;
-        if (networkMode === 'local' || networkMode === 'lan') {
+        if (networkMode === 'local') {
           const signalingPort = Number(config.ports?.signaling ?? 3002);
           const matchmakerPort = Number(config.ports?.matchmaker ?? 3000);
           if (!Number.isInteger(signalingPort) || signalingPort < 1 || signalingPort > 65535 ||
               !Number.isInteger(matchmakerPort) || matchmakerPort < 1 || matchmakerPort > 65535) {
             throw new Error('Local service ports must be integers between 1 and 65535');
           }
-          const endpointHost = networkMode === 'local' ? '127.0.0.1' : location.hostname;
-          if (!endpointHost) {
-            throw new Error('LAN mode requires serving this page over HTTP, not opening it as a file');
-          }
+          const endpointHost = '127.0.0.1';
           const host = urlHost(endpointHost);
           matchmakerUrl = `http://${host}:${matchmakerPort}`;
           serverUrlBase = `ws://${host}:${signalingPort}`;
@@ -725,10 +695,10 @@
             throw new Error('Production endpoints must use https:// and wss://');
           }
         } else {
-          throw new Error(`Invalid mode '${networkMode}' (expected local, lan, or production)`);
+          throw new Error(`Invalid or insecure mode '${networkMode}' (expected local or production; cleartext LAN mode is disabled)`);
         }
 
-        log(`Network mode: ${networkMode}; signaling: ${serverUrlBase}; matchmaker: ${matchmakerUrl}`);
+        log(`Network mode configured: ${networkMode}`);
       })
       .catch(error => {
         console.error('Failed to load network configuration:', error);
@@ -772,7 +742,9 @@
     let reconnectAttempt = 0;
     let reconnectTimer = null;
     const pendingRemoteIceCandidates = [];
-    const defaultIceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+    // Local mode uses direct host candidates. Production matchmaking fails
+    // closed unless it can return authenticated TURN configuration.
+    const defaultIceServers = [];
     let currentIceServers = defaultIceServers;
     
     const keyState = new Set();
@@ -1126,14 +1098,22 @@
         ws.close(1000, 'Replaced by a new signaling connection');
       }
       const generation = ++signalingGeneration;
-      const tokenQuery = pairingToken ? `&token=${encodeURIComponent(pairingToken)}` : '';
-      const serverUrl = `${signalingUrl}?roomId=${encodeURIComponent(roomId)}&role=player${tokenQuery}`;
+		if (typeof pairingToken !== 'string' || pairingToken.length === 0 || pairingToken.length > 2048) {
+			showLoadingOverlay('Authorization Failed', 'Request a new session using the host code.');
+			return;
+		}
+		const serverUrl = signalingUrl;
       log('Attempting to connect to signaling service...');
       updateConnectionStatus('connecting', 'Connecting...');
       try {
-        ws = new WebSocket(serverUrl);
+		ws = new WebSocket(serverUrl, [
+          'cloud-gaming-v1',
+          `cg-room.${roomId}`,
+          'cg-role.player',
+          `cg-pairing.${pairingToken}`,
+        ]);
       } catch (error) {
-        log(`WebSocket creation failed: ${error.message}`, 'error');
+        log('WebSocket creation failed.', 'error');
         showLoadingOverlay('Connection Failed', 'Could not connect to the signaling server.');
         updateConnectionStatus('disconnected', 'Error');
         return;
@@ -1160,10 +1140,8 @@
           }
           if (msg.type === 'control' && msg.action === 'session-ready') {
             log('Received session-ready control message.');
-          } else if (msg.sdp && msg.sdp.length > 100) {
-            log(`Received from server: { type: ${msg.type}, sdp: '...', candidate: ${JSON.stringify(msg.candidate)} }`);
           } else {
-            log('Received from server: ' + JSON.stringify(msg, null, 2));
+            log(`Received signaling message: ${msg.type}`);
           }
 
           switch (msg.type) {
@@ -1207,18 +1185,18 @@
                 currentPairingToken = msg.payload.pairingToken;
                 log('Session credential rotated for reconnect safety.');
               } else if (msg.action === 'profile-accepted') {
-                log('Host accepted stream profile: ' + JSON.stringify(msg.payload));
+                log('Host accepted the stream profile.');
               } else if (msg.action === 'profile-rejected') {
                 log(`Host rejected stream profile: ${msg.payload?.reason || 'unknown reason'}`, 'warn');
               } else {
-                log('Control message: ' + JSON.stringify(msg));
+                log(`Control message: ${msg.action || 'unknown'}`);
               }
               break;
             default:
               log('Unknown Message Type: ' + msg.type);
           }
         } catch (err) {
-          log(`Error processing WebSocket message: ${err.message}. Data: ${event.data}`, 'error');
+          log('Error processing WebSocket message.', 'error');
         }
       };
 
@@ -1226,7 +1204,6 @@
         if (generation !== signalingGeneration || socket !== ws) return;
         log('WebSocket Error occurred. Check browser console.', 'error');
         updateConnectionStatus('disconnected', 'Connection Error');
-        console.error("WebSocket Error Event:", event);
       };
 
       socket.onclose = (event) => {
@@ -1586,7 +1563,6 @@
         log('Added remote ICE candidate.');
       } catch (err) {
         log('Error adding received ICE candidate: ' + err.message, 'error');
-        console.error("Candidate causing error:", candidate);
       }
     }
 
@@ -1922,6 +1898,14 @@
             updateConnectionStatus('connected', 'Connected');
         }
     });
+
+	document.getElementById('debugBtn').addEventListener('click', toggleDebug);
+	document.getElementById('audioBtn').addEventListener('click', checkAudioStatus);
+	document.getElementById('perfBtn').addEventListener('click', togglePerf);
+	document.getElementById('fullscreenBtn').addEventListener('click', toggleFullscreen);
+	document.getElementById('roomIdInput').addEventListener('keydown', (event) => {
+		if (event.key === 'Enter') document.getElementById('findMatchButton').click();
+	});
 
     showLoadingOverlay('Initializing', 'Starting CloudGaming client...');
   </script>

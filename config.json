@@ -4,9 +4,7 @@
     "completed": false
   },
   "update": {
-    "channel": "stable",
-    "feedUrl": "",
-    "publisherCertificateSha256": ""
+	"channel": "stable"
   },
   "network": {
     "mode": "local",
@@ -71,7 +69,7 @@
       "framePoolBuffers": 3,
       "mmcss": { "enable": true, "priority": 2 },
       "cursor": false,
-      "borderRequired": false
+      "borderRequired": true
     },
     "audio": {
       "processLoopback": {

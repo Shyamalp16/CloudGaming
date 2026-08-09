@@ -28,7 +28,7 @@ class StreamProfileManager;
 
 using json = nlohmann::json;
 void send_message(const json& message);
-void initWebsocket(const std::string& roomId, const std::string& signalingUrl,
+void initWebsocket(const std::string& roomId, const std::string& hostId, const std::string& signalingUrl,
                    const std::string& hostSecret, const std::string& networkMode,
                    SessionManager* sessionManager, StreamProfileManager* streamProfileManager);
 void stopWebsocket();

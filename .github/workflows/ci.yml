@@ -8,10 +8,11 @@ on:
 
 jobs:
   build:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     services:
       redis:
-        image: redis:7-alpine
+        image: redis:7.4.10-bookworm@sha256:1feed93082d872fa051fb6b5787a247d39e9c0d00357404c3a6554ba5e4a5315
         ports:
           - 6379:6379
         options: >-
@@ -23,20 +24,24 @@ jobs:
       run:
         working-directory: Server
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          node-version: '20'
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: Server/package-lock.json
       - name: Install dependencies (pinned)
         run: npm ci
-      - name: Prettier write
-        run: npm run format:fix
+      - name: Formatting check
+        run: npm run format
       - name: Lint
         run: npm run lint
-      - name: Test
+      - name: Unit and security tests
         run: npm test
+      - name: Auth integration test
+        run: npm run test:integration
 
   
 
@@ -45,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       redis:
-        image: redis:7-alpine
+        image: redis:7.4.10-bookworm@sha256:1feed93082d872fa051fb6b5787a247d39e9c0d00357404c3a6554ba5e4a5315
         ports:
           - 6379:6379
         options: >-
@@ -59,25 +64,30 @@ jobs:
     env:
       ENABLE_AUTH: 'true'
       JWT_ALG: HS256
-      JWT_SECRET: test-secret
+      JWT_SECRET: test-secret-that-is-at-least-32-bytes
       JWT_ISSUER: http://localhost
       JWT_AUDIENCE: test
       REQUIRE_WSS: 'false'
-      SUBPROTOCOL: webrtc-signaling
-      ALLOWED_ORIGINS: localhost,127.0.0.1,example.com
+      ENABLE_SESSION_AUTH: 'false'
+      PAIRING_TOKEN_SECRET: test-pairing-secret-at-least-32-bytes
+      METRICS_SECRET: test-metrics-secret-at-least-32-bytes
+      SUBPROTOCOL: cloud-gaming-v1
+      ALLOWED_ORIGINS: http://localhost
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          node-version: '20'
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: Server/package-lock.json
       - name: Install dependencies (pinned)
         run: npm ci
-      - name: Prettier write
-        run: npm run format:fix
+      - name: Formatting check
+        run: npm run format
       - name: Lint
         run: npm run lint
-      - name: Test
-        run: npm test
+      - name: Auth integration test
+        run: npm run test:integration
 

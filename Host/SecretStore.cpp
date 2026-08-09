@@ -69,19 +69,27 @@ bool SaveFile(const nlohmann::json& values, std::string& error) {
     try {
         const auto path = AppPaths::UserSecretsPath();
         std::filesystem::create_directories(path.parent_path());
+        std::string aclError;
+        if (!WindowsSecurity::ProtectForCurrentUserAndSystem(path.parent_path(), aclError)) {
+            error = aclError;
+            return false;
+        }
         const auto temporary = path.wstring() + L".tmp";
         {
             std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
             stream << values.dump() << '\n';
             if (!stream) { error = "Could not write secret store"; return false; }
         }
+        if (!WindowsSecurity::ProtectForCurrentUserAndSystem(temporary, aclError)) {
+            DeleteFileW(temporary.c_str());
+            error = aclError;
+            return false;
+        }
         if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
             error = "Could not replace secret store: " + std::to_string(GetLastError());
             DeleteFileW(temporary.c_str());
             return false;
         }
-        std::string aclError;
-        WindowsSecurity::ProtectForCurrentUserAndSystem(path.parent_path(), aclError);
         if (!WindowsSecurity::ProtectForCurrentUserAndSystem(path, aclError)) { error = aclError; return false; }
         return true;
     } catch (const std::exception& ex) { error = ex.what(); return false; }

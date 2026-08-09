@@ -8,6 +8,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$downloadUri = $null
+if (-not [Uri]::TryCreate($DownloadUrl, [UriKind]::Absolute, [ref]$downloadUri) -or
+	$downloadUri.Scheme -ne 'https' -or $downloadUri.UserInfo -or $downloadUri.Fragment) {
+	throw 'DownloadUrl must be a credential-free absolute HTTPS URL without a fragment.'
+}
 $installer = Get-Item -LiteralPath $InstallerPath
 $manifest = [ordered]@{
     schemaVersion = 1

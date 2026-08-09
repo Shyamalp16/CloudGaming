@@ -237,15 +237,15 @@ void Layer::enqueueMessage(InputMessage&& message) {
         return;
     }
     message.eventType = validation.eventType;
-    if (message.eventType != "input_reset") {
-        const std::string suppliedSession = validation.value.value("sessionId", std::string{});
-        std::lock_guard<std::mutex> sessionLock(sessionMutex);
-        if (authorizedSessionId.empty() || suppliedSession != authorizedSessionId) {
-            std::lock_guard<std::mutex> statsLock(statsMutex);
-            stats.messagesDropped++;
-            return;
-        }
-    }
+	{
+		const std::string suppliedSession = validation.value.value("sessionId", std::string{});
+		std::lock_guard<std::mutex> sessionLock(sessionMutex);
+		if (authorizedSessionId.empty() || suppliedSession != authorizedSessionId) {
+			std::lock_guard<std::mutex> statsLock(statsMutex);
+			stats.messagesDropped++;
+			return;
+		}
+	}
 
     bool overflowed = false;
     uint64_t dropped = 0;

@@ -196,8 +196,9 @@ LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* exceptionPointers) {
             info.ThreadId = GetCurrentThreadId();
             info.ExceptionPointers = exceptionPointers;
             info.ClientPointers = FALSE;
-            MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file,
-                              static_cast<MINIDUMP_TYPE>(MiniDumpWithIndirectlyReferencedMemory | MiniDumpScanMemory),
+			// Do not include broad process memory: it may contain session tokens,
+			// TURN credentials, captured frame data, or user input.
+            MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, MiniDumpNormal,
                               exceptionPointers ? &info : nullptr, nullptr, nullptr);
             CloseHandle(file);
             HardenPath(path);
@@ -212,7 +213,8 @@ nlohmann::json SanitizeJson(nlohmann::json value) {
             std::string lowered = key;
             std::transform(lowered.begin(), lowered.end(), lowered.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (lowered.find("secret") != std::string::npos || lowered.find("token") != std::string::npos ||
+			if (lowered == "roomid" || lowered == "pairingcode" || lowered == "sessionid" || lowered == "hostid" ||
+				lowered.find("secret") != std::string::npos || lowered.find("token") != std::string::npos ||
                 lowered.find("password") != std::string::npos || lowered.find("credential") != std::string::npos) {
                 child = "[REDACTED]";
             } else child = SanitizeJson(std::move(child));
@@ -267,8 +269,17 @@ std::string Redact(std::string value) {
     static const std::regex sensitive(
         R"(((?:\"?[A-Za-z0-9_-]*(?:secret|token|password|credential)[A-Za-z0-9_-]*\"?\s*[:=]\s*\"?)|(?:[A-Za-z0-9_-]*(?:secret|token|password|credential)[A-Za-z0-9_-]*%3[dD]))[^\s&,;\"}]+)",
         std::regex_constants::icase);
+	static const std::regex queryCredential(R"(([?&](?:token|accessToken)=)[^&#\s]+)", std::regex_constants::icase);
+	static const std::regex uuid(R"(\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b)",
+		std::regex_constants::icase);
+	static const std::regex roomCode(R"(\b[0-9a-f]{32}\b)", std::regex_constants::icase);
+	static const std::regex ipv4(R"(\b(?:\d{1,3}\.){3}\d{1,3}\b)");
     value = std::regex_replace(value, authorization, "$1[REDACTED]");
-    return std::regex_replace(value, sensitive, "$1[REDACTED]");
+	value = std::regex_replace(value, sensitive, "$1[REDACTED]");
+	value = std::regex_replace(value, queryCredential, "$1[REDACTED]");
+	value = std::regex_replace(value, uuid, "[SESSION_ID]");
+	value = std::regex_replace(value, roomCode, "[PAIRING_CODE]");
+	return std::regex_replace(value, ipv4, "[IP_ADDRESS]");
 }
 
 void Log(const std::string& severity, const std::string& category,
@@ -303,13 +314,15 @@ bool CreateSupportBundle(const nlohmann::json& health, const nlohmann::json& con
         std::filesystem::create_directories(outputDirectory);
         HardenPath(AppDataRoot() / L"support");
         HardenPath(outputDirectory);
-        std::ofstream(outputDirectory / L"health.json") << health.dump(2);
+		std::ofstream(outputDirectory / L"health.json") << SanitizeJson(health).dump(2);
         std::ofstream(outputDirectory / L"config.sanitized.json") << SanitizeJson(config).dump(2);
         const auto status = GetStatus();
         std::error_code ec;
         if (!status.activeLog.empty() && std::filesystem::exists(status.activeLog, ec)) {
-            std::filesystem::copy_file(status.activeLog, outputDirectory / L"host.jsonl",
-                                       std::filesystem::copy_options::overwrite_existing, ec);
+			std::ifstream input(status.activeLog, std::ios::binary);
+			std::ofstream output(outputDirectory / L"host.jsonl", std::ios::binary | std::ios::trunc);
+			std::string line;
+			while (std::getline(input, line)) output << Redact(line) << '\n';
         }
         HardenPath(outputDirectory / L"health.json");
         HardenPath(outputDirectory / L"config.sanitized.json");

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "dependencies": [
+    { "name": "avcodec-61.dll", "version": "61.3.100", "sha256": "8bb548bdcc93e5970acdefd2a082dd6afd6204a5fa07886ce681efa25171fbbc" },
+    { "name": "avdevice-61.dll", "version": "61.1.100", "sha256": "b35c7aa725d89740e00996ea97edee7e5b103188eec3c3ff8ab98d93de170a23" },
+    { "name": "avfilter-10.dll", "version": "10.1.100", "sha256": "9303b2f9af25eecc31ecc1981667c586cbd70a14fe06d66ddb91f0c1a78696c2" },
+    { "name": "avformat-61.dll", "version": "61.1.100", "sha256": "8c3cb6776cee21b6a02be8be91b47cf8ee48a4303b4163bfde6caadbe5c948f1" },
+    { "name": "avutil-59.dll", "version": "59.8.100", "sha256": "002cd1845b3fb67055d3e352c3cfee705b57e28a5a9c3f05f2b757ace926d5e0" },
+    { "name": "postproc-58.dll", "version": "58.1.100", "sha256": "bf0d49c3b342a6e5a801a8a13777e9bcf425a13ac9693945c7984c18f8c07d93" },
+    { "name": "swresample-5.dll", "version": "5.1.100", "sha256": "75011af0734fa7d116c58ef196d4251531624cf4aecbdd960522f2d2e67d719d" },
+    { "name": "swscale-8.dll", "version": "8.1.100", "sha256": "2e979e6b56fa292405b6c1c89c6bcbaaa01f076f7f5eaacbe1390320272ac6c6" },
+    { "name": "opus.dll", "version": "", "sha256": "8c09781b4f4e5a56bdc0d5fed5942fb66d8bdbbd61e811ba00052017730ab7d3" },
+    { "name": "libssl-3-x64.dll", "minimumVersion": "3.4.6", "version": "", "sha256": "" },
+    { "name": "libcrypto-3-x64.dll", "minimumVersion": "3.4.6", "version": "", "sha256": "" }
+  ]
+}

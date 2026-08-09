@@ -3,6 +3,7 @@
 
 #include <Windows.h>
 #include <Shellapi.h>
+#include <Wtsapi32.h>
 
 #include <algorithm>
 #include <chrono>
@@ -18,6 +19,8 @@
 #include "ProcessDiscovery.h"
 #include "UpdateManager.h"
 
+#pragma comment(lib, "Wtsapi32.lib")
+
 namespace {
 constexpr wchar_t kWindowClass[] = L"CloudGamingHostWindow";
 constexpr wchar_t kAppName[] = L"Cloud Gaming Host";
@@ -27,6 +30,8 @@ constexpr UINT kFirstRunMessage = WM_APP + 3;
 constexpr UINT kUpdateCheckMessage = WM_APP + 4;
 constexpr UINT kUpdateInstallMessage = WM_APP + 5;
 constexpr UINT_PTR kMetricsTimer = 1;
+constexpr UINT_PTR kClipboardClearTimer = 2;
+constexpr int kEmergencyStopHotkey = 0x4347;
 
 enum ControlId : int {
     IdStartStop = 100, IdProcess, IdRefresh, IdApply, IdPairing, IdCopy, IdSettings, IdOpenLogs, IdCheckUpdates,
@@ -327,7 +332,7 @@ private:
     }
 
     void CopyPairingCode() {
-        const auto code = Utf8ToWide(controller_.GetStatus().roomId);
+		const auto code = Utf8ToWide(controller_.GetStatus().pairingCode);
         if (code.empty() || !OpenClipboard(window_)) return;
         EmptyClipboard();
         const size_t bytes = (code.size() + 1) * sizeof(wchar_t);
@@ -336,7 +341,12 @@ private:
             void* target = GlobalLock(memory);
             memcpy(target, code.c_str(), bytes);
             GlobalUnlock(memory);
-            if (!SetClipboardData(CF_UNICODETEXT, memory)) GlobalFree(memory);
+            if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+                GlobalFree(memory);
+            } else {
+                clipboardSequence_ = GetClipboardSequenceNumber();
+                SetTimer(window_, kClipboardClearTimer, 60000, nullptr);
+            }
         }
         CloseClipboard();
     }
@@ -348,9 +358,9 @@ private:
         const auto state = Utf8ToWide(Runtime::ToString(status.state));
         SetWindowTextW(status_, state.c_str());
         SetWindowTextW(startStop_, active ? L"Stop host" : L"Start host");
-        std::string pairingCode = status.roomId;
+		std::string pairingCode = status.pairingCode;
         try {
-            const auto healthCode = health.at("runtime").value("roomId", std::string{});
+			const auto healthCode = health.at("runtime").value("pairingCode", std::string{});
             if (!healthCode.empty()) pairingCode = healthCode;
         } catch (...) {}
         const auto code = pairingCode.empty() ? std::wstring{L"Start the host to create a code"}
@@ -404,6 +414,8 @@ private:
             CreateControls();
             AddTrayIcon();
             SetTimer(window_, kMetricsTimer, 1000, nullptr);
+			RegisterHotKey(window_, kEmergencyStopHotkey, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_F12);
+			WTSRegisterSessionNotification(window_, NOTIFY_FOR_THIS_SESSION);
             PostMessageW(window_, kFirstRunMessage, 0, 0);
             return 0;
         case WM_COMMAND:
@@ -420,8 +432,35 @@ private:
             }
             break;
         case WM_TIMER:
-            if (wParam == kMetricsTimer) UpdateStatus();
+            if (wParam == kMetricsTimer) {
+                UpdateStatus();
+            } else if (wParam == kClipboardClearTimer) {
+                KillTimer(window_, kClipboardClearTimer);
+                if (clipboardSequence_ != 0 && GetClipboardSequenceNumber() == clipboardSequence_) {
+                    if (!OpenClipboard(window_)) {
+                        SetTimer(window_, kClipboardClearTimer, 5000, nullptr);
+                        return 0;
+                    }
+                    EmptyClipboard();
+                    CloseClipboard();
+                }
+                clipboardSequence_ = 0;
+            }
             return 0;
+		case WM_HOTKEY:
+			if (wParam == kEmergencyStopHotkey) {
+				controller_.StopAsync();
+				UpdateStatus();
+				return 0;
+			}
+			break;
+		case WM_WTSSESSION_CHANGE:
+			if (wParam == WTS_SESSION_LOCK || wParam == WTS_SESSION_LOGOFF ||
+				wParam == WTS_CONSOLE_DISCONNECT || wParam == WTS_REMOTE_DISCONNECT) {
+				controller_.StopAsync();
+				UpdateStatus();
+			}
+			return 0;
         case kStatusMessage: UpdateStatus(); return 0;
         case kFirstRunMessage: RunFirstRunFlow(); return 0;
         case kUpdateCheckMessage: HandleUpdateCheck(reinterpret_cast<UpdateManager::Result*>(lParam)); return 0;
@@ -435,6 +474,9 @@ private:
             break;
         case WM_DESTROY:
             KillTimer(window_, kMetricsTimer);
+			KillTimer(window_, kClipboardClearTimer);
+			UnregisterHotKey(window_, kEmergencyStopHotkey);
+			WTSUnRegisterSessionNotification(window_);
             Shell_NotifyIconW(NIM_DELETE, &tray_);
             window_ = nullptr;
             PostQuitMessage(0);
@@ -461,6 +503,7 @@ private:
     std::thread updateThread_;
     uint64_t lastFrameCount_ = 0;
     int measuredFps_ = 0;
+    DWORD clipboardSequence_ = 0;
     std::chrono::steady_clock::time_point lastFpsSample_{};
     HostController controller_;
     std::vector<ProcessDiscovery::Target> processes_;

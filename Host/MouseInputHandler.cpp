@@ -1,9 +1,9 @@
 #include "MouseInputHandler.h"
 #include "ShutdownManager.h"
+#include "Environment.h"
 #include "pion_webrtc.h"
 #include <Windows.h>
 #include <atomic>
-#include <cstdlib>
 #include <queue>
 #include <mutex>
 #include <condition_variable>
@@ -28,9 +28,14 @@ namespace MouseInputHandler {
     // Simple configurable logging (0=ERROR,1=WARN,2=INFO,3=DEBUG)
     static std::atomic<int> gMouseLogLevel{1};
     static inline void SetMouseLogLevelFromEnv() {
-        const char* lvl = std::getenv("INPUT_LOG_LEVEL");
+        const auto lvl = Environment::read("INPUT_LOG_LEVEL");
         if (lvl) {
-            int v = std::atoi(lvl);
+            int v = 1;
+            try {
+                v = std::stoi(*lvl);
+            } catch (...) {
+                return;
+            }
             if (v < 0) v = 0; if (v > 3) v = 3;
             gMouseLogLevel.store(v);
         }
@@ -578,7 +583,7 @@ namespace MouseInputHandler {
 		// DPI awareness note: SendInput absolute uses virtual desktop 0..65535. This is DPI-agnostic
 		// when the process is DPI-aware. Log system DPI for diagnostics.
 		UINT systemDpi = 96;
-		HMODULE hUser32 = LoadLibraryA("User32.dll");
+		HMODULE hUser32 = LoadLibraryExW(L"user32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 		if (hUser32) {
 			auto pGetDpiForSystem = (UINT(WINAPI*)())GetProcAddress(hUser32, "GetDpiForSystem");
 			if (pGetDpiForSystem) { systemDpi = pGetDpiForSystem(); }

@@ -120,7 +120,7 @@ public:
         }
 
         // Check avrt.dll availability
-        HMODULE avrtModule = LoadLibraryA("avrt.dll");
+        HMODULE avrtModule = LoadLibraryExW(L"avrt.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (avrtModule) {
             std::cout << "  - avrt.dll: Available" << std::endl;
             FreeLibrary(avrtModule);

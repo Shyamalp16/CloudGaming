@@ -37,6 +37,7 @@ struct HostStatus {
     std::string failureReason;
     std::string hostId;
     std::string roomId;
+	std::string pairingCode;
     std::string targetProcessName;
     DWORD targetPid = 0;
     HWND targetWindow = nullptr;
@@ -100,6 +101,7 @@ private:
     ConfigUtils::NetworkEndpoints endpoints_;
     std::string hostId_;
     std::string roomId_;
+	std::string pairingCode_;
     std::string targetProcessName_;
     std::wstring wideTargetProcessName_;
     std::wstring preferredWindowTitle_;
@@ -126,6 +128,6 @@ private:
     StreamProfileManager streamProfiles_;
 };
 
-void PrintBanner(const std::string& roomId);
+void PrintBanner();
 
 } // namespace Runtime

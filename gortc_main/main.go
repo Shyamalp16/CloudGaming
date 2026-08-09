@@ -65,6 +65,7 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -80,8 +81,8 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
-	"github.com/pion/webrtc/v3"
-	"github.com/pion/webrtc/v3/pkg/media"
+	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v4/pkg/media"
 )
 
 // normalizeToMs converts seconds/ms/us/ns epoch or relative values to milliseconds.
@@ -121,15 +122,28 @@ func normalizeToMs(v interface{}) (float64, bool) {
 }
 
 func loadDotEnvFile(path string) (bool, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
 		return false, err
 	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 64*1024+1))
+	if err != nil {
+		return false, err
+	}
+	if len(data) > 64*1024 {
+		return false, fmt.Errorf("environment file exceeds 64 KiB")
+	}
 
 	lines := strings.Split(string(data), "\n")
+	allowedKeys := map[string]bool{
+		"PION_NETWORK_MODE": true, "PION_TURN_URLS": true, "PION_TURN_URL": true,
+		"PION_TURN_USERNAME": true, "PION_TURN_CREDENTIAL": true,
+		"AUDIO_PTIME_MS": true, "AUDIO_STEREO": true, "AUDIO_USE_FEC": true,
+	}
 	for _, rawLine := range lines {
 		line := strings.TrimSpace(strings.TrimSuffix(rawLine, "\r"))
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -145,7 +159,7 @@ func loadDotEnvFile(path string) (bool, error) {
 		}
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if key == "" {
+		if !allowedKeys[key] {
 			continue
 		}
 		if len(value) >= 2 {
@@ -153,6 +167,9 @@ func loadDotEnvFile(path string) (bool, error) {
 				(value[0] == '\'' && value[len(value)-1] == '\'') {
 				value = value[1 : len(value)-1]
 			}
+		}
+		if len(value) > 4096 || strings.ContainsRune(value, '\x00') || strings.ContainsAny(value, "\r\n") {
+			return false, fmt.Errorf("invalid value for allowed environment key")
 		}
 
 		// Real environment variables always take precedence over .env values.
@@ -165,7 +182,7 @@ func loadDotEnvFile(path string) (bool, error) {
 }
 
 func loadDotEnvIfPresent() {
-	paths := []string{"gortc_main/.env", ".env", "gortc_main/env.local"}
+	paths := []string{"gortc_main/env.local", "env.local"}
 	if executable, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(executable)
 		// Support launching the host from x64\Debug/x64\Release, where the
@@ -173,54 +190,64 @@ func loadDotEnvIfPresent() {
 		paths = append(paths,
 			filepath.Join(exeDir, "env.local"),
 			filepath.Join(exeDir, "..", "..", "gortc_main", "env.local"),
-			filepath.Join(exeDir, "..", "..", ".env"),
 		)
 	}
 	for _, path := range paths {
 		loaded, err := loadDotEnvFile(path)
 		if err != nil {
-			log.Printf("[Go/Pion] Failed to load %s: %v", path, err)
+			log.Printf("[Go/Pion] Failed to load local environment file: %v", err)
 			continue
 		}
 		if loaded {
-			log.Printf("[Go/Pion] Loaded environment from %s", path)
+			log.Printf("[Go/Pion] Loaded approved local environment settings")
 			return
 		}
 	}
 	log.Printf("[Go/Pion] No .env file found; using process environment variables")
 }
 
-func buildICEServersFromEnv() []webrtc.ICEServer {
-	servers := []webrtc.ICEServer{
-		{URLs: []string{"stun:stun.l.google.com:19302"}},
-	}
+func buildICEServersFromEnv() ([]webrtc.ICEServer, error) {
+	servers := make([]webrtc.ICEServer, 0, 2)
+	production := strings.EqualFold(strings.TrimSpace(os.Getenv("PION_NETWORK_MODE")), "production")
 
 	turnURLsRaw := strings.TrimSpace(os.Getenv("PION_TURN_URLS"))
 	if turnURLsRaw == "" {
 		turnURLsRaw = strings.TrimSpace(os.Getenv("PION_TURN_URL"))
 	}
 	if turnURLsRaw == "" {
-		log.Printf("[Go/Pion] No TURN env configured; using STUN-only ICE")
-		return servers
+		if production {
+			return nil, fmt.Errorf("production requires authenticated TURN configuration")
+		}
+		log.Printf("[Go/Pion] No external ICE server configured; using direct host candidates only")
+		return servers, nil
+	}
+	if len(turnURLsRaw) > 4096 {
+		return nil, fmt.Errorf("ICE server list exceeds the maximum length")
 	}
 
 	urls := make([]string, 0, 4)
+	hasTURN := false
 	for _, rawURL := range strings.Split(turnURLsRaw, ",") {
 		url := strings.TrimSpace(rawURL)
-		if url != "" {
-			urls = append(urls, url)
+		if url == "" || len(url) > 512 || len(urls) >= 8 || strings.ContainsAny(url, "@#\r\n\t ") {
+			return nil, fmt.Errorf("invalid ICE server URL list")
 		}
+		isTURN := strings.HasPrefix(url, "turn:") || strings.HasPrefix(url, "turns:")
+		if !isTURN && !strings.HasPrefix(url, "stun:") && !strings.HasPrefix(url, "stuns:") {
+			return nil, fmt.Errorf("unsupported ICE server URL scheme")
+		}
+		hasTURN = hasTURN || isTURN
+		urls = append(urls, url)
 	}
-	if len(urls) == 0 {
-		log.Printf("[Go/Pion] TURN URL env was empty after parsing; using STUN-only ICE")
-		return servers
+	if production && !hasTURN {
+		return nil, fmt.Errorf("production ICE configuration must include TURN")
 	}
 
 	username := strings.TrimSpace(os.Getenv("PION_TURN_USERNAME"))
 	credential := strings.TrimSpace(os.Getenv("PION_TURN_CREDENTIAL"))
-	if username == "" || credential == "" {
-		log.Printf("[Go/Pion] TURN URLs set but credentials missing; using STUN-only ICE")
-		return servers
+	if username == "" || credential == "" || len(username) > 1024 || len(credential) > 1024 ||
+		strings.ContainsAny(username, "\r\n") || strings.ContainsAny(credential, "\r\n") {
+		return nil, fmt.Errorf("ICE credentials are missing or invalid")
 	}
 
 	servers = append(servers, webrtc.ICEServer{
@@ -229,7 +256,7 @@ func buildICEServersFromEnv() []webrtc.ICEServer {
 		Credential: credential,
 	})
 	log.Printf("[Go/Pion] TURN configured from env with %d URL(s)", len(urls))
-	return servers
+	return servers, nil
 }
 
 var rtcpCallback C.RTCPCallback
@@ -1587,8 +1614,13 @@ func createPeerConnectionGo() C.int {
 
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithInterceptorRegistry(i))
 
+	iceServers, err := buildICEServersFromEnv()
+	if err != nil {
+		log.Printf("[Go/Pion] Refusing insecure ICE configuration: %v\n", err)
+		return 0
+	}
 	config := webrtc.Configuration{
-		ICEServers:   buildICEServersFromEnv(),
+		ICEServers:   iceServers,
 		SDPSemantics: webrtc.SDPSemanticsUnifiedPlan,
 	}
 
@@ -1847,7 +1879,7 @@ func createPeerConnectionGo() C.int {
 	// Create and add Opus audio track with fmtp aligned to host encoder
 	opusFmtp := "minptime=10;stereo=1;useinbandfec=1" // host default: 10 ms stereo with FEC
 	if val := os.Getenv("AUDIO_PTIME_MS"); val != "" {
-		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+		if n, err := strconv.Atoi(val); err == nil && n >= 3 && n <= 60 {
 			opusFmtp = strings.ReplaceAll(opusFmtp, "minptime=10", fmt.Sprintf("minptime=%d", n))
 		}
 	}
@@ -1910,10 +1942,7 @@ func createPeerConnectionGo() C.int {
 
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
-			log.Printf(
-				"[Go/Pion] OnICECandidate: %s\n",
-				candidate.ToJSON().Candidate,
-			)
+			log.Println("[Go/Pion] OnICECandidate: local candidate gathered")
 		} else {
 			log.Println(
 				"[Go/Pion] OnICECandidate: ICE Candidate gathering complete (nil candidate received).",

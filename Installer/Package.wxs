@@ -1,24 +1,23 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:fire="http://wixtoolset.org/schemas/v4/wxs/firewall">
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="Cloud Gaming Host"
            Manufacturer="Reflex Gaming"
            Version="$(var.ProductVersion)"
            UpgradeCode="8B4EBCB2-83DB-4F9D-A2C4-C5A8F5600651"
-           Scope="perMachine"
+           Scope="perUser"
            InstallerVersion="500"
            Language="1033">
     <SummaryInformation Description="Cloud Gaming Host Windows application" />
     <MajorUpgrade DowngradeErrorMessage="A newer version of Cloud Gaming Host is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
-    <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="Cloud Gaming Host">
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="LocalProgramsFolder" Name="Programs">
+       <Directory Id="INSTALLFOLDER" Name="Cloud Gaming Host">
         <Component Id="MainExecutable" Guid="*" Bitness="always64">
-          <File Id="HostExe" Source="$(var.PayloadDir)\DisplayCaptureProject.exe" KeyPath="yes">
-            <fire:FirewallException Id="HostFirewallRule" Name="Cloud Gaming Host"
-                                    Description="Allows Cloud Gaming Host WebRTC and signaling traffic."
-                                    Scope="any" Profile="all" IgnoreFailure="yes" />
-          </File>
+		  <!-- WebRTC, signaling, and TURN are outbound connections. No inbound
+		       firewall exception is required or installed. -->
+          <File Id="HostExe" Source="$(var.PayloadDir)\DisplayCaptureProject.exe" KeyPath="yes" />
         </Component>
         <Component Id="RuntimeFfmpeg" Guid="1AA27F91-D9B0-40ED-B164-08A45D06F4FB" Bitness="always64">
           <File Source="$(var.PayloadDir)\avcodec-61.dll" />
@@ -49,8 +48,20 @@
           <File Source="$(var.PayloadDir)\THIRD_PARTY_NOTICES.md" />
           <File Source="$(var.PayloadDir)\server.env.example" />
           <File Source="$(var.PayloadDir)\package-manifest.json" />
+		  <File Source="$(var.PayloadDir)\package-manifest.json.p7s" />
+		  <File Source="$(var.PayloadDir)\sbom.cdx.json" />
           <File Source="$(var.PayloadDir)\Configure-Host.ps1" />
           <File Source="$(var.PayloadDir)\New-ServerEnvironment.ps1" />
+        </Component>
+       </Directory>
+      </Directory>
+      <Directory Id="UserDataFolder" Name="CloudGamingHost">
+        <Component Id="UserDataCleanup" Guid="*">
+		  <!-- A private property prevents command-line override of the
+		       recursive-delete target. -->
+		  <util:RemoveFolderEx Id="RemoveUserDataRecursively" Property="UserDataPath" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\Reflex Gaming\Cloud Gaming Host"
+                         Name="UserData" Type="integer" Value="1" KeyPath="yes" />
         </Component>
       </Directory>
     </StandardDirectory>
@@ -68,16 +79,7 @@
       </Directory>
     </StandardDirectory>
 
-    <StandardDirectory Id="LocalAppDataFolder">
-      <Directory Id="UserDataFolder" Name="CloudGamingHost">
-        <Component Id="UserDataCleanup" Guid="*">
-          <RemoveFile Id="RemoveUserConfiguration" Name="*" On="uninstall" />
-          <RemoveFolder Id="RemoveUserDataFolder" On="uninstall" />
-          <RegistryValue Root="HKCU" Key="Software\Reflex Gaming\Cloud Gaming Host"
-                         Name="UserData" Type="integer" Value="1" KeyPath="yes" />
-        </Component>
-      </Directory>
-    </StandardDirectory>
+	<Property Id="UserDataPath" Value="%LOCALAPPDATA%\CloudGamingHost" Hidden="yes" />
 
     <Feature Id="Complete" Title="Cloud Gaming Host" Level="1">
       <ComponentRef Id="MainExecutable" />

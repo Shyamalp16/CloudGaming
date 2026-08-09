@@ -6,6 +6,7 @@
 #include "WebRTCWrapper.h"
 #include "RuntimeMetrics.h"
 #include <iostream>
+#include <stdexcept>
 
 // PLI callback implemented in Encoder.cpp
 extern "C" void OnPLI();
@@ -31,6 +32,22 @@ namespace AppInit {
 
 void InitializeProcess()
 {
+	if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+		throw std::runtime_error("Could not enable safe DLL search behavior");
+	}
+	PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY extensionPoints{};
+	extensionPoints.DisableExtensionPoints = 1;
+	SetProcessMitigationPolicy(ProcessExtensionPointDisablePolicy, &extensionPoints, sizeof(extensionPoints));
+	PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY handles{};
+	handles.RaiseExceptionOnInvalidHandleReference = 1;
+	handles.HandleExceptionsPermanentlyEnabled = 1;
+	SetProcessMitigationPolicy(ProcessStrictHandleCheckPolicy, &handles, sizeof(handles));
+	PROCESS_MITIGATION_IMAGE_LOAD_POLICY images{};
+	images.NoRemoteImages = 1;
+	images.NoLowMandatoryLabelImages = 1;
+	images.PreferSystem32Images = 1;
+	SetProcessMitigationPolicy(ProcessImageLoadPolicy, &images, sizeof(images));
+
     if (!SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS)) {
         std::wcerr << L"[AppInit] Warning: Failed to set NORMAL_PRIORITY_CLASS" << std::endl;
     } else {

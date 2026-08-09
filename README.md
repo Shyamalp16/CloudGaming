@@ -43,14 +43,14 @@ FPS, video/send bitrate, RTT, and audio state. The first launch generates a
 versioned per-user config under `%LOCALAPPDATA%\CloudGamingHost`; credentials are
 stored separately with Windows DPAPI and a user-only ACL.
 
-Create the complete portable payload and validated WiX MSI with:
+Create an unsigned, non-distributable development payload with:
 
 ```powershell
-.\packaging\Build-Package.ps1 -Version 0.1.0 -BuildInstaller
+.\packaging\Build-Package.ps1 -Version 0.1.0 -Configuration Debug -AllowUnsignedDevelopment
 ```
 
-See `Installer/README.md` for signing, upgrade, firewall, uninstall, and signed
-update-feed behavior.
+The script refuses to create an unsigned MSI. See `Installer/README.md` for the
+signed installer, upgrade, firewall, uninstall, and update-feed procedure.
 
 ## Pipeline behavior
 
@@ -155,22 +155,38 @@ update-feed behavior.
   response-size, status, and timeout checks.
 - Browser diagnostic text is rendered as text, and never interpreted as HTML.
 
-## Running locally or over LAN
+## Running locally or remotely
+
+After generating the protected local environment once, start the complete local
+stack with visible service logs:
+
+```powershell
+.\packaging\Start-LocalDevelopment.ps1
+```
+
+Windows users can alternatively double-click `Start-CloudGaming.bat`, which is
+a thin wrapper around the same validated PowerShell launcher.
+
+The launcher uses the Redis installation in the default WSL distribution,
+starts signaling on 3002, matchmaker on 3000, health/readiness on 8081, and the
+browser server on 8080, then opens the tray host and browser. Close the service
+console windows to stop the stack. Use `-NoHost` or `-NoBrowser` when those
+components are already running.
 
 The browser and host derive their endpoints from
-`Client/html-server/network-config.json`. Change only `mode` when moving between
-same-PC, LAN, and deployed testing:
+`Client/html-server/network-config.json`. Cleartext LAN access is deliberately
+disabled because it would expose pairing and remote input traffic to the local
+network:
 
 | Mode | Open in the browser | Endpoint behavior |
 |---|---|---|
 | `local` | `http://localhost:8080` | Uses loopback for matchmaker and signaling |
-| `lan` | `http://HOST_PC_IP:8080` | Uses the hostname/IP from the page URL |
 | `production` | Deployed client URL | Uses the two URLs under `production` |
 
-For a two-laptop test, set `"mode": "lan"`, start every service on the host
-laptop, and open `http://<host-laptop-ip>:8080` on the client laptop. No source
-URLs need to be edited. Allow inbound TCP ports 8080, 3000, and 3002 through
-Windows Firewall on private networks.
+For a two-laptop test, use `production` mode behind an HTTPS/WSS reverse proxy
+with a certificate trusted by both machines. Expose only the proxy; keep Node,
+Redis, and the Windows host ports on loopback or a private service network. The
+installer does not create an inbound firewall rule.
 
 Start the components in this order.
 
@@ -186,7 +202,7 @@ The default connection is `redis://127.0.0.1:6379`.
 
 ```powershell
 cd Server
-npm install
+npm ci
 npm start
 ```
 
@@ -204,9 +220,22 @@ node mm_server/Matchmaker.js
 
 The default matchmaker endpoint is `http://localhost:3000`.
 
-For authenticated local/LAN testing, put a random value of at least 32
-characters in `Server/.env` as `HOST_SECRET`, then set the same value in the
-host process as `CLOUDGAMING_HOST_SECRET`. Secrets are never stored in
+After building the host, generate a per-host server credential and import the
+host copy into DPAPI. The transfer file is deleted after a successful import:
+
+```powershell
+$hostExe = (Resolve-Path .\x64\Release\DisplayCaptureProject.exe).Path
+$deviceOutput = @(& $hostExe --device-id 2>&1)
+$hostId = [regex]::Match(($deviceOutput -join "`n"),
+  '(?im)^\s*([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\s*$').Groups[1].Value
+if (-not $hostId) { throw 'Could not load the host device identity.' }
+.\packaging\New-ServerEnvironment.ps1 -OutputPath .\Server\.env `
+  -HostId $hostId -Environment development -AllowedOrigins http://localhost:8080
+.\packaging\Configure-Host.ps1 -HostExecutable $hostExe `
+  -HostCredentialFile .\Server\.env.host-credential.json
+```
+
+Do not reuse that credential for another host. Secrets are never stored in
 `config.json`.
 
 ### 4. Browser client
@@ -220,10 +249,10 @@ Open the URL for the selected mode from the table above.
 
 ### 5. Windows host
 
-Build `DisplayCaptureProject.sln` as **Release x64**, then run:
+Build `DisplayCaptureProject.sln` as **Release x64**, complete the credential
+setup above, then run:
 
 ```powershell
-$env:CLOUDGAMING_HOST_SECRET = '<same value as Server/.env HOST_SECRET>'
 x64\Release\DisplayCaptureProject.exe
 ```
 
@@ -232,15 +261,21 @@ recommended for capture and encode performance. The x64 post-build step copies
 the required FFmpeg, Opus/OpenSSL, and Go/Pion runtime DLLs beside the executable
 so it can be launched directly from `x64\Release` or `x64\Debug`.
 
+Distributable builds require Go 1.26.5 for `gortc_main` and approved OpenSSL
+DLLs whose exact hashes are recorded in `packaging/dependency-lock.json`. The
+packaging script fails closed if the Go runtime is older, a dependency hash is
+blank or different, the source tree is dirty, or release signatures are absent.
+See `Installer/README.md` for the signed release procedure.
+
 ## Configuration reference
 
 ### `Client/html-server/network-config.json`
 
 | Key | Default | Description |
 |---|---|---|
-| `mode` | `local` | Endpoint switch: `local`, `lan`, or `production` |
-| `ports.signaling` | `3002` | Signaling port for local and LAN modes |
-| `ports.matchmaker` | `3000` | Matchmaker port for local and LAN modes |
+| `mode` | `local` | Endpoint switch: `local` or `production` |
+| `ports.signaling` | `3002` | Loopback signaling port in local mode |
+| `ports.matchmaker` | `3000` | Loopback matchmaker port in local mode |
 | `production.signalingUrl` | deployed `wss://` URL | Public signaling endpoint |
 | `production.matchmakerUrl` | deployed `https://` URL | Public matchmaker endpoint |
 
@@ -282,7 +317,7 @@ so it can be launched directly from `x64\Release` or `x64\Debug`.
 | `maxQueueDepth` | `2` | Maximum frames waiting for encode |
 | `framePoolBuffers` | `3` | WGC frame-pool buffer count |
 | `cursor` | `false` | Include the host cursor in captured video |
-| `borderRequired` | `false` | Request the WGC capture border |
+| `borderRequired` | `true` | Keep the Windows capture indicator visible while streaming |
 | `mmcss.enable` / `priority` | `true` / `2` | Capture-thread MMCSS scheduling |
 
 ### `host.audio`
@@ -327,6 +362,7 @@ The server reads `Server/.env`. Important defaults are:
 | Variable | Default | Description |
 |---|---|---|
 | `WS_PORT` / `MATCHMAKER_PORT` | `3002` / `3000` | Signaling and matchmaker ports |
+| `HEALTH_PORT` | `8081` | Loopback health/readiness/metrics endpoint; kept separate from the browser development server on 8080 |
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Shared Redis connection |
 | `ROOM_CAPACITY` | `2` | Maximum clients assigned to a host room |
 | `HOST_TTL_SECONDS` | `60` | Host heartbeat expiry |
@@ -334,18 +370,21 @@ The server reads `Server/.env`. Important defaults are:
 | `HEARTBEAT_INTERVAL_MS` | `30000` | Signaling WebSocket heartbeat interval |
 | `MESSAGE_MAX_BYTES` | `262144` | Maximum signaling message size |
 | `BACKPRESSURE_CLOSE_THRESHOLD_BYTES` | `5242880` | Close clients exceeding this buffered amount |
-| `HOST_SECRET` | unset | Expected host-registration secret; required and 32+ characters in production |
+| `HOST_CREDENTIALS_JSON` | unset | JSON map of canonical host UUIDs to unique 32+ character credentials; required in production |
 | `PAIRING_TOKEN_SECRET` | unset | HMAC key for short-lived pairing tokens; required and 32+ characters in production |
 | `PAIRING_TOKEN_TTL_SECONDS` | `120` | Pairing token lifetime, 30–600 seconds |
-| `ENABLE_SESSION_AUTH` | false outside production | Require role-bound signed sessions; always enabled in production |
+| `ENABLE_SESSION_AUTH` | true | Require role-, host-, room-, and session-bound signed pairing tokens; always enabled in production |
 | `ENABLE_AUTH` | unset/false | Enable JWT validation for client signaling |
 | `REQUIRE_WSS` | unset/false | Reject non-secure WebSocket connections |
-| `ALLOWED_ORIGINS` | unset | Optional comma-separated WebSocket origins |
-| `METERED_DOMAIN` / `METERED_API_KEY` | unset | Optional Metered TURN credential source |
+| `ALLOWED_ORIGINS` | unset | Exact comma-separated browser origins; required in production |
+| `TRUSTED_PROXY_IPS` | unset | Exact TLS reverse-proxy addresses; required in production |
+| `METRICS_SECRET` | unset | Distinct bearer credential protecting `/metrics`; required in production |
+| `METERED_DOMAIN` / `METERED_API_KEY` | unset | Authenticated TURN credential source; required in production |
 
-The server `HOST_SECRET` must match the host process environment variable
-`CLOUDGAMING_HOST_SECRET`. For deployment, use unique random values and never
-put them in source-controlled JSON.
+Each entry in `HOST_CREDENTIALS_JSON` must match the DPAPI-protected credential
+on exactly one host. Generate these files with `New-ServerEnvironment.ps1`, keep
+the server file in a secret manager, and delete every plaintext transfer file
+after importing it with `Configure-Host.ps1`.
 
 ## Stream profiles
 
@@ -366,23 +405,23 @@ Production intentionally fails closed. Complete every item before changing
 1. Deploy Redis privately and set `REDIS_URL` on both Node services.
 2. Terminate TLS at the service or trusted proxy. Set the browser endpoints to
    public `https://` matchmaker and `wss://` signaling URLs.
-3. Set `NODE_ENV=production`, `REQUIRE_WSS=true`, `ENABLE_SESSION_AUTH=true`, a
-   32+ character `HOST_SECRET`, and a different 32+ character
-   `PAIRING_TOKEN_SECRET` on the server.
-4. Configure `ALLOWED_ORIGINS` with the exact deployed browser origin. If JWT
-   client authentication is integrated, pass it separately as `accessToken`;
-   the `token` query parameter is reserved for the rotating pairing credential.
-5. Configure TURN. Metered can be used through `METERED_DOMAIN` and
-   `METERED_API_KEY`, or provide the host with `PION_TURN_URLS`,
+3. Generate the production environment with `New-ServerEnvironment.ps1`. It
+   creates per-host credentials, distinct pairing/metrics secrets, strict WSS,
+   and protected file ACLs. Store the result in the deployment secret manager.
+4. Configure `ALLOWED_ORIGINS` with exact HTTPS browser origins and
+   `TRUSTED_PROXY_IPS` with exact proxy addresses. Signaling metadata and tokens
+   travel in the redacted WebSocket protocol header, never in a URL.
+5. Configure Metered TURN with `METERED_DOMAIN` and `METERED_API_KEY`, and
+   provide the host with `PION_TURN_URLS`,
    `PION_TURN_USERNAME`, and `PION_TURN_CREDENTIAL`. The native host refuses to
-   start in production without complete TURN credentials.
-6. On the host, set `CLOUDGAMING_HOST_SECRET` to the server host secret and run
-   the Release x64 binary. Do not pass secrets in URLs or command-line arguments.
+   start in production without a real TURN URL and bounded credentials.
+6. Import the matching host credential with `Configure-Host.ps1`, which protects
+   it with DPAPI and deletes the plaintext transfer file. Do not pass secrets in
+   URLs or command-line arguments.
 
 Example host environment (use a secret manager in real deployment):
 
 ```powershell
-$env:CLOUDGAMING_HOST_SECRET = '<32+ random characters>'
 $env:PION_TURN_URLS = 'turns:turn.example.com:5349?transport=tcp,turn:turn.example.com:3478?transport=udp'
 $env:PION_TURN_USERNAME = '<ephemeral username>'
 $env:PION_TURN_CREDENTIAL = '<ephemeral credential>'

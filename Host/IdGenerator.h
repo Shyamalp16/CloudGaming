@@ -7,6 +7,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <cctype>
+#include "SecretStore.h"
 #pragma comment(lib, "bcrypt.lib")
 
 inline std::array<unsigned char, 16> generateSecureIdBytes() {
@@ -36,4 +38,26 @@ inline std::string generateHostId() {
         out << std::setw(2) << static_cast<unsigned>(bytes[i]);
     }
     return out.str();
+}
+
+inline bool isValidHostId(const std::string& value) {
+	if (value.size() != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-')
+		return false;
+	for (size_t index = 0; index < value.size(); ++index) {
+		if (index == 8 || index == 13 || index == 18 || index == 23) continue;
+		if (!std::isxdigit(static_cast<unsigned char>(value[index]))) return false;
+	}
+	return true;
+}
+
+inline std::string loadOrCreateHostId() {
+	std::string error;
+	const auto stored = SecretStore::Get("deviceId", error);
+	if (stored && isValidHostId(*stored)) return *stored;
+	if (!error.empty()) throw std::runtime_error("Could not read the host device identity: " + error);
+	if (stored) throw std::runtime_error("The stored host device identity is invalid; re-enrollment is required");
+	const auto generated = generateHostId();
+	if (!SecretStore::Set("deviceId", generated, error))
+		throw std::runtime_error("Could not persist the host device identity: " + error);
+	return generated;
 }

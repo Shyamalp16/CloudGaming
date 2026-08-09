@@ -89,6 +89,17 @@ static thread_local std::vector<float> g_audioConversionBuffer;
 static thread_local std::vector<float> g_audioResampleBuffer;
 static thread_local std::vector<float> g_audioTempBuffer;
 
+static std::string WideToUtf8(const std::wstring& value) {
+    if (value.empty()) return {};
+    const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+        static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+    std::string result(static_cast<size_t>(size), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+        static_cast<int>(value.size()), result.data(), size, nullptr, nullptr) != size) return {};
+    return result;
+}
+
 // Initialize audio buffers with pre-reserved capacity
 static void EnsureAudioBuffersCapacity() {
     if (g_audioConversionBuffer.capacity() < MAX_AUDIO_FRAME_SAMPLES * MAX_AUDIO_CHANNELS) {
@@ -1437,7 +1448,7 @@ void AudioCapturer::CaptureThread(DWORD targetProcessId)
             // Step 2: Check Windows version compatibility (requires Windows 10 1903+)
             // Use a simpler approach - try to load the required function
             std::wcout << L"[AudioCapturer] Step 2: Checking Windows version compatibility" << std::endl;
-            HMODULE hModule = LoadLibraryW(L"mmdevapi.dll");
+            HMODULE hModule = LoadLibraryExW(L"mmdevapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
             if (!hModule)
             {
                 std::wcerr << L"[AudioCapturer] Failed to load mmdevapi.dll - Windows version may be too old." << std::endl;
@@ -3071,7 +3082,8 @@ Exit:
     if (!m_stopCapture.load()) {
         std::string reason = "WASAPI capture stopped unexpectedly";
         if (!processLoopbackFallbackReason.empty()) {
-            reason.assign(processLoopbackFallbackReason.begin(), processLoopbackFallbackReason.end());
+            const auto converted = WideToUtf8(processLoopbackFallbackReason);
+            if (!converted.empty()) reason = converted;
         }
         SetState(State::Failed, std::move(reason));
     }

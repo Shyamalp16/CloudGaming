@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -13,6 +14,7 @@ struct Result {
     std::string version;
     std::string downloadUrl;
     std::string sha256;
+	std::uint64_t size = 0;
 };
 
 Result Check(const nlohmann::json& config);

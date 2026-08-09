@@ -1,0 +1,82 @@
+name: Security
+
+on:
+  pull_request:
+    branches: ["**"]
+  push:
+    branches: [main, master]
+  schedule:
+    - cron: "17 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  npm-production-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: Server
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: Server/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm audit --omit=dev --audit-level=high
+
+  go-vulnerability-audit:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: gortc_main
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: gortc_main/go.mod
+          cache-dependency-path: gortc_main/go.sum
+      - name: Verify and build the exact module graph
+        shell: pwsh
+        run: |
+          go mod verify
+          $gcc = "C:\msys64\mingw64\bin\gcc.exe"
+          if (-not (Test-Path -LiteralPath $gcc -PathType Leaf)) { throw "MinGW-w64 GCC is unavailable" }
+          $env:CGO_ENABLED = "1"
+          $env:CC = $gcc
+          go build -mod=readonly -trimpath -buildmode=c-shared -o webrtc-audit.dll .
+      - name: Scan reachable WebRTC code
+        shell: pwsh
+        run: |
+          $env:GOTOOLCHAIN = "go1.26.5"
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          govulncheck ./...
+
+  codeql:
+    permissions:
+      contents: read
+      security-events: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, c-cpp]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@24c7eb380a2dc368f2d129e4c65e51d172983a1e # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@24c7eb380a2dc368f2d129e4c65e51d172983a1e # v4
