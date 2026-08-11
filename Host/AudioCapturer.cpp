@@ -887,7 +887,12 @@ void AudioCapturer::QueueProcessorThread()
                                        static_cast<int>(packet.data.size()),
                                        packet.timestampUs);
             if (result != 0) {
-                AUDIO_LOG_ERROR(L"[AudioQueue] Failed to send audio packet to WebRTC. Error: " << result);
+                static std::atomic<uint64_t> sendFailures{0};
+                const auto failures = sendFailures.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (failures == 1 || failures % 500 == 0) {
+                    AUDIO_LOG_ERROR(L"[AudioQueue] Failed to send audio packet to WebRTC. Error: "
+                                    << result << L", count: " << failures);
+                }
             }
 
             lock.lock();

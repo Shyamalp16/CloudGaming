@@ -16,6 +16,7 @@ namespace Encoder {
         std::uint64_t hwAcquireFailures = 0;
         std::uint64_t videoProcessorFailures = 0;
         std::uint64_t submitFailures = 0;
+        std::uint64_t transportFailures = 0;
     };
     bool InitializeEncoder(int width, int height, int fps);
     void FinalizeEncoder();

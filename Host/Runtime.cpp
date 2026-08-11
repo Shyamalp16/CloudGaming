@@ -428,6 +428,11 @@ bool HostRuntime::TryAttachTarget() {
     GraphicsAndCapture::Start(capture_);
     captureStarted_ = true;
 
+    // A target can change without recreating the peer connection or encoder.
+    // Force a decoder recovery point so the existing client can begin decoding
+    // frames from the newly selected source immediately.
+    Encoder::RequestIDR();
+
     audioStarted_ = audio_.StartCapture(pid, narrowProcessName);
     if (!audioStarted_) {
         std::cerr << "[runtime] Process audio is unavailable; video remains ready" << std::endl;
@@ -482,6 +487,9 @@ void HostRuntime::Tick() {
     if (peerState != lastPeerState_.load(std::memory_order_relaxed)) {
         lastPeerState_.store(peerState, std::memory_order_relaxed);
         if (peerState == 2 || peerState == 3) {
+            // The encoder may already be mid-GOP when a peer becomes ready.
+            // Give every newly connected decoder an immediate recovery frame.
+            Encoder::RequestIDR();
             SetState(HostState::Streaming);
         } else if (peerState == 1) {
             SetState(HostState::Reconnecting);
@@ -620,7 +628,9 @@ nlohmann::json HostRuntime::GetHealthSnapshot() const {
                    {"encodedQueueDepth", audio.encodedQueueDepth}, {"captureDrops", audio.droppedCaptureFrames},
                    {"encodedDrops", audio.droppedEncodedPackets}, {"bitrate", audio.bitrate}}},
         {"capture", {{"running", capture.running}, {"targetFps", capture.targetFps},
-                     {"framesArrived", capture.framesArrived}, {"queueDepth", capture.queueDepth},
+                     {"framesArrived", capture.framesArrived},
+                     {"framesSelected", capture.framesSelected}, {"pacingSkips", capture.pacingSkips},
+                     {"queueDepth", capture.queueDepth},
                      {"overwriteDrops", capture.overwriteDrops}, {"backpressureSkips", capture.backpressureSkips},
                      {"outOfOrderFrames", capture.outOfOrderFrames}}},
         {"encoder", {{"initialized", encoder.initialized}, {"width", encoder.width},
@@ -628,7 +638,8 @@ nlohmann::json HostRuntime::GetHealthSnapshot() const {
                      {"bitrateChangePending", encoder.bitrateChangePending},
                      {"hwAcquireFailures", encoder.hwAcquireFailures},
                      {"videoProcessorFailures", encoder.videoProcessorFailures},
-                     {"submitFailures", encoder.submitFailures}}},
+                     {"submitFailures", encoder.submitFailures},
+                     {"transportFailures", encoder.transportFailures}}},
         {"network", {{"rttMs", network.rttMs}, {"jitterMs", network.jitterMs},
                      {"packetLoss", network.packetLoss}, {"sendBitrateKbps", network.sendBitrateKbps},
                      {"pacerQueueLength", network.pacerQueueLength}, {"nackCount", network.nackCount},

@@ -155,11 +155,11 @@ void ApplyVideoSettings(const nlohmann::json& config)
 
 void ApplyCaptureSettings(const nlohmann::json& config, int configuredFps)
 {
+    (void)configuredFps;
     if (!(config.contains("host") && config["host"].contains("capture"))) {
-        if (configuredFps > 0) {
-            long long interval = 10000000LL / configuredFps;
-            SetMinUpdateInterval100ns(interval);
-        }
+        // Source throttling aliases against high-refresh games. The capture
+        // callback performs efficient, deadline-based selection instead.
+        SetMinUpdateInterval100ns(0);
         return;
     }
     auto ccfg = config["host"]["capture"];
@@ -188,10 +188,7 @@ void ApplyCaptureSettings(const nlohmann::json& config, int configuredFps)
         int prio = mcfg.value("priority", 2);
         SetMmcssConfig(enable, prio);
     }
-    if (configuredFps > 0) {
-        long long interval = 10000000LL / configuredFps;
-        SetMinUpdateInterval100ns(interval);
-    }
+    SetMinUpdateInterval100ns(0);
 }
 
 bool LoadNetworkEndpoints(NetworkEndpoints& outEndpoints)

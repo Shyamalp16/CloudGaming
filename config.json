@@ -17,7 +17,7 @@
       "heartbeatIntervalMs": 20000
     },
     "window": {
-      "resizeClientArea": true,
+      "resizeClientArea": false,
       "targetWidth": 1920,
       "targetHeight": 1080,
       "preferredTitleContains": "",
@@ -27,17 +27,17 @@
       "reattachGraceMs": 1000
     },
     "video": {
-        "fps": 60,
-        "allow120Fps": false,
+        "fps": 120,
+        "allow120Fps": true,
         "defaultProfile": {
             "width": 1920,
             "height": 1080,
-            "fps": 60,
-            "bitrate": 8000000
+            "fps": 120,
+            "bitrate": 30000000
         },
-        "bitrateStart": 8000000,
-        "bitrateMin": 3000000,
-        "bitrateMax": 12000000,
+        "bitrateStart": 35000000,
+        "bitrateMin": 30000000,
+        "bitrateMax": 50000000,
         "hwFramePoolSize": 3,
         "fullRange": false,
         "preset": "p2",

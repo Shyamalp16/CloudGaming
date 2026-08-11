@@ -668,7 +668,12 @@
       return hostname.includes(':') ? `[${hostname}]` : hostname;
     }
 
-    const networkConfigReady = fetch('./network-config.json', { cache: 'no-store' })
+    const networkConfigReady = (window.location.protocol === 'file:'
+      ? Promise.reject(new Error(
+          'The player cannot load network-config.json when index.html is opened directly. ' +
+          'Serve Client/html-server over HTTP and open the HTTP URL instead.'
+        ))
+      : fetch('./network-config.json', { cache: 'no-store' }))
       .then(response => {
         if (!response.ok) {
           throw new Error(`network-config.json returned HTTP ${response.status}`);
@@ -702,8 +707,17 @@
       })
       .catch(error => {
         console.error('Failed to load network configuration:', error);
-        document.getElementById('joinButton').disabled = true;
-        document.getElementById('findMatchButton').disabled = true;
+        const findMatchButton = document.getElementById('findMatchButton');
+        if (findMatchButton) {
+          findMatchButton.disabled = true;
+          findMatchButton.textContent = 'Configuration unavailable';
+        }
+
+        const configStatus = document.getElementById('matchStatus');
+        if (configStatus) {
+          configStatus.textContent = `Configuration failed: ${error.message}`;
+          configStatus.className = 'match-status error';
+        }
         throw error;
       });
     // ────────────────────────────────────────────────────────────────────────────
@@ -771,8 +785,10 @@
     let renderActive = false;
     const useVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
 
-    canvas.width = 1920;
-    canvas.height = 1080;
+    // The stream owns its dimensions. This is updated from videoWidth/videoHeight
+    // as soon as the native-resolution track exposes metadata.
+    canvas.width = 1;
+    canvas.height = 1;
 
     // Debug: log video element state (readyState, size, currentTime)
     function logVideoState(label) {
@@ -930,7 +946,10 @@
     }
 
     function updatePerformanceDisplay() {
-      document.getElementById('fpsValue').textContent = `${fps} fps`;
+      // Prefer WebRTC's decoded-frame rate. Presentation callbacks can be
+      // capped by the client's display refresh rate even when 120 fps arrives.
+      const decodedFps = netFps > 0 ? netFps : fps;
+      document.getElementById('fpsValue').textContent = `${decodedFps} fps`;
       document.getElementById('latencyValue').textContent = `${latency} ms`;
       document.getElementById('bitrateValue').textContent = `${bitrateKbps} kbps`;
       // Quality based on decoded fps from network (netFps)
@@ -1270,12 +1289,12 @@
             const receiver = event.receiver;
             if (receiver) {
               if (receiver.playoutDelayHint !== undefined) {
-                receiver.playoutDelayHint = 0;
-                log('Set playoutDelayHint = 0 for minimum jitter buffer');
+                receiver.playoutDelayHint = 0.016;
+                log('Set playoutDelayHint = 16ms for one-frame cadence smoothing');
               }
               if (receiver.jitterBufferTarget !== undefined) {
-                receiver.jitterBufferTarget = 0;
-                log('Set jitterBufferTarget = 0 for minimum jitter buffer');
+                receiver.jitterBufferTarget = 16;
+                log('Set jitterBufferTarget = 16ms for one-frame cadence smoothing');
               }
               try {
                 if (receiver.setDegradationPreference) {
@@ -1850,21 +1869,23 @@
       }
       const pixelWidth = Math.max(screen.width, screen.height) * (window.devicePixelRatio || 1);
       const pixelHeight = Math.min(screen.width, screen.height) * (window.devicePixelRatio || 1);
-      let width = 1280, height = 720, bitrate = 5000000;
+      // 120 fps needs materially more headroom than the old 60 fps profile.
+      // These remain within the host/server 50 Mbps validation ceiling.
+      let width = 1280, height = 720, bitrate = 15000000;
       if (pixelWidth >= 2560 && pixelHeight >= 1440) {
-        width = 2560; height = 1440; bitrate = 12000000;
+        width = 2560; height = 1440; bitrate = 45000000;
       } else if (pixelWidth >= 1920 && pixelHeight >= 1080) {
-        width = 1920; height = 1080; bitrate = 8000000;
+        width = 1920; height = 1080; bitrate = 30000000;
       }
       socket.send(JSON.stringify({
         type: 'stream-profile', sessionId: currentSessionId,
-        width, height, fps: 60, bitrate,
+        width, height, fps: 120, bitrate,
         capabilities: {
-          maxWidth: 2560, maxHeight: 1440, maxFps: 60,
-          maxBitrate: 12000000, h264: true
+          maxWidth: 2560, maxHeight: 1440, maxFps: 120,
+          maxBitrate: 50000000, h264: true
         }
       }));
-      log(`Requested stream profile ${width}x${height}@60`);
+      log(`Requested 120 FPS control profile; host resolution remains native`);
     }
 
     if (hiddenVideoElement) {

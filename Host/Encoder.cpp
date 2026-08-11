@@ -193,6 +193,7 @@ static std::atomic<bool> g_forceIdrRequested{false};
 static std::atomic<uint64_t> g_hwAcquireFailures{0};
 static std::atomic<uint64_t> g_videoProcessorFailures{0};
 static std::atomic<uint64_t> g_encodeSubmitFailures{0};
+static std::atomic<uint64_t> g_videoTransportFailures{0};
 static std::atomic<int> g_activeWidth{0};
 static std::atomic<int> g_activeHeight{0};
 static std::atomic<int> g_activeFps{0};
@@ -237,7 +238,15 @@ static inline int64_t UpdatePacingFromTimestamp(int64_t currentTsUs) {
 
 static inline void EnqueueEncodedSample(std::vector<uint8_t>&& bytes, int64_t durationUs, bool isKeyframe) {
     if (bytes.empty()) return;
-    sendVideoSample(bytes.data(), static_cast<int>(bytes.size()), durationUs, isKeyframe ? 1 : 0);
+    const int result = sendVideoSample(
+        bytes.data(), static_cast<int>(bytes.size()), durationUs, isKeyframe ? 1 : 0);
+    if (result < 0) {
+        const auto failures = g_videoTransportFailures.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (failures == 1 || failures % 300 == 0) {
+            std::cerr << "[Encoder] WebRTC video transport rejected sample (result="
+                      << result << ", count=" << failures << ")" << std::endl;
+        }
+    }
 }
 
 // Per-packet sample: used to enqueue each AVPacket as its own WebRTC sample (avoids merging
@@ -883,7 +892,11 @@ namespace Encoder {
 
         g_lastCaptureTsUs.store(0, std::memory_order_relaxed);
         g_smoothedDurUs.store(0, std::memory_order_relaxed);
-        g_forceIdrRequested.store(false, std::memory_order_relaxed);
+        g_videoTransportFailures.store(0, std::memory_order_relaxed);
+        // Always make the first frame from a new encoder instance independently
+        // decodable, and preserve the intent of any request made during capture
+        // setup instead of clearing it before the first submitted frame.
+        g_forceIdrRequested.store(true, std::memory_order_release);
 
         // Clear VP caches when (re)initializing encoder (under g_vpMutex for consistency)
         {
@@ -934,7 +947,9 @@ namespace Encoder {
         int encodeW = (requestedWidth > 0 && requestedHeight > 0) ? requestedWidth : width;
         int encodeH = (requestedWidth > 0 && requestedHeight > 0) ? requestedHeight : height;
         if (encodeW != width || encodeH != height) {
-            std::wcout << L"[Encoder] Downscale: capture " << width << L"x" << height << L" -> encode " << encodeW << L"x" << encodeH << std::endl;
+            std::wcout << L"[Encoder] Scale override: capture " << width << L"x" << height << L" -> encode " << encodeW << L"x" << encodeH << std::endl;
+        } else {
+            std::wcout << L"[Encoder] Native-resolution mode: capture and encode dimensions match" << std::endl;
         }
         std::wcout << L"[Encoder] Initializing with width=" << encodeW << L", height=" << encodeH << L", fps=" << fps << std::endl;
 
@@ -952,7 +967,10 @@ namespace Encoder {
 
         codecCtx->width = encodeW;
         codecCtx->height = encodeH;
-        codecCtx->time_base = AVRational{ 1, fps };
+        // Preserve the absolute capture schedule through the encoder. A 1/fps
+        // time base quantizes high-resolution capture timestamps and turns an
+        // occasional late frame into visible 16/33ms timestamp oscillation.
+        codecCtx->time_base = AVRational{ 1, 1000000 };
         codecCtx->framerate = { fps, 1 };
         codecCtx->gop_size = fps * 2; // IDR every ~2 seconds: balances compression efficiency with low latency
         codecCtx->max_b_frames = 0; // low-latency
@@ -1041,6 +1059,9 @@ namespace Encoder {
             av_dict_set(&opts, "tune", "ull", 0);
             av_dict_set(&opts, "rc", g_nvRc.c_str(), 0);         // cbr/cbr_hq
             av_dict_set(&opts, "repeat-headers", "1", 0);
+            // FFmpeg's forced I-frame request is only guaranteed to become an
+            // H.264 IDR recovery point with this NVENC option enabled.
+            av_dict_set(&opts, "forced-idr", "1", 0);
             av_dict_set(&opts, "profile", "high", 0);
             {
                 char buf[16];
@@ -1229,6 +1250,7 @@ namespace Encoder {
         health.hwAcquireFailures = g_hwAcquireFailures.load(std::memory_order_relaxed);
         health.videoProcessorFailures = g_videoProcessorFailures.load(std::memory_order_relaxed);
         health.submitFailures = g_encodeSubmitFailures.load(std::memory_order_relaxed);
+        health.transportFailures = g_videoTransportFailures.load(std::memory_order_relaxed);
         return health;
     }
 

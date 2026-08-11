@@ -67,6 +67,8 @@ static size_t g_allocatedTextures = 0;
 static std::atomic<uint64_t> g_overwriteDrops{ 0 }; // times we overwrote oldest due to full ring
 static std::atomic<uint64_t> g_backpressureSkips{ 0 }; // frames skipped by consumer due to encoder backpressure
 static std::atomic<uint64_t> g_wgcFramesArrived{ 0 };
+static std::atomic<uint64_t> g_framesSelected{ 0 };
+static std::atomic<uint64_t> g_pacingSkips{ 0 };
 static std::atomic<int> g_lastProcessedSeq{ -1 }; // monotonicity tracking
 
 // Timestamp source tracking for A/V sync debugging
@@ -75,6 +77,11 @@ static std::atomic<uint64_t> g_fallbackTimeFrames{ 0 }; // frames using audio re
 static std::atomic<uint64_t> g_outOfOrder{ 0 }; // frames observed out of order
 
 static std::atomic<int> g_targetFps{kDefaultTargetFps};
+// Absolute fixed-point capture schedule. Values are 100ns clock ticks scaled
+// by the target FPS, so the 10,000,000 ticks/second cadence has no cumulative
+// rounding drift at rates such as 60 FPS.
+static int g_pacingFps = 0;
+static int64_t g_nextFrameDeadlineScaled = 0;
 static StreamProfileManager* g_streamProfileManager = nullptr;
 void SetCaptureTargetFps(int fps) {
     if (fps > 0) g_targetFps.store(fps, std::memory_order_release);
@@ -87,6 +94,8 @@ CaptureHealth GetCaptureHealth() {
     health.running = isCapturing.load(std::memory_order_acquire);
     health.targetFps = g_targetFps.load(std::memory_order_relaxed);
     health.framesArrived = g_wgcFramesArrived.load(std::memory_order_relaxed);
+    health.framesSelected = g_framesSelected.load(std::memory_order_relaxed);
+    health.pacingSkips = g_pacingSkips.load(std::memory_order_relaxed);
     health.overwriteDrops = g_overwriteDrops.load(std::memory_order_relaxed);
     health.backpressureSkips = g_backpressureSkips.load(std::memory_order_relaxed);
     health.outOfOrderFrames = g_outOfOrder.load(std::memory_order_relaxed);
@@ -127,7 +136,7 @@ void SetMinUpdateInterval100ns(long long interval100ns) {
     if (interval100ns < 0) interval100ns = 0;
     g_minUpdateInterval100ns.store(interval100ns);
     std::lock_guard<std::mutex> lock(g_captureSessionMutex);
-    if (g_activeCaptureSession && interval100ns > 0) {
+    if (g_activeCaptureSession) {
         try {
             g_activeCaptureSession.MinUpdateInterval(
                 winrt::Windows::Foundation::TimeSpan{ interval100ns });
@@ -138,6 +147,34 @@ void SetMinUpdateInterval100ns(long long interval100ns) {
 }
 static int64_t SteadyNowUs() {
     return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+// Select the first source frame at or after each absolute output deadline.
+// Resetting the deadline to the accepted source time would quantize 150+ FPS
+// games into every-third-frame capture (about 50 FPS). Advancing an absolute
+// phase instead yields the requested average rate without drift.
+static bool SelectFrameForOutput(int64_t sourceTimestamp100ns, int64_t& presentationTimestampUs) {
+    const int fps = std::max(1, g_targetFps.load(std::memory_order_acquire));
+    if (sourceTimestamp100ns <= 0) sourceTimestamp100ns = SteadyNowUs() * 10;
+    const int64_t sourceScaled = sourceTimestamp100ns * static_cast<int64_t>(fps);
+    constexpr int64_t kClockTicksPerSecond = 10000000LL;
+
+    if (g_pacingFps != fps || g_nextFrameDeadlineScaled <= 0 ||
+        sourceScaled + kClockTicksPerSecond < g_nextFrameDeadlineScaled) {
+        g_pacingFps = fps;
+        g_nextFrameDeadlineScaled = sourceScaled;
+    }
+    if (sourceScaled < g_nextFrameDeadlineScaled) return false;
+
+    // If the source stalled, advance past missed output slots without letting
+    // the schedule drift to the late callback time.
+    const int64_t elapsedSlots = (sourceScaled - g_nextFrameDeadlineScaled) /
+        kClockTicksPerSecond;
+    const int64_t selectedDeadline = g_nextFrameDeadlineScaled +
+        elapsedSlots * kClockTicksPerSecond;
+    g_nextFrameDeadlineScaled = selectedDeadline + kClockTicksPerSecond;
+    presentationTimestampUs = (selectedDeadline / fps) / 10;
+    return true;
 }
 
 static bool TextureMatches(ID3D11Texture2D* texture, const D3D11_TEXTURE2D_DESC& sourceDesc) {
@@ -334,24 +371,31 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                     if (!frame) break;
                     g_wgcFramesArrived.fetch_add(1, std::memory_order_relaxed);
 
+                    int64_t sourceTimestamp100ns = 0;
+                    try {
+                        auto srt = frame.SystemRelativeTime();
+                        sourceTimestamp100ns = static_cast<int64_t>(srt.count());
+                    } catch (...) {
+                        sourceTimestamp100ns = 0;
+                    }
+
+                    if (sourceTimestamp100ns > 0) {
+                        g_systemRelativeTimeFrames.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        sourceTimestamp100ns = AudioCapturer::GetSharedReferenceTimeUs() * 10;
+                        g_fallbackTimeFrames.fetch_add(1, std::memory_order_relaxed);
+                    }
+
+                    int64_t presentationTimestampUs = 0;
+                    if (!SelectFrameForOutput(sourceTimestamp100ns, presentationTimestampUs)) {
+                        g_pacingSkips.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+                    g_framesSelected.fetch_add(1, std::memory_order_relaxed);
+
                     auto surface = frame.Surface();
                     if (!surface) continue;
                     int sequenceNumber = frameSequenceCounter++;
-
-                    int64_t timestamp = 0;
-                    try {
-                        auto srt = frame.SystemRelativeTime();
-                        timestamp = static_cast<int64_t>(srt.count() / 10);
-                    } catch (...) {
-                        timestamp = 0;
-                    }
-
-                    if (timestamp > 0) {
-                        g_systemRelativeTimeFrames.fetch_add(1, std::memory_order_relaxed);
-                    } else {
-                        timestamp = AudioCapturer::GetSharedReferenceTimeUs();
-                        g_fallbackTimeFrames.fetch_add(1, std::memory_order_relaxed);
-                    }
 
                     winrt::Windows::Graphics::SizeInt32 contentSize{ 0, 0 };
                     try { contentSize = frame.ContentSize(); } catch (...) {}
@@ -391,7 +435,7 @@ winrt::event_token FrameArrivedEventRegistration(Direct3D11CaptureFramePool cons
                         g_frameQueue.push_back(FrameData{
                             sequenceNumber,
                             std::move(ownedTexture),
-                            timestamp,
+                            presentationTimestampUs,
                             SteadyNowUs(),
                             contentSize
                         });
@@ -433,6 +477,12 @@ void StartCapture() {
     // Initialize shared reference clock for AV synchronization
     AudioCapturer::InitializeSharedReferenceClock();
 
+    // Resolution is owned by the captured target. A stream profile may tune
+    // frame rate and bitrate, but it must never scale or resize the source.
+    // InitializeEncoder receives the current WGC texture dimensions and will
+    // be recreated automatically when that texture size changes.
+    Encoder::SetEncodeSize(0, 0);
+
     for (auto& thread : workerThreads) {
         if (thread.joinable()) thread.join();
     }
@@ -452,8 +502,12 @@ void StartCapture() {
         g_overwriteDrops.store(0, std::memory_order_relaxed);
         g_backpressureSkips.store(0, std::memory_order_relaxed);
         g_wgcFramesArrived.store(0, std::memory_order_relaxed);
+        g_framesSelected.store(0, std::memory_order_relaxed);
+        g_pacingSkips.store(0, std::memory_order_relaxed);
         g_outOfOrder.store(0, std::memory_order_relaxed);
         g_lastProcessedSeq.store(-1, std::memory_order_relaxed);
+        g_pacingFps = 0;
+        g_nextFrameDeadlineScaled = 0;
     }
 
     // Single encode/transmit consumer thread
@@ -482,7 +536,6 @@ void StartCapture() {
         auto lastEncoderInitAttempt = std::chrono::steady_clock::now() - std::chrono::seconds(2);
         auto lastLog = std::chrono::steady_clock::now();
         int submitCount = 0;
-        int64_t lastPacedFrameUs = 0;
         std::optional<StreamProfileManager::Profile> profileAwaitingApply;
         uint64_t lastOverwriteDrops = 0;
         uint64_t lastBpSkips = 0;
@@ -519,8 +572,12 @@ void StartCapture() {
                         current->height != requested->height;
                     const bool bitrateChanged = !current || current->bitrate != requested->bitrate;
                     SetCaptureTargetFps(requested->fps);
-                    SetMinUpdateInterval100ns(10000000LL / requested->fps);
-                    Encoder::SetEncodeSize(requested->width, requested->height);
+                    // WGC's MinUpdateInterval aliases badly with high-refresh
+                    // games. The producer-side absolute pacer is authoritative.
+                    SetMinUpdateInterval100ns(0);
+                    // Profile width/height describe client preferences only.
+                    // Preserve the target's native WGC texture dimensions.
+                    Encoder::SetEncodeSize(0, 0);
                     if (bitrateChanged) Encoder::AdjustBitrate(requested->bitrate);
                     profileAwaitingApply = *requested;
 
@@ -537,18 +594,6 @@ void StartCapture() {
                 RecycleFrameTexture(job);
                 continue;
             }
-
-            // MinUpdateInterval is unavailable on older Windows builds. Keep a
-            // second, monotonic cap here so configured FPS remains authoritative.
-            const int targetFps = std::max(1, g_targetFps.load(std::memory_order_relaxed));
-            const int64_t nowUs = SteadyNowUs();
-            const int64_t minimumSpacingUs = 1000000LL / targetFps;
-            if (lastPacedFrameUs > 0 && nowUs - lastPacedFrameUs < minimumSpacingUs * 9 / 10) {
-                g_backpressureSkips.fetch_add(1, std::memory_order_relaxed);
-                RecycleFrameTexture(job);
-                continue;
-            }
-            lastPacedFrameUs = nowUs;
 
             // Content-size change detection
             {
@@ -602,7 +647,6 @@ void StartCapture() {
                 }
                 lastInitW = encW;
                 lastInitH = encH;
-                lastPacedFrameUs = 0;
                 if (profileAwaitingApply && g_streamProfileManager) {
                     g_streamProfileManager->MarkApplied(*profileAwaitingApply);
                     Encoder::RequestIDR();

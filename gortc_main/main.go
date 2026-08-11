@@ -301,8 +301,8 @@ func ntpMiddle32(now time.Time) uint32 {
 }
 
 // Periodic stats monitoring goroutine
-func startStatsMonitoring() {
-	go func() {
+func startStatsMonitoring(stop <-chan struct{}) {
+	go func(stop <-chan struct{}) {
 		// Pacer queue length is a rough estimate; 500 ms resolution is plenty.
 		// Dropping from 100 ms → 500 ms cuts wakeups 5× with no observable impact.
 		ticker := time.NewTicker(500 * time.Millisecond)
@@ -318,11 +318,11 @@ func startStatsMonitoring() {
 				updatePacerQueueLength()
 			case <-audioHealthTicker.C:
 				reportAudioQueueHealth()
-			case <-moduleStop:
+			case <-stop:
 				return
 			}
 		}
-	}()
+	}(stop)
 }
 
 // checkBufferPoolHealth performs real-time health monitoring of the buffer pool
@@ -585,9 +585,10 @@ var (
 	mediaSendWG    sync.WaitGroup
 
 	// Granular video send path: bounded queue and dedicated sender goroutine
-	videoSendQueue chan queuedVideoSample // Bounded channel for encoded video frames
-	videoSendStop  chan struct{}          // Stop signal for video sender goroutine
-
+	videoSendQueue      chan queuedVideoSample // Bounded channel for encoded video frames
+	videoSendStop       chan struct{}          // Stop signal for video sender goroutine
+	mediaRuntimeMutex   sync.Mutex
+	mediaRuntimeRunning bool
 )
 
 type queuedVideoSample struct {
@@ -781,9 +782,11 @@ func initBufferPool() {
 		log.Printf("[Go/Pion] Buffer pool tier %d (%d bytes): preallocated %d buffers", i, size, count)
 	}
 	log.Println("[Go/Pion] Buffer pool initialized with tiered preallocation")
+}
 
+func startBufferPoolMonitoring(stop <-chan struct{}) {
 	// Periodic buffer pool stats (5-minute reporting only; health check folded in)
-	go func() {
+	go func(stop <-chan struct{}) {
 		statsTicker := time.NewTicker(5 * time.Minute)
 		defer statsTicker.Stop()
 
@@ -793,11 +796,11 @@ func initBufferPool() {
 				logBufferPoolStats()
 				logBufferPoolHealth()
 				checkBufferPoolHealth()
-			case <-moduleStop:
+			case <-stop:
 				return
 			}
 		}
-	}()
+	}(stop)
 }
 
 // getBufferTier returns the appropriate tier index for a given size
@@ -969,6 +972,26 @@ func initVideoSendQueue() {
 	log.Println("[Go/Pion] Video send queue initialized with bounded channel (capacity: 2)")
 }
 
+// startMediaRuntime recreates the queues and sender/monitor goroutines after a
+// host stop. The native agent remains alive across Stop -> Start, so Go package
+// init() is not run again for subsequent hosting sessions.
+func startMediaRuntime() {
+	mediaRuntimeMutex.Lock()
+	defer mediaRuntimeMutex.Unlock()
+	if mediaRuntimeRunning {
+		return
+	}
+
+	moduleStop = make(chan struct{})
+	moduleStopOnce = sync.Once{}
+	initAudioSendQueue()
+	initVideoSendQueue()
+	startStatsMonitoring(moduleStop)
+	startBufferPoolMonitoring(moduleStop)
+	mediaRuntimeRunning = true
+	log.Println("[Go/Pion] Media sender runtime started")
+}
+
 func discardQueuedMedia() {
 	if videoSendQueue != nil {
 	videoDrain:
@@ -1110,9 +1133,7 @@ func init() {
 	debug.SetGCPercent(150)
 
 	initBufferPool()
-	initAudioSendQueue()
-	initVideoSendQueue()
-	startStatsMonitoring()
+	startMediaRuntime()
 }
 
 // validateAudioTimestampStability checks RTP timestamp progression for debugging
@@ -1973,13 +1994,14 @@ func createPeerConnectionGo() C.int {
 	// Periodic RTT anomaly monitor (5s). It belongs to this PeerConnection and
 	// exits when the connection is replaced or closed.
 	monitoredPC := newPeerConnection
-	go func() {
+	stop := moduleStop
+	go func(stop <-chan struct{}) {
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()
 		var lastSample float64
 		for {
 			select {
-			case <-moduleStop:
+			case <-stop:
 				return
 			case <-t.C:
 			}
@@ -1999,7 +2021,7 @@ func createPeerConnectionGo() C.int {
 			}
 			lastSample = rtt
 		}
-	}()
+	}(stop)
 	return 1
 }
 
@@ -2266,59 +2288,57 @@ func getPeerConnectionState() C.int {
 //export initGo
 func initGo() C.int {
 	log.Println("[Go/Pion] initGo: Initializing Go WebRTC module.")
+	startMediaRuntime()
 	return createPeerConnectionGo()
 }
 
 //export closeGo
 func closeGo() {
 	log.Println("[Go/Pion] closeGo: Closing Go WebRTC module.")
-	moduleStopOnce.Do(func() { close(moduleStop) })
+	mediaRuntimeMutex.Lock()
+	if mediaRuntimeRunning {
+		moduleStopOnce.Do(func() { close(moduleStop) })
 
-	// Stop the media sender goroutines.
-	if audioSendStop != nil {
-		close(audioSendStop)
-		log.Println("[Go/Pion] Audio sender goroutine stop signal sent")
-	}
-	if videoSendStop != nil {
-		close(videoSendStop)
-		log.Println("[Go/Pion] Video sender goroutine stop signal sent")
-	}
-	mediaSendWG.Wait()
-	audioSendStop = nil
-	videoSendStop = nil
-	if videoSendQueue != nil {
-		drained := 0
-		for len(videoSendQueue) > 0 {
-			queued := <-videoSendQueue
-			putSampleBuf(queued.sample.Data)
-			drained++
+		// Stop the sender goroutines before making their queues unavailable.
+		if audioSendStop != nil {
+			close(audioSendStop)
+			log.Println("[Go/Pion] Audio sender goroutine stop signal sent")
 		}
-		videoSendQueue = nil
-		log.Printf("[Go/Pion] Drained %d samples from video send queue", drained)
-	}
+		if videoSendStop != nil {
+			close(videoSendStop)
+			log.Println("[Go/Pion] Video sender goroutine stop signal sent")
+		}
+		mediaSendWG.Wait()
+		audioSendStop = nil
+		videoSendStop = nil
 
-	// Drain any remaining packets from the queue and return their buffers to pool
-	if audioSendQueue != nil {
-		timeout := time.After(1 * time.Second) // Prevent infinite wait
-		drained := 0
-	drainAudioQueue:
-		for len(audioSendQueue) > 0 {
-			select {
-			case pkt := <-audioSendQueue:
-				// Return buffer to pool for any undelivered packets
-				if len(pkt.Payload) > 0 {
+		if videoSendQueue != nil {
+			drained := 0
+			for len(videoSendQueue) > 0 {
+				queued := <-videoSendQueue
+				putSampleBuf(queued.sample.Data)
+				drained++
+			}
+			videoSendQueue = nil
+			log.Printf("[Go/Pion] Drained %d samples from video send queue", drained)
+		}
+
+		if audioSendQueue != nil {
+			drained := 0
+			for len(audioSendQueue) > 0 {
+				pkt := <-audioSendQueue
+				if pkt != nil && len(pkt.Payload) > 0 {
 					putSampleBuf(pkt.Payload)
 				}
 				drained++
-			case <-timeout:
-				log.Printf("[Go/Pion] Timeout draining audio queue, %d packets remaining", len(audioSendQueue))
-				// Continue with shutdown even if queue not fully drained
-				break drainAudioQueue
 			}
+			audioSendQueue = nil
+			log.Printf("[Go/Pion] Drained %d packets from audio send queue", drained)
 		}
-		audioSendQueue = nil
-		log.Printf("[Go/Pion] Drained %d packets from audio send queue", drained)
+		mediaRuntimeRunning = false
+		log.Println("[Go/Pion] Media sender runtime stopped")
 	}
+	mediaRuntimeMutex.Unlock()
 
 	// Clear any remaining buffered audio packets
 	audioBufferMutex.Lock()
