@@ -299,7 +299,7 @@ void on_message(websocketpp::connection_hdl hdl, ws_message_ptr msg) {
             if (g_streamProfileManager && !session.sessionId.empty()) {
                 g_streamProfileManager->ClearSession(session.sessionId);
             }
-            if (g_sessionManager) g_sessionManager->Terminate("peer_disconnected");
+            if (g_sessionManager) g_sessionManager->MarkReconnecting();
         }
         else if (type == "offer") {
             if (isVerboseWebsocketLoggingEnabled()) {

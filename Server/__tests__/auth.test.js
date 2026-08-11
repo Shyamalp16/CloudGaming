@@ -97,9 +97,7 @@ function connect(url, accessToken, roomId) {
 describe('JWT auth and room authorization', () => {
   it('accepts authorized token and rejects unauthorized room', async () => {
     if (!(await redisIsAvailable())) {
-      if (process.env.CI) throw new Error('Redis integration-test service is unavailable');
-      console.warn('Skipping Redis-backed integration assertion: local Redis is unavailable');
-      return;
+      throw new Error('Redis integration-test service is unavailable');
     }
     const wsPort = await getFreePort();
     const healthPort = await getFreePort();

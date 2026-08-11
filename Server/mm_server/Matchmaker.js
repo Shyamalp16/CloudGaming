@@ -6,11 +6,24 @@ const { createClient } = require('redis');
 const { z } = require('zod');
 const https = require('https');
 const { RateLimiter } = require('../rateLimiter');
+const { HostControlGateway } = require('../controlGateway');
+const { playerId: authenticatedPlayerId } = require('../playerAuth');
+const marketMetrics = require('../marketMetrics');
+const {
+  CLAIM_SCRIPT,
+  PRESENCE_SCRIPT,
+  PresenceSchema,
+  RELEASE_SCRIPT,
+  SessionRequestSchema,
+  hostScore,
+  newSession,
+} = require('../orchestration');
 const {
   bearerToken,
   hostCredentialValid,
   isTrustedProxy,
   originAllowed,
+  secureEqual,
   sha256,
 } = require('../security');
 
@@ -166,7 +179,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Request-Id');
   res.setHeader('Access-Control-Max-Age', '600');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
@@ -174,8 +187,14 @@ app.use((req, res, next) => {
 });
 
 app.use('/api/', async (req, res, next) => {
-  const id = req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
-  const limit = req.path === '/host/heartbeat' ? 120 : 10;
+  const credential = bearerToken(req.headers);
+  const id = credential
+    ? `credential:${sha256(credential).slice(0, 24)}`
+    : req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
+  let limit = 30;
+  if (req.path === '/host/heartbeat' || req.path === '/v1/host/presence') limit = 180;
+  else if (req.method === 'GET') limit = 180;
+  else if (req.path === '/v1/sessions') limit = 20;
   const allowed = await apiRateLimiter.allow({ namespace: 'http', id, limit, periodSeconds: 60 });
   if (!allowed) return res.status(429).json({ success: false, error: 'Rate limited' });
   next();
@@ -188,6 +207,12 @@ app.use(express.json({ limit: '16kb', strict: true, type: 'application/json' }))
 // Railway (and other platforms) hit these before routing real traffic.
 // Respond immediately so the container is never killed for a missing probe.
 app.get('/healthz', (_req, res) => res.sendStatus(200));
+app.get('/metrics', async (req, res) => {
+  if (config.metricsSecret && !secureEqual(bearerToken(req.headers), config.metricsSecret))
+    return res.status(401).send('Unauthorized');
+  const result = await marketMetrics.metrics();
+  res.type(result.contentType).send(result.body);
+});
 app.get('/readyz', (_req, res) => res.sendStatus(redisClient.isReady ? 200 : 503));
 app.get('/health', (_req, res) => res.sendStatus(200));
 app.get('/', (_, res) => res.send('ok'));
@@ -245,6 +270,7 @@ const authenticateHost = (req, res, next) => {
 };
 
 app.use('/api/host', authenticateHost);
+app.use('/api/v1/host', authenticateHost);
 
 const HeartbeatSchema = z
   .object({
@@ -402,6 +428,342 @@ app.post('/api/host/heartbeat', async (req, res) => {
   }
 });
 
+const marketHostKey = (hostId) => redisKey(`market:host:${hostId}`);
+const hostLeaseKey = (hostId) => redisKey(`market:host-lease:${hostId}`);
+const sessionKey = (sessionId) => redisKey(`market:session:${sessionId}`);
+const playerSessionKey = (playerId) => redisKey(`market:player-session:${playerId}`);
+const gameHostsPrefix = () => redisKey('market:idle-hosts:game:');
+const sessionTtl = (seconds) => Math.max(86400, seconds + 3600);
+
+async function saveSession(session) {
+  session.updatedAt = Date.now();
+  await redisClient.set(sessionKey(session.id), JSON.stringify(session), {
+    EX: sessionTtl(session.durationSeconds),
+  });
+  await redisClient.rPush(
+    redisKey(`market:session-events:${session.id}`),
+    JSON.stringify({ state: session.state, at: session.updatedAt }),
+  );
+  await redisClient.expire(
+    redisKey(`market:session-events:${session.id}`),
+    sessionTtl(session.durationSeconds),
+  );
+  return session;
+}
+
+async function loadSession(sessionId) {
+  const raw = await redisClient.get(sessionKey(sessionId));
+  return raw ? JSON.parse(raw) : null;
+}
+
+async function releaseHost(hostId, sessionId) {
+  return redisClient.eval(RELEASE_SCRIPT, {
+    keys: [marketHostKey(hostId), hostLeaseKey(hostId)],
+    arguments: [gameHostsPrefix(), sessionId, hostId, String(config.hostTtlSeconds)],
+  });
+}
+
+async function releasePlayer(session) {
+  const key = playerSessionKey(session.playerId);
+  if ((await redisClient.get(key)) === session.id) await redisClient.del(key);
+}
+
+async function allocateSession(session) {
+  const ids = await redisClient.sMembers(`${gameHostsPrefix()}${session.gameId}`);
+  const attempted = new Set(session.attemptedHostIds || []);
+  const eligibleIds = ids.filter((id) => !attempted.has(id));
+  if (!eligibleIds.length) return null;
+  const multi = redisClient.multi();
+  eligibleIds.forEach((id) => multi.get(marketHostKey(id)));
+  const candidates = (await multi.exec())
+    .map((raw) => (raw ? JSON.parse(raw) : null))
+    .filter((host) => host && controlGateway.connected(host.hostId))
+    .sort((a, b) => hostScore(a, session.probes || []) - hostScore(b, session.probes || []));
+
+  for (const host of candidates) {
+    attempted.add(host.hostId);
+    const allocated = {
+      ...session,
+      hostId: host.hostId,
+      state: 'reserved',
+      attemptedHostIds: [...attempted],
+    };
+    const claimed = await redisClient.eval(CLAIM_SCRIPT, {
+      keys: [marketHostKey(host.hostId), hostLeaseKey(host.hostId), sessionKey(session.id)],
+      arguments: [
+        gameHostsPrefix(),
+        session.gameId,
+        session.id,
+        host.hostId,
+        String(session.durationSeconds + 300),
+        String(config.hostTtlSeconds),
+        JSON.stringify(allocated),
+        String(sessionTtl(session.durationSeconds)),
+      ],
+    });
+    if (!claimed) continue;
+    const offering = host.games.find((game) => game.id === session.gameId);
+    const prepareDeadlineAt = Date.now() + 180000;
+    const commandId = controlGateway.send(host.hostId, 'session.prepare', session.id, {
+      offering,
+      roomId: session.roomId,
+      durationSeconds: session.durationSeconds,
+      prepareDeadline: prepareDeadlineAt,
+      streamProfile: session.streamProfile,
+    });
+    if (!commandId) {
+      await releaseHost(host.hostId, session.id);
+      continue;
+    }
+    allocated.state = 'preparing';
+    allocated.commandId = commandId;
+    allocated.prepareDeadlineAt = prepareDeadlineAt;
+    await saveSession(allocated);
+    await redisClient.zAdd(redisKey('market:session-prepare-deadlines'), {
+      score: prepareDeadlineAt,
+      value: session.id,
+    });
+    return allocated;
+  }
+  return null;
+}
+
+async function failOrRetrySession(session, code) {
+  const active = ['active', 'ending'].includes(session.state);
+  await releaseHost(session.hostId, session.id);
+  await redisClient.zRem(redisKey('market:session-prepare-deadlines'), session.id);
+  await redisClient.zRem(redisKey('market:session-deadlines'), session.id);
+  if (!active) {
+    session.state = 'allocating';
+    session.failureCode = code;
+    const replacement = await allocateSession(session);
+    if (replacement) {
+      marketMetrics.sessionFailover(code);
+      return replacement;
+    }
+  }
+  session.state = 'failed';
+  session.failureCode = code;
+  session.endedAt = Date.now();
+  await releasePlayer(session);
+  marketMetrics.sessionOutcome('failed');
+  return saveSession(session);
+}
+
+async function handleControlConnection(hostId, connected) {
+  const key = redisKey('market:host-disconnect-deadlines');
+  if (connected) await redisClient.zRem(key, hostId);
+  else
+    await redisClient.zAdd(key, {
+      score: Date.now() + 30000,
+      value: hostId,
+    });
+}
+
+async function handleHostEvent(hostId, event) {
+  if (event.type === 'host.hello') {
+    const leasedSessionId = await redisClient.get(hostLeaseKey(hostId));
+    if (event.sessionId && event.sessionId !== leasedSessionId) {
+      controlGateway.send(hostId, 'session.stop', event.sessionId, { reason: 'orphaned_session' });
+    } else if (!event.sessionId && leasedSessionId) {
+      const leasedSession = await loadSession(leasedSessionId);
+      if (leasedSession && !['ended', 'failed'].includes(leasedSession.state))
+        await failOrRetrySession(leasedSession, 'host_restarted');
+    }
+    return;
+  }
+  if (!event.sessionId) return;
+  const session = await loadSession(event.sessionId);
+  if (!session || session.hostId !== hostId || ['ended', 'failed'].includes(session.state)) return;
+  if (event.type === 'session.launch_ack') session.state = 'preparing';
+  if (event.type === 'session.game_ready') {
+    session.state = 'ready';
+    marketMetrics.observeReady(Math.max(0, (Date.now() - session.createdAt) / 1000));
+    await redisClient.zRem(redisKey('market:session-prepare-deadlines'), session.id);
+  }
+  if (event.type === 'session.stream_connected') {
+    session.state = 'active';
+    session.startsAt = Date.now();
+    session.endsAt = session.startsAt + session.durationSeconds * 1000;
+    await redisClient.zAdd(redisKey('market:session-deadlines'), {
+      score: session.endsAt,
+      value: session.id,
+    });
+  }
+  if (event.type === 'session.failed') {
+    await failOrRetrySession(session, event.payload.code || 'host_failed');
+    return;
+  }
+  if (event.type === 'session.ended') {
+    session.state = 'ended';
+    session.endedAt = Date.now();
+    await releaseHost(hostId, session.id);
+    await redisClient.zRem(redisKey('market:session-prepare-deadlines'), session.id);
+    await redisClient.zRem(redisKey('market:session-deadlines'), session.id);
+    await releasePlayer(session);
+    marketMetrics.sessionOutcome('ended');
+  }
+  await saveSession(session);
+}
+
+app.post('/api/v1/host/presence', async (req, res) => {
+  const parsed = PresenceSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      error: 'Validation failed',
+      issues: formatZodIssues(parsed.error),
+    });
+  }
+  const presence = parsed.data;
+  try {
+    const multi = redisClient.multi();
+    for (const game of presence.games) {
+      multi.sAdd(redisKey('market:games'), game.id);
+      multi.set(redisKey(`market:game:${game.id}`), JSON.stringify(game));
+    }
+    await multi.exec();
+    const state = await redisClient.eval(PRESENCE_SCRIPT, {
+      keys: [marketHostKey(presence.hostId), hostLeaseKey(presence.hostId)],
+      arguments: [
+        presence.hostId,
+        JSON.stringify(presence),
+        gameHostsPrefix(),
+        String(Date.now()),
+        String(config.hostTtlSeconds),
+      ],
+    });
+    res.json({ success: true, state, controlConnected: controlGateway.connected(presence.hostId) });
+  } catch (error) {
+    log('error', 'Host presence update failed', { error: safeError(error) });
+    res.status(503).json({ success: false, error: 'Presence service unavailable' });
+  }
+});
+
+app.get('/api/v1/games', async (_req, res) => {
+  try {
+    const ids = await redisClient.sMembers(redisKey('market:games'));
+    if (!ids.length) return res.json({ games: [] });
+    const memberships = await Promise.all(
+      ids.map((id) => redisClient.sMembers(`${gameHostsPrefix()}${id}`)),
+    );
+    const hostIds = [...new Set(memberships.flat())];
+    const presence = new Map();
+    if (hostIds.length) {
+      const hosts = await redisClient.mGet(hostIds.map(marketHostKey));
+      hostIds.forEach((hostId, index) => {
+        if (hosts[index]) presence.set(hostId, JSON.parse(hosts[index]));
+      });
+    }
+    const multi = redisClient.multi();
+    ids.forEach((id) => multi.get(redisKey(`market:game:${id}`)));
+    const metadata = await multi.exec();
+    const games = ids.flatMap((id, index) => {
+      if (!metadata[index]) return [];
+      const availableHosts = memberships[index].filter((hostId) => {
+        const host = presence.get(hostId);
+        return host?.state === 'idle' && controlGateway.connected(hostId);
+      }).length;
+      const game = JSON.parse(metadata[index]);
+      return [{ id: game.id, source: game.source, title: game.title, availableHosts }];
+    });
+    res.json({ games: games.sort((a, b) => a.title.localeCompare(b.title)) });
+  } catch (error) {
+    log('error', 'Game catalog lookup failed', { error: safeError(error) });
+    res.status(503).json({ error: 'Catalog unavailable' });
+  }
+});
+
+app.get('/api/v1/ping', (_req, res) => {
+  const configured = process.env.DEPLOYMENT_REGION || process.env.RAILWAY_REGION || 'local';
+  const region = /^[A-Za-z0-9_-]{1,32}$/.test(configured) ? configured : 'local';
+  res.json({ region, serverTime: Date.now() });
+});
+
+app.post('/api/v1/sessions', async (req, res) => {
+  const parsed = SessionRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res
+      .status(400)
+      .json({ error: 'Validation failed', issues: formatZodIssues(parsed.error) });
+  }
+  const playerId = await authenticatedPlayerId(req, config);
+  if (!playerId) return res.status(401).json({ error: 'Unauthorized' });
+  const request = parsed.data;
+  const session = newSession(playerId, request);
+  try {
+    const locked = await redisClient.set(playerSessionKey(playerId), session.id, {
+      NX: true,
+      EX: sessionTtl(request.durationSeconds),
+    });
+    if (!locked) {
+      marketMetrics.sessionOutcome('duplicate');
+      return res.status(409).json({
+        error: 'Player already has a session',
+        sessionId: await redisClient.get(playerSessionKey(playerId)),
+      });
+    }
+    const allocated = await allocateSession(session);
+    if (allocated) {
+      marketMetrics.sessionOutcome('allocated');
+      return res.status(202).json({ session: allocated });
+    }
+    await releasePlayer(session);
+    marketMetrics.sessionOutcome('unavailable');
+    res.status(409).json({ error: 'All matching hosts became unavailable' });
+  } catch (error) {
+    await releasePlayer(session).catch(() => undefined);
+    log('error', 'Session allocation failed', { error: safeError(error) });
+    res.status(503).json({ error: 'Session service unavailable' });
+  }
+});
+
+app.get('/api/v1/sessions/:sessionId', async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.sessionId))
+    return res.status(400).json({ error: 'Invalid session ID' });
+  const session = await loadSession(req.params.sessionId);
+  const playerId = await authenticatedPlayerId(req, config);
+  if (session && session.playerId !== playerId) return res.status(403).json({ error: 'Forbidden' });
+  res.status(session ? 200 : 404).json(session ? { session } : { error: 'Session not found' });
+});
+
+app.get('/api/v1/sessions/:sessionId/bootstrap', async (req, res) => {
+  const session = await loadSession(req.params.sessionId);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  if (session.playerId !== (await authenticatedPlayerId(req, config)))
+    return res.status(403).json({ error: 'Forbidden' });
+  if (!['ready', 'active'].includes(session.state)) {
+    return res.status(409).json({ error: 'Session is not ready', state: session.state });
+  }
+  const expiresAt = Date.now() + config.pairingTokenTtlSeconds * 1000;
+  const pairingToken = signPairingToken(
+    { roomId: session.roomId, sessionId: session.id, hostId: session.hostId, expiresAt },
+    config.pairingTokenSecret,
+  );
+  res.json({
+    roomId: session.roomId,
+    sessionId: session.id,
+    pairingToken,
+    expiresAt,
+    endsAt: session.endsAt,
+    iceServers: await getIceServers(),
+  });
+});
+
+app.delete('/api/v1/sessions/:sessionId', async (req, res) => {
+  const session = await loadSession(req.params.sessionId);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  if (session.playerId !== (await authenticatedPlayerId(req, config)))
+    return res.status(403).json({ error: 'Forbidden' });
+  if (['ended', 'failed'].includes(session.state)) return res.json({ session });
+  session.state = 'ending';
+  controlGateway.send(session.hostId, 'session.stop', session.id, { reason: 'player_requested' });
+  await releasePlayer(session);
+  marketMetrics.sessionOutcome('cancelled');
+  await saveSession(session);
+  res.status(202).json({ session });
+});
+
 app.post('/api/match/find', async (req, res) => {
   const parsed = MatchFindSchema.safeParse(req.body || {});
   if (!parsed.success) {
@@ -483,13 +845,67 @@ function createRedis(urlString) {
 const redisClient = createRedis(config.redisUrl);
 const apiRateLimiter = RateLimiter(redisClient, config.redisPrefix, config.env === 'production');
 redisClient.on('error', (err) => log('error', 'Redis client error', { error: safeError(err) }));
+const controlGateway = new HostControlGateway({
+  authenticate: (request, hostId) =>
+    hostCredentialValid(config, hostId, bearerToken(request.headers)),
+  onEvent: handleHostEvent,
+  onConnection: (hostId, connected) => {
+    log('info', `Host control ${connected ? 'connected' : 'disconnected'}`, { hostId });
+    marketMetrics.setControlHosts(controlGateway.connectedCount());
+    handleControlConnection(hostId, connected).catch((error) =>
+      log('warn', 'Host control grace update failed', { hostId, error: safeError(error) }),
+    );
+  },
+  log,
+});
+
+async function expireSessions() {
+  const now = Date.now();
+  const ids = await redisClient.zRangeByScore(redisKey('market:session-deadlines'), 0, now);
+  for (const id of ids) {
+    const session = await loadSession(id);
+    if (session?.state === 'active') {
+      session.state = 'ending';
+      controlGateway.send(session.hostId, 'session.stop', id, { reason: 'duration_expired' });
+      await saveSession(session);
+    }
+    await redisClient.zRem(redisKey('market:session-deadlines'), id);
+  }
+}
+
+async function expirePreparations() {
+  const key = redisKey('market:session-prepare-deadlines');
+  const ids = await redisClient.zRangeByScore(key, 0, Date.now());
+  for (const id of ids) {
+    const session = await loadSession(id);
+    if (session && ['reserved', 'preparing'].includes(session.state)) {
+      controlGateway.send(session.hostId, 'session.stop', id, { reason: 'prepare_timeout' });
+      await failOrRetrySession(session, 'prepare_timeout');
+    } else await redisClient.zRem(key, id);
+  }
+}
+
+async function expireDisconnectedHosts() {
+  const key = redisKey('market:host-disconnect-deadlines');
+  const hostIds = await redisClient.zRangeByScore(key, 0, Date.now());
+  for (const hostId of hostIds) {
+    if (!controlGateway.connected(hostId)) {
+      const sessionId = await redisClient.get(hostLeaseKey(hostId));
+      const session = sessionId ? await loadSession(sessionId) : null;
+      if (session && !['ended', 'failed'].includes(session.state))
+        await failOrRetrySession(session, 'host_disconnected');
+    }
+    await redisClient.zRem(key, hostId);
+  }
+}
 
 async function startServer() {
   // Bind to PORT first so Railway's health check passes immediately.
   // Redis connection happens after — a slow Redis startup no longer kills the container.
   const port = process.env.PORT || config.mmPort;
+  let listener;
   await new Promise((resolve, reject) => {
-    const listener = app.listen(port, config.bindHost, () => {
+    listener = app.listen(port, config.bindHost, () => {
       console.log(`Matchmaker server is running on ${config.bindHost}:${port}`);
       resolve();
     });
@@ -499,6 +915,7 @@ async function startServer() {
     listener.maxHeadersCount = 64;
     listener.once('error', reject);
   });
+  controlGateway.attach(listener);
 
   try {
     await redisClient.connect();
@@ -518,6 +935,24 @@ async function startServer() {
       ),
     10000,
   );
+  setInterval(
+    () => expireSessions().catch((error) => log('error', 'Session expiry failed', { error })),
+    1000,
+  ).unref();
+  setInterval(
+    () =>
+      expirePreparations().catch((error) =>
+        log('error', 'Session preparation expiry failed', { error }),
+      ),
+    1000,
+  ).unref();
+  setInterval(
+    () =>
+      expireDisconnectedHosts().catch((error) =>
+        log('error', 'Disconnected host expiry failed', { error: safeError(error) }),
+      ),
+    1000,
+  ).unref();
 }
 
 startServer().catch((err) => fatalExit('startServer', err));

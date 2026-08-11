@@ -367,7 +367,21 @@ async function handleNewConnection(ws, request) {
           return;
         }
         const registeredRoom = await redisClient.get(redisKey(`host-room:${hostIdParameter}`));
+        let marketplaceRoom = false;
         if (registeredRoom !== roomId) {
+          const lease = await redisClient.get(redisKey(`market:host-lease:${hostIdParameter}`));
+          const rawSession = lease
+            ? await redisClient.get(redisKey(`market:session:${lease}`))
+            : null;
+          if (rawSession) {
+            const session = JSON.parse(rawSession);
+            marketplaceRoom =
+              session.hostId === hostIdParameter &&
+              session.roomId === roomId &&
+              !['ended', 'failed'].includes(session.state);
+          }
+        }
+        if (registeredRoom !== roomId && !marketplaceRoom) {
           ws.close(1008, 'Host is not registered for this room');
           return;
         }

@@ -23,4 +23,5 @@ std::filesystem::path UserDataDirectory() {
 
 std::filesystem::path UserConfigPath() { return UserDataDirectory() / L"config.json"; }
 std::filesystem::path UserSecretsPath() { return UserDataDirectory() / L"secrets.dat"; }
+std::filesystem::path GameInventoryPath() { return UserDataDirectory() / L"games.json"; }
 }

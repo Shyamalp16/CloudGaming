@@ -23,6 +23,7 @@ public:
     void StopAsync() noexcept;
     void WaitForStop() noexcept;
     bool SelectTarget(const std::string& processName, const std::wstring& preferredTitle, std::string& error);
+    void RequestPresenceRefresh() noexcept;
     Runtime::HostStatus GetStatus() const;
     nlohmann::json GetHealthSnapshot() const;
     void SetStatusCallback(StatusCallback callback);

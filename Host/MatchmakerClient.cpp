@@ -20,6 +20,7 @@ static std::string g_hostSecret;
 static std::atomic<bool> g_initialized{false};
 static std::atomic<bool> g_heartbeatRunning{false};
 static std::atomic<bool> g_stopHeartbeat{false};
+static std::atomic<double> g_lastRttMs{200.0};
 static std::thread g_heartbeatThread;
 static std::mutex g_mutex;
 static std::mutex g_heartbeatWaitMutex;
@@ -67,16 +68,45 @@ bool initialize(const std::string& url, const std::string& secret) {
     return true;
 }
 
-static HeartbeatResult parseHeartbeatResponse(const httplib::Result& response, const char* transport) {
-    if (!response) {
-        std::cerr << "[MatchmakerClient] Heartbeat request failed (" << transport << "): "
-                  << httplib::to_string(response.error()) << std::endl;
-        return HeartbeatResult::Failed;
+struct HttpResponse { int status; std::string body; };
+
+static std::optional<HttpResponse> postJson(const std::string& path, const nlohmann::json& payload) {
+    if (!g_initialized || g_matchmakerUrl.empty() || g_matchmakerUrl.size() > 2048) return std::nullopt;
+    const std::wstring endpoint = utf8ToWide(g_matchmakerUrl);
+    URL_COMPONENTS parts{sizeof(parts)};
+    parts.dwSchemeLength = parts.dwHostNameLength = parts.dwUrlPathLength =
+        parts.dwExtraInfoLength = parts.dwUserNameLength = parts.dwPasswordLength = static_cast<DWORD>(-1);
+    if (endpoint.empty() || !WinHttpCrackUrl(endpoint.c_str(), 0, 0, &parts) ||
+        (parts.nScheme != INTERNET_SCHEME_HTTP && parts.nScheme != INTERNET_SCHEME_HTTPS) ||
+        parts.dwUserNameLength || parts.dwPasswordLength || parts.dwExtraInfoLength || parts.dwUrlPathLength > 1)
+        return std::nullopt;
+    const auto host = wideToUtf8(parts.lpszHostName, parts.dwHostNameLength);
+    const int port = parts.nPort;
+    if (host.empty() || port < 1 || port > 65535) return std::nullopt;
+    const httplib::Headers headers{{"Authorization", "Bearer " + g_hostSecret}};
+    httplib::Result response;
+    if (parts.nScheme == INTERNET_SCHEME_HTTPS) {
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+        httplib::SSLClient client(host, port);
+        client.enable_server_certificate_verification(true);
+        client.set_follow_location(false);
+        client.set_connection_timeout(5); client.set_read_timeout(5); client.set_write_timeout(5);
+        response = client.Post(path, headers, payload.dump(), "application/json");
+#else
+        return std::nullopt;
+#endif
+    } else {
+        httplib::Client client(host, port);
+        client.set_connection_timeout(5); client.set_read_timeout(5); client.set_write_timeout(5);
+        response = client.Post(path, headers, payload.dump(), "application/json");
     }
-    if (response->status != 200 || response->body.size() > 4096) {
-        std::cerr << "[MatchmakerClient] Heartbeat failed with status: " << response->status << std::endl;
+    if (!response || response->body.size() > 64 * 1024) return std::nullopt;
+    return HttpResponse{response->status, response->body};
+}
+
+static HeartbeatResult parseHeartbeatResponse(const std::optional<HttpResponse>& response) {
+    if (!response || response->status != 200 || response->body.size() > 4096)
         return HeartbeatResult::Failed;
-    }
     const auto body = nlohmann::json::parse(response->body, nullptr, false);
     if (!body.is_object() || body.value("success", false) != true) return HeartbeatResult::Failed;
     return body.value("rotatePairingCode", false) ? HeartbeatResult::RotatePairingCode
@@ -90,25 +120,7 @@ HeartbeatResult sendHeartbeat(const std::string& hostId, const std::string& room
         return HeartbeatResult::Failed;
     }
 
-	try {
-		if (g_matchmakerUrl.empty() || g_matchmakerUrl.size() > 2048) return HeartbeatResult::Failed;
-		const std::wstring endpoint = utf8ToWide(g_matchmakerUrl);
-		if (endpoint.empty()) return HeartbeatResult::Failed;
-		URL_COMPONENTS parts{sizeof(parts)};
-		parts.dwSchemeLength = parts.dwHostNameLength = parts.dwUrlPathLength =
-			parts.dwExtraInfoLength = parts.dwUserNameLength = parts.dwPasswordLength = static_cast<DWORD>(-1);
-		if (!WinHttpCrackUrl(endpoint.c_str(), 0, 0, &parts) ||
-			(parts.nScheme != INTERNET_SCHEME_HTTP && parts.nScheme != INTERNET_SCHEME_HTTPS) ||
-			parts.dwUserNameLength || parts.dwPasswordLength || parts.dwExtraInfoLength ||
-			(parts.dwUrlPathLength > 1)) {
-			std::cerr << "[MatchmakerClient] Invalid matchmaker endpoint" << std::endl;
-			return HeartbeatResult::Failed;
-		}
-		const std::string host = wideToUtf8(parts.lpszHostName, parts.dwHostNameLength);
-		const int port = parts.nPort;
-		const bool isHttps = parts.nScheme == INTERNET_SCHEME_HTTPS;
-		if (host.empty() || port < 1 || port > 65535) return HeartbeatResult::Failed;
-
+    try {
         nlohmann::json payload;
         payload["hostId"] = hostId;
         payload["roomId"] = roomId;
@@ -120,44 +132,29 @@ HeartbeatResult sendHeartbeat(const std::string& hostId, const std::string& room
         payload["capacity"] = 1;
         payload["availableSlots"] = occupied ? 0 : 1;
 
-        std::string body = payload.dump();
-
-        httplib::Headers headers;
-        headers.emplace("Content-Type", "application/json");
-        headers.emplace("Authorization", "Bearer " + g_hostSecret);
-
-        if (isHttps) {
-#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-            httplib::SSLClient cli(host, port);
-			cli.enable_server_certificate_verification(true);
-			cli.set_follow_location(false);
-            cli.set_connection_timeout(5);
-            cli.set_read_timeout(5);
-            cli.set_write_timeout(5);
-
-            auto res = cli.Post("/api/host/heartbeat", headers, body, "application/json");
-            return parseHeartbeatResponse(res, "HTTPS");
-#else
-            std::cerr << "[MatchmakerClient] HTTPS URL configured but OpenSSL support is not enabled in cpp-httplib build" << std::endl;
-            return HeartbeatResult::Failed;
-#endif
-        } else {
-            httplib::Client cli(host, port);
-            cli.set_connection_timeout(5);
-            cli.set_read_timeout(5);
-            cli.set_write_timeout(5);
-
-            auto res = cli.Post("/api/host/heartbeat", headers, body, "application/json");
-            return parseHeartbeatResponse(res, "HTTP");
-        }
+        return parseHeartbeatResponse(postJson("/api/host/heartbeat", payload));
     } catch (const std::exception& e) {
         std::cerr << "[MatchmakerClient] Exception during heartbeat: " << e.what() << std::endl;
         return HeartbeatResult::Failed;
     }
 }
 
+bool sendPresence(const nlohmann::json& presence) {
+    try {
+        const auto started = std::chrono::steady_clock::now();
+        const auto response = postJson("/api/v1/host/presence", presence);
+        const auto elapsed = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        if (response) g_lastRttMs.store(std::clamp(elapsed, 0.0, 5000.0), std::memory_order_relaxed);
+        return response && response->status == 200;
+    } catch (...) { return false; }
+}
+
+double lastRttMs() noexcept { return g_lastRttMs.load(std::memory_order_relaxed); }
+
 void heartbeatLoop(std::string hostId, std::string roomId, std::string pairingCode, int intervalMs,
-                   std::function<void(const std::string&)> onPairingCodeRotated) {
+                   std::function<void(const std::string&)> onPairingCodeRotated,
+                   std::function<nlohmann::json()> presenceProvider) {
     intervalMs = std::clamp(intervalMs, 1000, 300000);
     try {
         std::cout << "[MatchmakerClient] Heartbeat thread started (interval: " << intervalMs << "ms)" << std::endl;
@@ -178,6 +175,7 @@ void heartbeatLoop(std::string hostId, std::string roomId, std::string pairingCo
 					if (onPairingCodeRotated) onPairingCodeRotated(pairingCode);
 					(void)sendHeartbeat(hostId, roomId, pairingCode);
 				}
+                if (presenceProvider) (void)sendPresence(presenceProvider());
             } catch (const std::exception& e) {
                 std::cerr << "[MatchmakerClient] Heartbeat exception: " << e.what() << std::endl;
             } catch (...) {
@@ -197,7 +195,8 @@ void heartbeatLoop(std::string hostId, std::string roomId, std::string pairingCo
 
 void startHeartbeatThread(const std::string& hostId, const std::string& roomId,
 						  const std::string& pairingCode, int intervalMs,
-						  std::function<void(const std::string&)> onPairingCodeRotated) {
+						  std::function<void(const std::string&)> onPairingCodeRotated,
+                          std::function<nlohmann::json()> presenceProvider) {
     std::lock_guard<std::mutex> lock(g_mutex);
     
     if (g_heartbeatRunning) {
@@ -208,7 +207,7 @@ void startHeartbeatThread(const std::string& hostId, const std::string& roomId,
     g_stopHeartbeat = false;
     g_heartbeatRunning = true;
 	g_heartbeatThread = std::thread(heartbeatLoop, hostId, roomId, pairingCode, intervalMs,
-		std::move(onPairingCodeRotated));
+		std::move(onPairingCodeRotated), std::move(presenceProvider));
 }
 
 void stopHeartbeatThread() {

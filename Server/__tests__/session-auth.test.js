@@ -124,9 +124,7 @@ describe('authenticated host/player session', () => {
       try {
         await redis.connect();
       } catch (error) {
-        if (process.env.CI) throw error;
-        console.warn('Skipping Redis-backed integration assertion: local Redis is unavailable');
-        return;
+        throw new Error('Redis integration-test service is unavailable', { cause: error });
       }
       await redis.set(`${prefix}host-room:${hostId}`, roomId, { EX: 60 });
       const token = signPairingToken(
@@ -170,6 +168,10 @@ describe('authenticated host/player session', () => {
         {
           Origin: 'http://localhost',
         },
+      );
+      await waitForMessage(
+        player,
+        (message) => message.type === 'control' && message.action === 'session-ready',
       );
 
       const playerAnswer = waitForMessage(player, (message) => message.type === 'answer');

@@ -9,13 +9,14 @@ DataChannels.
 
 ```text
 Browser client
-    |  HTTP(S): matchmaking and ICE configuration
+    |  HTTP(S): game catalog, timed sessions, and ICE configuration
     |  WebSocket: SDP and ICE signaling
     v
 Matchmaker (:3000) <----> Redis <----> Signaling server (:3002)
                                       |
                                       v
 Windows host (C++ / Go)
+  Steam/manual inventory -> persistent control channel -> unattended launcher
   HostRuntime -> target/session/profile/audio/input service ownership
   WGC capture -> D3D11 BGRA -> GPU BGRA-to-NV12 -> FFmpeg HW H.264
                                                     |
@@ -34,14 +35,38 @@ Windows host (C++ / Go)
 | Matchmaker | `Server/mm_server/Matchmaker.js` | Node.js, Express, Redis |
 | Browser client | `Client/html-server/index.html` | HTML, JavaScript, WebRTC |
 
+## Unattended marketplace flow
+
+The current desktop clients are `../ReflexDesktop` for hosts and `../ReflexClient`
+for players. A host selects installed Steam games or adds a manual executable,
+starts hosting once, and can close the Electron window while the native agent
+continues in the background. No running-process selection or join code is part
+of the marketplace path.
+
+The player catalog lists only games with a live, idle control-connected host.
+Pressing Play creates a timed session; the matchmaker ranks compatible hosts by
+regional RTT, atomically leases one, and sends an idempotent prepare command.
+The native host launches the game, discovers its window, starts process audio
+and capture, and pre-authorizes the session. The player receives a short-lived
+room bootstrap only after the game is ready. Session duration starts when the
+stream connects. Expiry, player cancellation, game exit, launch timeout, or a
+host disconnect all stop and clean the session before the host returns to idle.
+
+Preparation failures are reassigned to the next compatible host. Active host
+disconnects have a reconnect grace period and then fail visibly rather than
+leaving a session stuck. Redis provides atomic leases and live orchestration;
+`Server/db/schema.sql` defines the durable Postgres/Supabase record model.
+
 ## Windows host application and packaging
 
-Launching `DisplayCaptureProject.exe` without arguments opens the notification-
-area host application. It provides asynchronous start/stop controls, visible
-game/process selection, a copyable pairing code, client/session state, and live
-FPS, video/send bitrate, RTT, and audio state. The first launch generates a
-versioned per-user config under `%LOCALAPPDATA%\CloudGamingHost`; credentials are
-stored separately with Windows DPAPI and a user-only ACL.
+`ReflexDesktop` is the normal host control surface. It provides background
+start/stop, Steam discovery, manual-game registration, offering toggles, and
+current session state. `DisplayCaptureProject.exe` remains the native agent and
+notification-area diagnostic application; its process-selection and pairing
+controls are retained only for the legacy private-session path. The first
+launch generates a versioned per-user config under
+`%LOCALAPPDATA%\CloudGamingHost`; credentials and device identity are stored
+separately with Windows DPAPI and a user-only ACL.
 
 Create an unsigned, non-distributable development payload with:
 

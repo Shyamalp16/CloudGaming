@@ -67,9 +67,7 @@ describe('one-time pairing code rotation', () => {
       try {
         await redis.connect();
       } catch (error) {
-        if (process.env.CI) throw error;
-        console.warn('Skipping Redis-backed integration assertion: local Redis is unavailable');
-        return;
+        throw new Error('Redis integration-test service is unavailable', { cause: error });
       }
       const port = await getFreePort();
       const hostId = crypto.randomUUID();
@@ -112,6 +110,9 @@ describe('one-time pairing code rotation', () => {
       const rotated = await heartbeat(secondCode);
       expect(rotated.status).toBe(200);
       expect(await rotated.json()).toMatchObject({ rotatePairingCode: false });
+      expect((await post(port, '/api/match/find', { pairingCode: secondCode })).status).toBe(404);
+      await redis.del(`${prefix}host_reservations:${hostId}`);
+      expect((await heartbeat(secondCode)).status).toBe(200);
       expect((await post(port, '/api/match/find', { pairingCode: secondCode })).status).toBe(200);
     } finally {
       if (child) {

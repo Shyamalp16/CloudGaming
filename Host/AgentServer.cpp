@@ -12,6 +12,7 @@
 
 #include "ConfigStore.h"
 #include "Diagnostics.h"
+#include "GameInventory.h"
 #include "ProcessDiscovery.h"
 #include "Version.h"
 
@@ -257,7 +258,8 @@ nlohmann::json AgentServer::Dispatch(const nlohmann::json& request) {
             {"nativeVersion", CLOUD_GAMING_VERSION},
             {"architecture", ArchitectureName()},
             {"commands", {"system.hello", "host.getSnapshot", "host.listTargets",
-                "host.selectTarget", "host.start", "host.stop", "host.shutdownAgent"}}});
+                "host.selectTarget", "host.start", "host.stop", "inventory.list",
+                "inventory.setEnabled", "inventory.addManual", "host.shutdownAgent"}}});
     }
     if (method == "host.getSnapshot") return SuccessResponse(requestId, Snapshot());
     if (method == "host.listTargets") {
@@ -292,6 +294,34 @@ nlohmann::json AgentServer::Dispatch(const nlohmann::json& request) {
         controller_.StopAsync();
         return SuccessResponse(requestId, Snapshot());
     }
+    if (method == "inventory.list") {
+        std::string error;
+        nlohmann::json games = nlohmann::json::array();
+        for (const auto& game : GameInventory::List(error)) games.push_back(GameInventory::PublicJson(game));
+        if (!error.empty() && games.empty()) return ErrorResponse(requestId, "INVENTORY_FAILED", error, true);
+        controller_.RequestPresenceRefresh();
+        return SuccessResponse(requestId, std::move(games));
+    }
+    if (method == "inventory.setEnabled") {
+        const auto id = params.value("id", std::string{});
+        if (id.empty() || !params.contains("enabled") || !params["enabled"].is_boolean())
+            return ErrorResponse(requestId, "INVALID_GAME", "Game ID and enabled state are required");
+        std::string error;
+        if (!GameInventory::SetEnabled(id, params["enabled"].get<bool>(), error))
+            return ErrorResponse(requestId, "INVENTORY_FAILED", error, true);
+        controller_.RequestPresenceRefresh();
+        return SuccessResponse(requestId, true);
+    }
+    if (method == "inventory.addManual") {
+        const auto title = params.value("title", std::string{});
+        const auto executable = params.value("executable", std::string{});
+        GameInventory::Game game;
+        std::string error;
+        if (!GameInventory::AddManual(title, Utf8ToWide(executable), game, error))
+            return ErrorResponse(requestId, "INVALID_GAME", error);
+        controller_.RequestPresenceRefresh();
+        return SuccessResponse(requestId, GameInventory::PublicJson(game));
+    }
     if (method == "host.shutdownAgent") {
         controller_.StopAsync();
         shutdownRequested_.store(true, std::memory_order_release);
@@ -308,6 +338,8 @@ nlohmann::json AgentServer::Snapshot() const {
                         {"roomId", status.roomId},
                         {"pairingCode", status.pairingCode},
                         {"targetProcessName", status.targetProcessName},
+                        {"sessionId", status.sessionId},
+                        {"gameId", status.gameId},
                         {"targetPid", status.targetPid},
                         {"peerConnectionState", status.peerConnectionState}}},
             {"health", controller_.GetHealthSnapshot()}};

@@ -3,5 +3,5 @@ const base = require('./jest.config');
 module.exports = {
   ...base,
   collectCoverage: false,
-  testMatch: ['**/__tests__/{auth,pairing-rotation,session-auth}.test.js'],
+  testMatch: ['**/__tests__/{auth,marketplace-session,pairing-rotation,session-auth}.test.js'],
 };

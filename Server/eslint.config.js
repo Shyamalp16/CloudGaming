@@ -24,5 +24,6 @@ module.exports = [
       'no-empty': ['error', { allowEmptyCatch: true }],
     },
   },
+  { files: ['**/*.mjs'], languageOptions: { sourceType: 'module' } },
   prettier,
 ];

@@ -66,6 +66,10 @@ bool HostController::SelectTarget(const std::string& processName,
     return runtime_.QueueTargetSelection(processName, preferredTitle, error);
 }
 
+void HostController::RequestPresenceRefresh() noexcept {
+    runtime_.RequestPresenceRefresh();
+}
+
 Runtime::HostStatus HostController::GetStatus() const {
     return runtime_.GetStatus();
 }

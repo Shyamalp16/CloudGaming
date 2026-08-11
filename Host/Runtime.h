@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <filesystem>
@@ -14,6 +15,8 @@
 #include "AudioCapturer.h"
 #include "ConfigUtils.h"
 #include "GraphicsAndCapture.h"
+#include "GameLauncher.h"
+#include "MarketplaceControl.h"
 #include "SessionManager.h"
 #include "StreamProfileManager.h"
 
@@ -22,10 +25,13 @@ namespace Runtime {
 enum class HostState {
     Stopped,
     Initializing,
+    Idle,
+    Preparing,
     WaitingForTarget,
     Ready,
     Streaming,
     Reconnecting,
+    Cleaning,
     Stopping,
     Failed
 };
@@ -39,6 +45,8 @@ struct HostStatus {
     std::string roomId;
 	std::string pairingCode;
     std::string targetProcessName;
+    std::string sessionId;
+    std::string gameId;
     DWORD targetPid = 0;
     HWND targetWindow = nullptr;
     int peerConnectionState = 0;
@@ -65,6 +73,7 @@ public:
     nlohmann::json GetHealthSnapshot() const;
     bool CreateSupportBundle(std::filesystem::path& outputDirectory, std::string& error) const;
     bool QueueTargetSelection(std::string processName, std::wstring preferredTitle, std::string& error);
+    void RequestPresenceRefresh() noexcept;
     void SetStatusCallback(StatusCallback callback);
     bool IsStopRequested() const noexcept;
 
@@ -73,9 +82,14 @@ private:
     bool LoadAndValidateConfiguration();
     bool StartCoreServices();
     bool TryAttachTarget();
+    bool AttachTarget(HWND window, DWORD pid, const std::string& processName);
     void DetachTarget() noexcept;
     void Tick();
     void ApplyPendingTargetSelection();
+    void HandleMarketplaceCommand(const nlohmann::json& command);
+    void ApplyMarketplaceCommand();
+    void CleanupSession(const std::string& terminalEvent, const std::string& reason) noexcept;
+    nlohmann::json MarketplacePresence() const;
     void NotifyStatus();
     void SetState(HostState state, std::string failureReason = {});
     void ReleaseInstanceLock() noexcept;
@@ -84,6 +98,7 @@ private:
     mutable std::mutex callbackMutex_;
     mutable std::mutex commandMutex_;
     std::atomic<bool> stopRequested_{false};
+    std::atomic<bool> presenceRefreshRequested_{false};
     HostState state_ = HostState::Stopped;
     std::string failureReason_;
 
@@ -93,6 +108,7 @@ private:
     bool inputIntegrationStarted_ = false;
     bool websocketStarted_ = false;
     bool matchmakerStarted_ = false;
+    bool marketplaceStarted_ = false;
     bool d3dInitialized_ = false;
     bool captureStarted_ = false;
     bool audioStarted_ = false;
@@ -103,6 +119,9 @@ private:
     std::string roomId_;
 	std::string pairingCode_;
     std::string targetProcessName_;
+    std::string activeSessionId_;
+    std::string activeGameId_;
+    std::string activeCommandId_;
     std::wstring wideTargetProcessName_;
     std::wstring preferredWindowTitle_;
     std::string hostSecret_;
@@ -117,15 +136,22 @@ private:
     std::atomic<int> lastPeerState_{-1};
     struct PendingTarget { std::string processName; std::wstring preferredTitle; };
     std::optional<PendingTarget> pendingTarget_;
+    std::deque<nlohmann::json> pendingMarketplaceCommands_;
     StatusCallback statusCallback_;
     std::chrono::steady_clock::time_point nextTargetPoll_{};
     std::chrono::steady_clock::time_point invalidWindowSince_{};
+    std::chrono::steady_clock::time_point launchDeadline_{};
+    std::chrono::steady_clock::time_point sessionDeadline_{};
+    int sessionDurationSeconds_ = 0;
+    bool sessionConnectedReported_ = false;
 
     GraphicsAndCapture::D3DContext d3d_;
     GraphicsAndCapture::CaptureContext capture_;
     AudioCapturer audio_;
     SessionManager session_;
     StreamProfileManager streamProfiles_;
+    GameLauncher gameLauncher_;
+    MarketplaceControl marketplace_;
 };
 
 void PrintBanner();

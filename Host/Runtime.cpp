@@ -11,6 +11,7 @@
 #include "CaptureHelpers.h"
 #include "Diagnostics.h"
 #include "Encoder.h"
+#include "GameInventory.h"
 #include "IdGenerator.h"
 #include "InputConfig.h"
 #include "InputIntegrationLayer.h"
@@ -22,6 +23,7 @@
 #include "SecretStore.h"
 #include "ConfigStore.h"
 #include "RuntimeMetrics.h"
+#include "Version.h"
 #include "Websocket.h"
 #include "WindowUtils.h"
 #include "pion_webrtc.h"
@@ -91,10 +93,13 @@ const char* ToString(HostState state) noexcept {
     switch (state) {
     case HostState::Stopped: return "Stopped";
     case HostState::Initializing: return "Initializing";
+    case HostState::Idle: return "Idle";
+    case HostState::Preparing: return "Preparing";
     case HostState::WaitingForTarget: return "WaitingForTarget";
     case HostState::Ready: return "Ready";
     case HostState::Streaming: return "Streaming";
     case HostState::Reconnecting: return "Reconnecting";
+    case HostState::Cleaning: return "Cleaning";
     case HostState::Stopping: return "Stopping";
     case HostState::Failed: return "Failed";
     }
@@ -151,6 +156,10 @@ bool HostRuntime::QueueTargetSelection(std::string processName, std::wstring pre
     std::lock_guard<std::mutex> lock(commandMutex_);
     pendingTarget_ = PendingTarget{std::move(processName), std::move(preferredTitle)};
     return true;
+}
+
+void HostRuntime::RequestPresenceRefresh() noexcept {
+    presenceRefreshRequested_.store(true, std::memory_order_release);
 }
 
 void HostRuntime::ApplyPendingTargetSelection() {
@@ -327,6 +336,13 @@ bool HostRuntime::StartCoreServices() {
 			SetState(HostState::Failed, "Initial matchmaker registration failed");
 			return false;
 		}
+		std::string controlError;
+		if (!marketplace_.Start(endpoints_.matchmakerUrl, hostId_, hostSecret_,
+			[this](const nlohmann::json& command) { HandleMarketplaceCommand(command); }, controlError)) {
+			SetState(HostState::Failed, controlError); return false;
+		}
+		marketplaceStarted_ = true;
+		(void)MatchmakerClient::sendPresence(MarketplacePresence());
 	}
 
     initWebsocket(roomId_, hostId_, endpoints_.signalingUrl, hostSecret_, endpoints_.mode,
@@ -338,7 +354,7 @@ bool HostRuntime::StartCoreServices() {
 			[this](const std::string& nextCode) {
 				std::lock_guard<std::mutex> lock(mutex_);
 				pairingCode_ = nextCode;
-			});
+			}, [this] { return MarketplacePresence(); });
     }
     return true;
 }
@@ -377,7 +393,7 @@ bool HostRuntime::Start() {
         }
 
         nextTargetPoll_ = std::chrono::steady_clock::now();
-        SetState(HostState::WaitingForTarget);
+        SetState(HostState::Idle);
         return true;
     } catch (const std::exception& ex) {
         SetState(HostState::Failed, ex.what());
@@ -405,6 +421,10 @@ bool HostRuntime::TryAttachTarget() {
         return false;
     }
 
+    return AttachTarget(window, pid, narrowProcessName);
+}
+
+bool HostRuntime::AttachTarget(HWND window, DWORD pid, const std::string& processName) {
     WindowUtils::MaybeResizeClientArea(window, config_);
     if (!d3dInitialized_) {
         if (!GraphicsAndCapture::InitializeDevice(d3d_, window)) {
@@ -433,13 +453,147 @@ bool HostRuntime::TryAttachTarget() {
     // frames from the newly selected source immediately.
     Encoder::RequestIDR();
 
-    audioStarted_ = audio_.StartCapture(pid, narrowProcessName);
+    audioStarted_ = audio_.StartCapture(pid, processName);
     if (!audioStarted_) {
         std::cerr << "[runtime] Process audio is unavailable; video remains ready" << std::endl;
     }
     invalidWindowSince_ = {};
     SetState(HostState::Ready);
     return true;
+}
+
+void HostRuntime::HandleMarketplaceCommand(const nlohmann::json& command) {
+    const auto type = command.value("type", std::string{});
+    if (type != "control.ready" && type != "session.prepare" && type != "session.stop") return;
+    std::lock_guard lock(commandMutex_);
+    if (pendingMarketplaceCommands_.size() < 64) pendingMarketplaceCommands_.push_back(command);
+}
+
+void HostRuntime::ApplyMarketplaceCommand() {
+    std::optional<nlohmann::json> command;
+    {
+        std::lock_guard lock(commandMutex_);
+        if (!pendingMarketplaceCommands_.empty()) {
+            command = std::move(pendingMarketplaceCommands_.front());
+            pendingMarketplaceCommands_.pop_front();
+        }
+    }
+    if (!command) return;
+    const auto type = command->value("type", std::string{});
+    const auto sessionId = command->value("sessionId", std::string{});
+    const auto commandId = command->value("commandId", std::string{});
+    if (type == "control.ready") {
+        std::string active;
+        { std::lock_guard lock(mutex_); active = activeSessionId_; }
+        marketplace_.Send("host.hello", active, {{"state", ToString(GetStatus().state)}});
+        presenceRefreshRequested_.store(true, std::memory_order_release);
+        return;
+    }
+    if (type == "session.stop") {
+        std::string active;
+        { std::lock_guard lock(mutex_); active = activeSessionId_; }
+        if (sessionId == active) CleanupSession("session.ended", command->value("payload", nlohmann::json::object()).value("reason", "stopped"));
+        return;
+    }
+
+    std::string active;
+    { std::lock_guard lock(mutex_); active = activeSessionId_; }
+    if (active == sessionId) {
+        marketplace_.Send("session.launch_ack", sessionId, {}, commandId);
+        return;
+    }
+    if (!active.empty()) {
+        marketplace_.Send("session.failed", sessionId, {{"code", "host_busy"}}, commandId);
+        return;
+    }
+    const auto payload = command->value("payload", nlohmann::json::object());
+    const auto offering = payload.value("offering", nlohmann::json::object());
+    const auto manifestId = offering.value("localManifestId", std::string{});
+    const auto roomId = payload.value("roomId", std::string{});
+    const int duration = payload.value("durationSeconds", 0);
+    std::string error;
+    const auto game = GameInventory::Find(manifestId, error);
+    if (!game || sessionId.size() != 36 || roomId.size() != 32 || duration < 300 || duration > 28800) {
+        marketplace_.Send("session.failed", sessionId, {{"code", "invalid_launch"}, {"detail", error}}, commandId);
+        return;
+    }
+
+    if (websocketStarted_) { stopWebsocket(); websocketStarted_ = false; }
+    DetachTarget();
+    if (!gameLauncher_.Start(*game, error)) {
+        marketplace_.Send("session.failed", sessionId, {{"code", "launch_failed"}, {"detail", error}}, commandId);
+        return;
+    }
+    session_.Authorize(sessionId);
+    initWebsocket(roomId, hostId_, endpoints_.signalingUrl, hostSecret_, endpoints_.mode,
+                  &session_, &streamProfiles_);
+    websocketStarted_ = true;
+    {
+        std::lock_guard lock(mutex_);
+        activeSessionId_ = sessionId;
+        activeGameId_ = game->id;
+        activeCommandId_ = commandId;
+        roomId_ = roomId;
+        targetProcessName_.clear();
+        wideTargetProcessName_.clear();
+    }
+    sessionDurationSeconds_ = duration;
+    launchDeadline_ = std::chrono::steady_clock::now() + std::chrono::minutes(3);
+    sessionDeadline_ = launchDeadline_ + std::chrono::seconds(duration);
+    sessionConnectedReported_ = false;
+    marketplace_.Send("session.launch_ack", sessionId, {}, commandId);
+    SetState(HostState::Preparing);
+}
+
+void HostRuntime::CleanupSession(const std::string& terminalEvent, const std::string& reason) noexcept {
+    try {
+        std::string sessionId;
+        { std::lock_guard lock(mutex_); sessionId = activeSessionId_; }
+        if (sessionId.empty()) return;
+        SetState(HostState::Cleaning);
+        InputIntegrationLayer::clearAuthorizedSession(reason);
+        DetachTarget();
+        if (websocketStarted_) { stopWebsocket(); websocketStarted_ = false; }
+        gameLauncher_.Stop();
+        session_.Terminate(reason);
+        marketplace_.Send(terminalEvent, sessionId, {{"code", reason}});
+        {
+            std::lock_guard lock(mutex_);
+            activeSessionId_.clear(); activeGameId_.clear(); activeCommandId_.clear();
+            targetProcessName_.clear(); roomId_ = generateRoomId();
+        }
+        sessionDurationSeconds_ = 0;
+        sessionConnectedReported_ = false;
+        launchDeadline_ = sessionDeadline_ = {};
+        SetState(HostState::Idle);
+    } catch (...) { SetState(HostState::Failed, "Session cleanup failed"); }
+}
+
+nlohmann::json HostRuntime::MarketplacePresence() const {
+    std::string hostId;
+    HostState state;
+    { std::lock_guard lock(mutex_); hostId = hostId_; state = state_; }
+    std::string inventoryError;
+    nlohmann::json games = nlohmann::json::array();
+    for (const auto& game : GameInventory::List(inventoryError)) {
+        if (game.enabled && game.installed)
+            games.push_back({{"id", game.id}, {"source", game.source}, {"title", game.title},
+                             {"localManifestId", game.localManifestId}, {"enabled", true}});
+    }
+    std::string presenceState = "idle";
+    if (state == HostState::Preparing) presenceState = "preparing";
+    else if (state == HostState::Ready) presenceState = "ready";
+    else if (state == HostState::Streaming || state == HostState::Reconnecting) presenceState = "streaming";
+    else if (state == HostState::Cleaning) presenceState = "cleaning";
+    else if (state == HostState::Failed) presenceState = "failed";
+    auto region = ReadEnvironment("CLOUDGAMING_PROBE_REGION");
+    if (region.empty() || region.size() > 32 || !std::all_of(region.begin(), region.end(), [](unsigned char c) {
+            return std::isalnum(c) || c == '_' || c == '-';
+        })) region = "local";
+    return {{"hostId", hostId}, {"state", presenceState}, {"region", region},
+            {"games", std::move(games)}, {"agentVersion", CLOUD_GAMING_VERSION},
+            {"capabilities", {{"maxWidth", 3840}, {"maxHeight", 2160}, {"maxFps", 120}}},
+            {"network", {{"probeRegion", region}, {"probeRttMs", MatchmakerClient::lastRttMs()}}}};
 }
 
 void HostRuntime::DetachTarget() noexcept {
@@ -458,10 +612,38 @@ void HostRuntime::DetachTarget() noexcept {
 }
 
 void HostRuntime::Tick() {
+    ApplyMarketplaceCommand();
     ApplyPendingTargetSelection();
+    if (marketplaceStarted_ && presenceRefreshRequested_.exchange(false, std::memory_order_acq_rel))
+        (void)MatchmakerClient::sendPresence(MarketplacePresence());
     const auto now = std::chrono::steady_clock::now();
+    std::string activeSession;
+    { std::lock_guard lock(mutex_); activeSession = activeSessionId_; }
+
+    if (!activeSession.empty() && now >= sessionDeadline_) {
+        CleanupSession("session.ended", "duration_expired");
+        return;
+    }
     if (!captureStarted_) {
-        if (now >= nextTargetPoll_) {
+        if (!activeSession.empty()) {
+            if (now >= launchDeadline_) {
+                CleanupSession("session.failed", "launch_timeout");
+                return;
+            }
+            if (now >= nextTargetPoll_) {
+                const auto target = gameLauncher_.PollTarget();
+                if (target) {
+                    {
+                        std::lock_guard lock(mutex_);
+                        targetProcessName_ = WideToUtf8(target->processName);
+                        wideTargetProcessName_ = target->processName;
+                    }
+                    if (AttachTarget(target->window, target->processId, WideToUtf8(target->processName)))
+                        marketplace_.Send("session.game_ready", activeSession);
+                }
+                nextTargetPoll_ = now + std::chrono::milliseconds(250);
+            }
+        } else if (GetStatus().state == HostState::WaitingForTarget && now >= nextTargetPoll_) {
             TryAttachTarget();
             nextTargetPoll_ = now + std::chrono::milliseconds(windowPollIntervalMs_);
         }
@@ -475,9 +657,8 @@ void HostRuntime::Tick() {
         }
         if (windowReattachEnabled_ &&
             now - invalidWindowSince_ >= std::chrono::milliseconds(windowReattachGraceMs_)) {
-            DetachTarget();
-            SetState(HostState::WaitingForTarget);
-            nextTargetPoll_ = now;
+            if (!activeSession.empty()) CleanupSession("session.failed", "game_exited");
+            else { DetachTarget(); SetState(HostState::WaitingForTarget); nextTargetPoll_ = now; }
         }
         return;
     }
@@ -491,6 +672,11 @@ void HostRuntime::Tick() {
             // Give every newly connected decoder an immediate recovery frame.
             Encoder::RequestIDR();
             SetState(HostState::Streaming);
+            if (!activeSession.empty() && !sessionConnectedReported_) {
+                sessionConnectedReported_ = true;
+                sessionDeadline_ = now + std::chrono::seconds(sessionDurationSeconds_);
+                marketplace_.Send("session.stream_connected", activeSession);
+            }
         } else if (peerState == 1) {
             SetState(HostState::Reconnecting);
         } else if (peerState == 4 || peerState == 5 || peerState == 6) {
@@ -534,14 +720,20 @@ void HostRuntime::Stop() noexcept {
 
     // Exact reverse order of acquisition: target audio/capture, matchmaker,
     // signaling/peer, input integration/handlers, Go runtime, instance mutex.
+    CleanupSession("session.failed", "host_stopped");
     DetachTarget();
-    if (matchmakerStarted_) {
-        try { MatchmakerClient::stopHeartbeatThread(); } catch (...) {}
-        matchmakerStarted_ = false;
-    }
+    gameLauncher_.Stop();
     if (websocketStarted_) {
         try { stopWebsocket(); } catch (...) {}
         websocketStarted_ = false;
+    }
+    if (marketplaceStarted_) {
+        try { marketplace_.Stop(); } catch (...) {}
+        marketplaceStarted_ = false;
+    }
+    if (matchmakerStarted_) {
+        try { MatchmakerClient::stopHeartbeatThread(); } catch (...) {}
+        matchmakerStarted_ = false;
     }
     if (inputIntegrationStarted_) {
         try { InputIntegrationLayer::stop(); } catch (...) {}
@@ -566,6 +758,12 @@ void HostRuntime::Stop() noexcept {
 		if (!hostSecret_.empty()) SecureZeroMemory(hostSecret_.data(), hostSecret_.size());
 		hostSecret_.clear();
     }
+    {
+        std::lock_guard lock(commandMutex_);
+        pendingTarget_.reset();
+        pendingMarketplaceCommands_.clear();
+    }
+    presenceRefreshRequested_.store(false, std::memory_order_release);
     lastPeerState_.store(-1, std::memory_order_release);
     SetState(HostState::Stopped);
 }
@@ -584,6 +782,8 @@ HostStatus HostRuntime::GetStatus() const {
     status.roomId = roomId_;
 	status.pairingCode = pairingCode_;
     status.targetProcessName = targetProcessName_;
+    status.sessionId = activeSessionId_;
+    status.gameId = activeGameId_;
     status.targetPid = targetPid_.load(std::memory_order_acquire);
     status.targetWindow = targetWindow_.load(std::memory_order_acquire);
     status.peerConnectionState = lastPeerState_.load(std::memory_order_relaxed);
