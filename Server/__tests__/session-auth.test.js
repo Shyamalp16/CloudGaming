@@ -182,6 +182,41 @@ describe('authenticated host/player session', () => {
       player.send(JSON.stringify({ type: 'offer', sessionId, sdp: 'v=0\r\n' }));
       await expect(hostOffer).resolves.toMatchObject({ type: 'offer', sessionId });
 
+      const requestedProfile = {
+        type: 'stream-profile',
+        sessionId,
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        bitrate: 18000000,
+        capabilities: {
+          maxWidth: 2560,
+          maxHeight: 1440,
+          maxFps: 120,
+          maxBitrate: 50000000,
+          h264: true,
+        },
+      };
+      const hostProfile = waitForMessage(host, (message) => message.type === 'stream-profile');
+      player.send(JSON.stringify(requestedProfile));
+      await expect(hostProfile).resolves.toEqual(requestedProfile);
+
+      const playerProfileAck = waitForMessage(
+        player,
+        (message) => message.type === 'control' && message.action === 'profile-accepted',
+      );
+      host.send(JSON.stringify({
+        type: 'control',
+        sessionId,
+        action: 'profile-accepted',
+        payload: { width: 1920, height: 1080, fps: 60, bitrate: 18000000 },
+      }));
+      await expect(playerProfileAck).resolves.toMatchObject({
+        type: 'control',
+        sessionId,
+        action: 'profile-accepted',
+      });
+
       const playerClosed = new Promise((resolve) => player.once('close', resolve));
       player.close();
       await playerClosed;

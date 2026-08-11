@@ -69,6 +69,8 @@ static std::atomic<uint64_t> g_backpressureSkips{ 0 }; // frames skipped by cons
 static std::atomic<uint64_t> g_wgcFramesArrived{ 0 };
 static std::atomic<uint64_t> g_framesSelected{ 0 };
 static std::atomic<uint64_t> g_pacingSkips{ 0 };
+static std::atomic<double> g_measuredCaptureFps{ 0.0 };
+static std::atomic<double> g_measuredEncodeFps{ 0.0 };
 static std::atomic<int> g_lastProcessedSeq{ -1 }; // monotonicity tracking
 
 // Timestamp source tracking for A/V sync debugging
@@ -93,6 +95,8 @@ CaptureHealth GetCaptureHealth() {
     CaptureHealth health;
     health.running = isCapturing.load(std::memory_order_acquire);
     health.targetFps = g_targetFps.load(std::memory_order_relaxed);
+    health.measuredCaptureFps = g_measuredCaptureFps.load(std::memory_order_relaxed);
+    health.measuredEncodeFps = g_measuredEncodeFps.load(std::memory_order_relaxed);
     health.framesArrived = g_wgcFramesArrived.load(std::memory_order_relaxed);
     health.framesSelected = g_framesSelected.load(std::memory_order_relaxed);
     health.pacingSkips = g_pacingSkips.load(std::memory_order_relaxed);
@@ -504,6 +508,8 @@ void StartCapture() {
         g_wgcFramesArrived.store(0, std::memory_order_relaxed);
         g_framesSelected.store(0, std::memory_order_relaxed);
         g_pacingSkips.store(0, std::memory_order_relaxed);
+        g_measuredCaptureFps.store(0.0, std::memory_order_relaxed);
+        g_measuredEncodeFps.store(0.0, std::memory_order_relaxed);
         g_outOfOrder.store(0, std::memory_order_relaxed);
         g_lastProcessedSeq.store(-1, std::memory_order_relaxed);
         g_pacingFps = 0;
@@ -572,6 +578,7 @@ void StartCapture() {
                         current->height != requested->height;
                     const bool bitrateChanged = !current || current->bitrate != requested->bitrate;
                     SetCaptureTargetFps(requested->fps);
+                    Encoder::SetProfileBitrateCeiling(requested->bitrate);
                     // WGC's MinUpdateInterval aliases badly with high-refresh
                     // games. The producer-side absolute pacer is authoritative.
                     SetMinUpdateInterval100ns(0);
@@ -681,8 +688,11 @@ void StartCapture() {
                     : 0.0;
                 const double elapsedSeconds = std::max(0.001,
                     std::chrono::duration<double>(nowDbg - lastLog).count());
+                const double encodeFps = submitCount / elapsedSeconds;
+                g_measuredCaptureFps.store(captureFps, std::memory_order_relaxed);
+                g_measuredEncodeFps.store(encodeFps, std::memory_order_relaxed);
                 std::wcout << L"[Stats] WGC=" << std::fixed << std::setprecision(1) << captureFps
-                           << L" fps, Encode=" << (submitCount / elapsedSeconds)
+                           << L" fps, Encode=" << encodeFps
                            << L" fps, Target=" << g_targetFps.load()
                            << L" fps, QueueDepth=" << qsz
                            << L", OverwriteDrops/s=" << (od - lastOverwriteDrops)
@@ -709,6 +719,8 @@ void StopCapture(winrt::event_token& token, winrt::Windows::Graphics::Capture::D
     // keep refilling the queue while shutdown waits for it to become empty.
     framePool.FrameArrived(token);
     isCapturing.store(false);
+    g_measuredCaptureFps.store(0.0, std::memory_order_relaxed);
+    g_measuredEncodeFps.store(0.0, std::memory_order_relaxed);
     {
         // Event removal does not guarantee an already-running callback has
         // returned. Wait before destroying textures and encoder resources.

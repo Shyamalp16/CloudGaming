@@ -142,6 +142,7 @@ private:
     std::chrono::steady_clock::time_point invalidWindowSince_{};
     std::chrono::steady_clock::time_point launchDeadline_{};
     std::chrono::steady_clock::time_point sessionDeadline_{};
+    std::chrono::steady_clock::time_point nextSessionReport_{};
     int sessionDurationSeconds_ = 0;
     bool sessionConnectedReported_ = false;
 

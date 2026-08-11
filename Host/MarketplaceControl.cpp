@@ -69,6 +69,10 @@ bool MarketplaceControl::Start(const std::string& matchmakerUrl, const std::stri
                                const std::string& hostSecret, CommandHandler handler,
                                std::string& error) {
     if (impl_->worker.joinable()) return true;
+    // websocketpp/asio clients cannot be restarted after stop(). A host may be
+    // toggled many times during the lifetime of the desktop agent, so every
+    // start needs a fresh transport and io_context.
+    impl_ = std::make_unique<Impl>();
     if (matchmakerUrl.rfind("https://", 0) == 0)
         impl_->url = "wss://" + matchmakerUrl.substr(8);
     else if (matchmakerUrl.rfind("http://", 0) == 0)
@@ -122,7 +126,11 @@ void MarketplaceControl::Stop() noexcept {
 bool MarketplaceControl::Send(const std::string& type, const std::string& sessionId,
                               const nlohmann::json& payload, const std::string& commandId) {
     if (!impl_->connected) return false;
-    nlohmann::json event{{"type", type}, {"payload", payload}};
+    // `json{}` is null, but the control protocol requires every payload to be
+    // an object. Normalize empty call sites such as session.game_ready instead
+    // of letting the server reject the event and close the control socket.
+    nlohmann::json event{{"type", type},
+                         {"payload", payload.is_object() ? payload : nlohmann::json::object()}};
     if (!sessionId.empty()) event["sessionId"] = sessionId;
     if (!commandId.empty()) event["commandId"] = commandId;
     const auto body = event.dump();

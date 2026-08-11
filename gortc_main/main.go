@@ -1075,6 +1075,12 @@ func videoSenderGoroutine() {
 	// (at 90fps that would be ~900 live timers at any moment, creating sustained GC pressure).
 	idleTimer := time.NewTimer(10 * time.Second)
 	defer idleTimer.Stop()
+	pacingTimer := time.NewTimer(time.Hour)
+	if !pacingTimer.Stop() {
+		<-pacingTimer.C
+	}
+	defer pacingTimer.Stop()
+	var nextVideoSendAt time.Time
 
 	for {
 		select {
@@ -1093,6 +1099,27 @@ func videoSenderGoroutine() {
 				continue
 			}
 
+			// WGC and hardware encoders may release several frames in a short
+			// burst even though their capture timestamps span multiple display
+			// intervals. Sending that burst immediately makes the browser report
+			// inflated receive FPS and can overflow its decoder queue. Pace writes
+			// by the capture-derived sample duration, while resetting to "now" if
+			// this sender ever falls behind so latency is never accumulated.
+			now := time.Now()
+			if nextVideoSendAt.IsZero() || nextVideoSendAt.Before(now) || now.Sub(nextVideoSendAt) > 100*time.Millisecond {
+				nextVideoSendAt = now
+			}
+			if wait := time.Until(nextVideoSendAt); wait > 0 {
+				pacingTimer.Reset(wait)
+				select {
+				case <-pacingTimer.C:
+				case <-videoSendStop:
+					putSampleBuf(queued.sample.Data)
+					log.Println("[Go/Pion] Video sender goroutine stopped during pacing wait")
+					return
+				}
+			}
+
 			pcMutex.RLock()
 			track := videoTrack
 			pcMutex.RUnlock()
@@ -1106,6 +1133,7 @@ func videoSenderGoroutine() {
 				log.Printf("[Go/Pion] Video track is nil, dropping sample")
 			}
 			putSampleBuf(queued.sample.Data)
+			nextVideoSendAt = nextVideoSendAt.Add(queued.sample.Duration)
 
 		case <-videoSendStop:
 			log.Println("[Go/Pion] Video sender goroutine stopped")

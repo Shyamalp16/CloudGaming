@@ -1,16 +1,16 @@
 [CmdletBinding()]
 param(
-	[switch] $NoHost,
+	[switch] $StartStandaloneHost,
 	[switch] $NoBrowser
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $serverDirectory = Join-Path $projectRoot 'Server'
-$clientDirectory = Join-Path $projectRoot 'Client\html-server'
+$clientDirectory = [IO.Path]::GetFullPath((Join-Path $projectRoot '..\ReflexClient'))
 $hostExecutable = Join-Path $projectRoot 'x64\Release\DisplayCaptureProject.exe'
 $node = (Get-Command node.exe -ErrorAction Stop).Source
-$python = (Get-Command py.exe -ErrorAction Stop).Source
+$npm = (Get-Command npm.cmd -ErrorAction Stop).Source
 
 function Test-LocalPort([int] $Port) {
 	$client = [Net.Sockets.TcpClient]::new()
@@ -89,12 +89,12 @@ Start-ServiceConsole 'Cloud Gaming - Matchmaker' $serverDirectory `
 	"`$env:PRETTY_LOGS='true'; & $nodeLiteral 'mm_server\Matchmaker.js'" | Out-Null
 Wait-LocalPort 3000
 
-$pythonLiteral = Quote-PowerShellLiteral $python
+$npmLiteral = Quote-PowerShellLiteral $npm
 Start-ServiceConsole 'Cloud Gaming - Browser' $clientDirectory `
-	"& $pythonLiteral -m http.server 8080 --bind 127.0.0.1" | Out-Null
+	"& $npmLiteral 'run' 'dev' '--' '--host' '127.0.0.1' '--port' '8080'" | Out-Null
 Wait-LocalPort 8080
 
-if (-not $NoHost) {
+if ($StartStandaloneHost) {
 	if (-not (Test-Path -LiteralPath $hostExecutable -PathType Leaf)) {
 		throw "Release host executable not found: $hostExecutable"
 	}
@@ -106,4 +106,5 @@ if (-not $NoBrowser) {
 }
 
 Write-Host 'Local cloud-gaming stack is ready.' -ForegroundColor Green
+Write-Host 'Use Reflex Desktop to start hosting. Pass -StartStandaloneHost only for legacy host testing.'
 Write-Host 'Service logs remain visible in their console windows. Close those windows to stop the stack.'

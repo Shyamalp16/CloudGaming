@@ -369,11 +369,18 @@ bool HostRuntime::Start() {
     ShutdownManager::SetShutdown(false);
     SetState(HostState::Initializing);
 
+    const auto cleanupFailedStart = [this](const std::string& fallback) {
+        auto reason = GetStatus().failureReason;
+        if (reason.empty()) reason = fallback;
+        Stop();
+        SetState(HostState::Failed, std::move(reason));
+    };
+
     if (!AcquireInstanceLock()) return false;
     try {
         if (!LoadAndValidateConfiguration()) {
             if (GetStatus().state != HostState::Failed) SetState(HostState::Failed, "Configuration failed");
-            Stop();
+            cleanupFailedStart("Configuration failed");
             return false;
         }
 
@@ -386,9 +393,9 @@ bool HostRuntime::Start() {
 			pairingCode_ = generatedPairingCode;
             hostId_ = generatedHostId;
         }
-		PrintBanner();
+        PrintBanner();
         if (!StartCoreServices()) {
-            Stop();
+            cleanupFailedStart("Host service startup failed");
             return false;
         }
 
@@ -400,7 +407,7 @@ bool HostRuntime::Start() {
     } catch (...) {
         SetState(HostState::Failed, "Unexpected exception during host startup");
     }
-    Stop();
+    cleanupFailedStart("Host startup failed");
     return false;
 }
 
@@ -486,6 +493,7 @@ void HostRuntime::ApplyMarketplaceCommand() {
         std::string active;
         { std::lock_guard lock(mutex_); active = activeSessionId_; }
         marketplace_.Send("host.hello", active, {{"state", ToString(GetStatus().state)}});
+        if (!active.empty()) nextSessionReport_ = {};
         presenceRefreshRequested_.store(true, std::memory_order_release);
         return;
     }
@@ -540,6 +548,7 @@ void HostRuntime::ApplyMarketplaceCommand() {
     sessionDurationSeconds_ = duration;
     launchDeadline_ = std::chrono::steady_clock::now() + std::chrono::minutes(3);
     sessionDeadline_ = launchDeadline_ + std::chrono::seconds(duration);
+    nextSessionReport_ = {};
     sessionConnectedReported_ = false;
     marketplace_.Send("session.launch_ack", sessionId, {}, commandId);
     SetState(HostState::Preparing);
@@ -563,6 +572,7 @@ void HostRuntime::CleanupSession(const std::string& terminalEvent, const std::st
             targetProcessName_.clear(); roomId_ = generateRoomId();
         }
         sessionDurationSeconds_ = 0;
+        nextSessionReport_ = {};
         sessionConnectedReported_ = false;
         launchDeadline_ = sessionDeadline_ = {};
         SetState(HostState::Idle);
@@ -639,7 +649,7 @@ void HostRuntime::Tick() {
                         wideTargetProcessName_ = target->processName;
                     }
                     if (AttachTarget(target->window, target->processId, WideToUtf8(target->processName)))
-                        marketplace_.Send("session.game_ready", activeSession);
+                        nextSessionReport_ = {};
                 }
                 nextTargetPoll_ = now + std::chrono::milliseconds(250);
             }
@@ -665,6 +675,16 @@ void HostRuntime::Tick() {
     invalidWindowSince_ = {};
 
     const int peerState = getPeerConnectionState();
+    if (!activeSession.empty() && !sessionConnectedReported_ && now >= nextSessionReport_) {
+        const bool peerConnected = peerState == 2 || peerState == 3;
+        const bool sent = marketplace_.Send(
+            peerConnected ? "session.stream_connected" : "session.game_ready", activeSession);
+        nextSessionReport_ = now + (sent ? std::chrono::seconds(1) : std::chrono::milliseconds(250));
+        if (peerConnected && sent) {
+            sessionConnectedReported_ = true;
+            sessionDeadline_ = now + std::chrono::seconds(sessionDurationSeconds_);
+        }
+    }
     if (peerState != lastPeerState_.load(std::memory_order_relaxed)) {
         lastPeerState_.store(peerState, std::memory_order_relaxed);
         if (peerState == 2 || peerState == 3) {
@@ -672,11 +692,6 @@ void HostRuntime::Tick() {
             // Give every newly connected decoder an immediate recovery frame.
             Encoder::RequestIDR();
             SetState(HostState::Streaming);
-            if (!activeSession.empty() && !sessionConnectedReported_) {
-                sessionConnectedReported_ = true;
-                sessionDeadline_ = now + std::chrono::seconds(sessionDurationSeconds_);
-                marketplace_.Send("session.stream_connected", activeSession);
-            }
         } else if (peerState == 1) {
             SetState(HostState::Reconnecting);
         } else if (peerState == 4 || peerState == 5 || peerState == 6) {
@@ -828,6 +843,8 @@ nlohmann::json HostRuntime::GetHealthSnapshot() const {
                    {"encodedQueueDepth", audio.encodedQueueDepth}, {"captureDrops", audio.droppedCaptureFrames},
                    {"encodedDrops", audio.droppedEncodedPackets}, {"bitrate", audio.bitrate}}},
         {"capture", {{"running", capture.running}, {"targetFps", capture.targetFps},
+                     {"measuredCaptureFps", capture.measuredCaptureFps},
+                     {"measuredEncodeFps", capture.measuredEncodeFps},
                      {"framesArrived", capture.framesArrived},
                      {"framesSelected", capture.framesSelected}, {"pacingSkips", capture.pacingSkips},
                      {"queueDepth", capture.queueDepth},

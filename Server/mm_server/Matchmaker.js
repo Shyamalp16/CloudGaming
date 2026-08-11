@@ -575,13 +575,17 @@ async function handleHostEvent(hostId, event) {
   if (!event.sessionId) return;
   const session = await loadSession(event.sessionId);
   if (!session || session.hostId !== hostId || ['ended', 'failed'].includes(session.state)) return;
-  if (event.type === 'session.launch_ack') session.state = 'preparing';
-  if (event.type === 'session.game_ready') {
+  if (event.type === 'session.launch_ack' && ['reserved', 'preparing'].includes(session.state))
+    session.state = 'preparing';
+  if (event.type === 'session.game_ready' && ['reserved', 'preparing'].includes(session.state)) {
     session.state = 'ready';
     marketMetrics.observeReady(Math.max(0, (Date.now() - session.createdAt) / 1000));
     await redisClient.zRem(redisKey('market:session-prepare-deadlines'), session.id);
   }
-  if (event.type === 'session.stream_connected') {
+  if (
+    event.type === 'session.stream_connected' &&
+    ['reserved', 'preparing', 'ready'].includes(session.state)
+  ) {
     session.state = 'active';
     session.startsAt = Date.now();
     session.endsAt = session.startsAt + session.durationSeconds * 1000;
@@ -658,15 +662,25 @@ app.get('/api/v1/games', async (_req, res) => {
     const multi = redisClient.multi();
     ids.forEach((id) => multi.get(redisKey(`market:game:${id}`)));
     const metadata = await multi.exec();
+    const staleMemberships = [];
     const games = ids.flatMap((id, index) => {
       if (!metadata[index]) return [];
       const availableHosts = memberships[index].filter((hostId) => {
         const host = presence.get(hostId);
-        return host?.state === 'idle' && controlGateway.connected(hostId);
+        const offering = host?.games?.some((game) => game.id === id && game.enabled);
+        if (!host || !offering) staleMemberships.push({ id, hostId });
+        return Boolean(offering) && host.state === 'idle' && controlGateway.connected(hostId);
       }).length;
       const game = JSON.parse(metadata[index]);
       return [{ id: game.id, source: game.source, title: game.title, availableHosts }];
     });
+    if (staleMemberships.length) {
+      const cleanup = redisClient.multi();
+      staleMemberships.forEach(({ id, hostId }) =>
+        cleanup.sRem(`${gameHostsPrefix()}${id}`, hostId),
+      );
+      await cleanup.exec();
+    }
     res.json({ games: games.sort((a, b) => a.title.localeCompare(b.title)) });
   } catch (error) {
     log('error', 'Game catalog lookup failed', { error: safeError(error) });

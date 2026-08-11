@@ -11,6 +11,8 @@ class StreamProfileManager;
 struct CaptureHealth {
     bool running = false;
     int targetFps = 0;
+    double measuredCaptureFps = 0.0;
+    double measuredEncodeFps = 0.0;
     std::uint64_t framesArrived = 0;
     std::uint64_t framesSelected = 0;
     std::uint64_t pacingSkips = 0;

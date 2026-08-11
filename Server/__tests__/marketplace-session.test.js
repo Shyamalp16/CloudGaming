@@ -156,6 +156,24 @@ describe('unattended marketplace session', () => {
         hostSecret,
       );
       expect(presence.status).toBe(200);
+      const staleGame = {
+        id: 'manual:stale-game',
+        source: 'manual',
+        title: 'Stale game',
+        localManifestId: 'manual-stale-game',
+        enabled: true,
+      };
+      await redis.sAdd(`${prefix}market:games`, staleGame.id);
+      await redis.set(`${prefix}market:game:${staleGame.id}`, JSON.stringify(staleGame));
+      await redis.sAdd(`${prefix}market:idle-hosts:game:${staleGame.id}`, hostId);
+      const staleCatalogResponse = await request(port, '/api/v1/games');
+      const staleCatalog = await staleCatalogResponse.json();
+      expect(staleCatalog.games.find((game) => game.id === staleGame.id)).toMatchObject({
+        availableHosts: 0,
+      });
+      expect(
+        Boolean(await redis.sIsMember(`${prefix}market:idle-hosts:game:${staleGame.id}`, hostId)),
+      ).toBe(false);
       const backupPresence = await request(
         port,
         '/api/v1/host/presence',
@@ -308,6 +326,16 @@ describe('unattended marketplace session', () => {
         const response = await request(port, `/api/v1/sessions/${secondSession.id}`);
         return (await response.json()).session?.state === 'active';
       });
+      ws.send(
+        JSON.stringify({
+          type: 'session.game_ready',
+          sessionId: secondSession.id,
+          payload: {},
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const afterDuplicateReady = await request(port, `/api/v1/sessions/${secondSession.id}`);
+      expect((await afterDuplicateReady.json()).session?.state).toBe('active');
       ws.close();
       await new Promise((resolve) => setTimeout(resolve, 100));
       const readyMessages = messages.filter((message) => message.type === 'control.ready').length;

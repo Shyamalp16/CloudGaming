@@ -5,11 +5,21 @@
 #include <algorithm>
 #include <cwctype>
 
+#include "Diagnostics.h"
+
 namespace {
 std::wstring Lower(std::wstring value) {
     std::transform(value.begin(), value.end(), value.begin(),
         [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
     return value;
+}
+
+std::filesystem::path SteamExecutable() {
+    wchar_t value[32768]{};
+    DWORD bytes = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath",
+                     RRF_RT_REG_SZ, nullptr, value, &bytes) != ERROR_SUCCESS) return {};
+    return std::filesystem::path(value) / L"Steam.exe";
 }
 }
 
@@ -25,14 +35,29 @@ bool GameLauncher::Start(const GameInventory::Game& game, std::string& error) {
     if (job_) SetInformationJobObject(job_, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
 
     if (game.source == "steam") {
-        const auto uri = L"steam://rungameid/" + game.launchTarget.wstring();
-        if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", uri.c_str(), nullptr, nullptr,
-                                                    SW_SHOWNORMAL)) <= 32) {
-            error = "Steam rejected the launch request"; Stop(); return false;
+        const auto steam = SteamExecutable();
+        if (!std::filesystem::is_regular_file(steam)) {
+            error = "Steam.exe was not found"; Stop(); return false;
         }
+        const auto parameters = L"-applaunch " + game.launchTarget.wstring();
+        SHELLEXECUTEINFOW launch{sizeof(launch)};
+        launch.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+        launch.lpVerb = L"open";
+        launch.lpFile = steam.c_str();
+        launch.lpParameters = parameters.c_str();
+        launch.lpDirectory = steam.parent_path().c_str();
+        launch.nShow = SW_SHOWNORMAL;
+        if (!ShellExecuteExW(&launch)) {
+            error = "Steam rejected the launch request: " + std::to_string(GetLastError());
+            Stop(); return false;
+        }
+        if (launch.hProcess) CloseHandle(launch.hProcess);
+        Diagnostics::Log("INFO", "GAME", "Launching Steam offering through Steam client", game.id);
         return true;
     }
 
+    Diagnostics::Log("INFO", "GAME", "Launching manual executable directly",
+                     game.launchTarget.string());
     std::wstring command = L"\"" + game.launchTarget.wstring() + L"\"";
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION process{};

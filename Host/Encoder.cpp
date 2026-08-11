@@ -21,6 +21,7 @@ extern "C" {
 #include <list>
 #include <algorithm>  // std::find_if
 #include <atomic>
+#include <limits>
 #include <cmath>  // For std::abs in UpdatePacingFromTimestamp
 #include <avrt.h>
 #pragma comment(lib, "Avrt.lib")
@@ -166,6 +167,7 @@ static int g_decreaseCooldownMs = 1000;      // ms — 500–1000ms for WAN; 5s 
 static int g_cleanSamplesRequired = 3;
 static int g_increaseIntervalMs = 1000;      // ms
 static std::atomic<int> g_currentBitrate{8000000}; // active target bitrate (WAN-friendly)
+static std::atomic<int> g_profileBitrateCeiling{std::numeric_limits<int>::max()};
 static std::atomic<uint64_t> g_bitrateGeneration{0};
 static std::atomic<uint64_t> g_appliedBitrateGeneration{0};
 static int g_cleanSamples = 0;
@@ -810,6 +812,14 @@ namespace Encoder {
         g_currentBitrate.store(std::clamp(g_currentBitrate.load(), g_minBitrateBps, g_maxBitrateBps));
     }
 
+    void SetProfileBitrateCeiling(int max_bps) {
+        const int ceiling = max_bps > 0 ? max_bps : std::numeric_limits<int>::max();
+        g_profileBitrateCeiling.store(ceiling, std::memory_order_release);
+        // Apply a newly lowered ceiling immediately. AdjustBitrate performs the
+        // encoder-boundary reconfiguration without mutating an active codec.
+        AdjustBitrate(g_currentBitrate.load(std::memory_order_acquire));
+    }
+
     void ConfigureBitrateController(int min_bps,
                                     int max_bps,
                                     int increase_step_bps,
@@ -862,7 +872,9 @@ namespace Encoder {
         if (since >= increaseInterval && g_cleanSamples >= requiredSamples) {
             int step = isLocalhost ? (g_increaseStep * 2) : g_increaseStep;
             int target = g_currentBitrate.load(std::memory_order_acquire) + step;
-            int effectiveMax = g_maxBitrateController;
+            int effectiveMax = std::min(
+                g_maxBitrateController,
+                g_profileBitrateCeiling.load(std::memory_order_acquire));
 
             // Don't exceed the congestion ceiling if one is set
             if (g_congestionCeiling > 0 && g_congestionCeiling < effectiveMax) {
@@ -975,9 +987,14 @@ namespace Encoder {
         codecCtx->gop_size = fps * 2; // IDR every ~2 seconds: balances compression efficiency with low latency
         codecCtx->max_b_frames = 0; // low-latency
         codecCtx->bit_rate = targetBitrate;
-        // Initialize VBV for low-latency: use 1x bitrate for stricter latency control
+        // A one-second VBV (`bufsize = bitrate`) lets the encoder accumulate an
+        // entire second before rate control must release it. Cloud gaming needs
+        // a single-frame VBV so latency stays bounded by the frame cadence.
+        const int64_t frameBudgetBits = std::max<int64_t>(
+            codecCtx->bit_rate / std::max(1, fps), 64 * 1024);
         codecCtx->rc_max_rate = codecCtx->bit_rate;
-        codecCtx->rc_buffer_size = static_cast<int>(std::min<int64_t>(codecCtx->bit_rate, INT_MAX));
+        codecCtx->rc_buffer_size = static_cast<int>(std::min<int64_t>(frameBudgetBits, INT_MAX));
+        codecCtx->rc_initial_buffer_occupancy = codecCtx->rc_buffer_size;
 
         // Desktop capture content uses the sRGB transfer function (IEC 61966-2-1, gamma ~2.2
         // with linear ramp), NOT the BT.709 camera transfer (~2.0 pure power curve).
@@ -1057,6 +1074,8 @@ namespace Encoder {
             // Low-latency, faster preset configurable
             av_dict_set(&opts, "preset", g_nvPreset.c_str(), 0); // e.g. p4/p5
             av_dict_set(&opts, "tune", "ull", 0);
+            av_dict_set(&opts, "zerolatency", "1", 0);
+            av_dict_set(&opts, "delay", "0", 0);
             av_dict_set(&opts, "rc", g_nvRc.c_str(), 0);         // cbr/cbr_hq
             av_dict_set(&opts, "repeat-headers", "1", 0);
             // FFmpeg's forced I-frame request is only guaranteed to become an
@@ -1087,13 +1106,16 @@ namespace Encoder {
                 snprintf(buf, sizeof(buf), "%d", g_nvSurfaces);
                 av_dict_set(&opts, "surfaces", buf, 0);
             }
-            // Tighter VBV for low-latency: use 1x bitrate to minimize buffering
+            // Match NVENC's private rate-control options to the single-frame
+            // AVCodecContext VBV. ldkfs permits larger keyframes without
+            // silently expanding that buffer.
             char rateBuf[32];
             char buf2[32];
             snprintf(rateBuf, sizeof(rateBuf), "%lld", static_cast<long long>(codecCtx->bit_rate));
-            snprintf(buf2, sizeof(buf2), "%lld", static_cast<long long>(codecCtx->bit_rate));
+            snprintf(buf2, sizeof(buf2), "%d", codecCtx->rc_buffer_size);
             av_dict_set(&opts, "maxrate", rateBuf, 0);
             av_dict_set(&opts, "bufsize", buf2, 0);
+            av_dict_set(&opts, "ldkfs", "255", 0);
             // Color metadata in H.264 SPS VUI: primaries/matrix = BT.709, transfer = sRGB
             av_dict_set(&opts, "colorspace", "bt709", 0);
             av_dict_set(&opts, "color_primaries", "bt709", 0);
@@ -1152,7 +1174,8 @@ namespace Encoder {
             std::wcout << L"[Encoder]   - Preset: " << std::wstring(g_nvPreset.begin(), g_nvPreset.end()) << L" (optimized for speed)" << std::endl;
             std::wcout << L"[Encoder]   - Async Depth: " << g_nvAsyncDepth << L" (minimal internal buffering)" << std::endl;
             std::wcout << L"[Encoder]   - Surfaces: " << g_nvSurfaces << L" (async_depth + 1 for optimal throughput)" << std::endl;
-            std::wcout << L"[Encoder]   - VBV Buffer: " << (codecCtx->rc_buffer_size / 1000) << L"kb (1x bitrate for strict latency)" << std::endl;
+            std::wcout << L"[Encoder]   - VBV Buffer: " << (codecCtx->rc_buffer_size / 1000)
+                       << L"kb (single-frame low-latency budget)" << std::endl;
             std::wcout << L"[Encoder]   - B-frames: " << codecCtx->max_b_frames << L" (disabled for low latency)" << std::endl;
             std::wcout << L"[Encoder]   - GOP Size: " << codecCtx->gop_size << L" frames (IDR every ~" << (codecCtx->gop_size / fps) << L"s)" << std::endl;
 
@@ -1221,7 +1244,10 @@ namespace Encoder {
     }
 
     void AdjustBitrate(int new_bitrate) {
-        const int clamped = std::clamp(new_bitrate, g_minBitrateBps, g_maxBitrateBps);
+        const int effectiveMax = std::max(
+            g_minBitrateBps,
+            std::min(g_maxBitrateBps, g_profileBitrateCeiling.load(std::memory_order_acquire)));
+        const int clamped = std::clamp(new_bitrate, g_minBitrateBps, effectiveMax);
         const int previous = g_currentBitrate.exchange(clamped, std::memory_order_acq_rel);
         if (previous == clamped) return;
 

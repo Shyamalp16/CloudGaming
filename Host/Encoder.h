@@ -30,6 +30,9 @@ namespace Encoder {
     // Configure encoder bitrate defaults (used on InitializeEncoder)
     void SetBitrateConfig(int start_bitrate_bps, int min_bitrate_bps, int max_bitrate_bps);
     void SetBitrateLimits(int min_bitrate_bps, int max_bitrate_bps);
+    // Caps adaptive increases at the bitrate selected by the active player
+    // profile. Passing a non-positive value removes the per-profile ceiling.
+    void SetProfileBitrateCeiling(int max_bitrate_bps);
 
     // Configure hardware frame pool size (ring of input D3D11 frames)
     void SetHwFramePoolSize(int pool_size);
