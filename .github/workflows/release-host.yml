@@ -55,7 +55,7 @@ jobs:
           $msi = ".\Installer\bin\x64\Release\CloudGamingHost-$env:RELEASE_VERSION-x64.msi"
           .\packaging\New-UpdateManifest.ps1 -Version $env:RELEASE_VERSION -InstallerPath $msi -DownloadUrl $env:DOWNLOAD_URL -Channel $env:RELEASE_CHANNEL
           .\packaging\Sign-UpdateManifest.ps1 -ManifestPath .\artifacts\update-manifest.json -CertificateThumbprint $env:SIGNING_CERT_THUMBPRINT
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: CloudGamingHost-${{ inputs.version }}-x64
           if-no-files-found: error
