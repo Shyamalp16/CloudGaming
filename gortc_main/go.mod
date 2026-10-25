@@ -7,7 +7,7 @@ toolchain go1.26.5
 require (
 	github.com/pion/interceptor v0.1.47
 	github.com/pion/rtcp v1.2.17
-	github.com/pion/rtp v1.10.5
+	github.com/pion/rtp v1.10.6
 	github.com/pion/webrtc/v4 v4.2.18
 )
 
